@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 WuwaTFR contributors
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Verify and publish tagged release
+    runs-on: windows-2025
+
+    steps:
+      - name: Check out the tagged revision cleanly
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          clean: true
+          fetch-depth: 0
+
+      - name: Configure, test, build, and package
+        shell: pwsh
+        run: ./build_windows.ps1
+
+      - name: Publish the verified Production package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $archive = "WuwaTFR-$env:GITHUB_REF_NAME.zip"
+          Compress-Archive -Path 'dist/release/*' -DestinationPath $archive -Force
+          gh release create $env:GITHUB_REF_NAME $archive --verify-tag `
+            --title "WuwaTFR $env:GITHUB_REF_NAME" --generate-notes
