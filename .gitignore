@@ -1,0 +1,40 @@
+# Build outputs
+/build/
+/build-*/
+/out/
+/dist/
+/_deps/
+
+*.addon64
+*.dll
+*.exe
+*.lib
+*.exp
+*.pdb
+*.obj
+*.ilk
+*.idb
+*.tlog
+*.recipe
+
+# CMake / Visual Studio
+/.vs/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+compile_commands.json
+*.sln
+*.slnx
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.VC.db
+*.VC.opendb
+
+# Local files
+*.log
+*.tmp
+*.bak
+Thumbs.db
+.DS_Store

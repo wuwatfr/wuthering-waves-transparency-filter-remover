@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 WuwaTFR contributors
+
+#include "target_dither_bypass.hpp"
+
+#include "test_check.hpp"
+#include <string>
+#include <string_view>
+
+int main() {
+  const auto make_ir = [](std::string_view phi) {
+    return std::string(R"(
+@DITHER_THRESHOLDS_GLOBAL = external constant [9 x float]
+%threshold = getelementptr inbounds [9 x float], [9 x float]* @DITHER_THRESHOLDS_GLOBAL, i32 0, i32 %index
+)") + std::string(phi) + R"(
+%kill = fcmp fast olt float %score, 0.000000e+00
+call void @dx.op.discard(i32 82, i1 %kill)
+)";
+  };
+
+  const auto expect_patched = [&](std::string_view phi) {
+    const auto patched = wuwa_tfr::PatchSelectedTargetDitherToIdentity(
+        make_ir(phi));
+    CHECK(patched.success);
+    CHECK(patched.structural_verification_succeeded);
+    CHECK(patched.ir_patch_succeeded);
+    CHECK(patched.llvm_ir.find(
+        "%dither_factor = fadd fast float 1.000000e+00, 0.000000e+00") !=
+        std::string::npos);
+    CHECK(patched.llvm_ir.find("call void @dx.op.discard(i32 82, i1 %kill)") !=
+        std::string::npos);
+  };
+
+  // Unindented, two-space indented, and mixed leading whitespace all parse
+  // identically; replacement preserves the original leading whitespace.
+  expect_patched(
+      "%dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]");
+  expect_patched(
+      "  %dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]");
+  expect_patched(
+      "\t \t%dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]");
+
+  // The exact real target phi shape is accepted after semantic trimming.
+  const auto real_shape = wuwa_tfr::PatchSelectedTargetDitherToIdentity(make_ir(
+      "  %1302 = phi float [ %1300, %1285 ], [ 1.000000e+00, %1279 ]"));
+  CHECK(real_shape.success);
+  CHECK(real_shape.structural_verification_succeeded);
+  CHECK(real_shape.ir_patch_succeeded);
+  CHECK(real_shape.llvm_ir.find(
+      "  %1302 = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      std::string::npos);
+
+  // A non-SSA line retains the dither-like text but must fail verification.
+  const auto rejected = wuwa_tfr::PatchSelectedTargetDitherToIdentity(
+      make_ir("not_ssa = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]"));
+  CHECK(!rejected.success);
+  CHECK(!rejected.structural_verification_succeeded);
+  CHECK(!rejected.ir_patch_succeeded);
+
+  const auto make_dual_ir = [] {
+    return std::string(R"(
+@DITHER_THRESHOLDS_GLOBAL = external constant [9 x float]
+%threshold1 = getelementptr inbounds [9 x float], [9 x float]* @DITHER_THRESHOLDS_GLOBAL, i32 0, i32 %index1
+%first_load = load float, float* %threshold1
+%first_computed = fadd fast float %first_load, 0.000000e+00
+%unrelated_identity = phi float [ %unrelated_value, %unrelated_enabled ], [ 1.000000e+00, %unrelated_disabled ]
+  %first_stage = phi float [ %first_computed, %first_enabled ], [ 1.000000e+00, %first_disabled ]
+%threshold2 = getelementptr inbounds [9 x float], [9 x float]* @DITHER_THRESHOLDS_GLOBAL, i32 0, i32 %index2
+%second_load = load float, float* %threshold2
+%second_computed = fadd fast float %second_load, 0.000000e+00
+  %second_stage = phi float [ %second_computed, %second_enabled ], [ 1.000000e+00, %second_disabled ]
+%kill = fcmp fast olt float %score, 0.000000e+00
+call void @dx.op.discard(i32 82, i1 %kill)
+)");
+  };
+  const auto dual = wuwa_tfr::PatchSelectedDualDitherStagesToIdentity(
+      make_dual_ir());
+  CHECK(dual.success);
+  CHECK(dual.structural_verification_succeeded);
+  CHECK(dual.ir_patch_succeeded);
+  CHECK(dual.stage1_structural_verification_succeeded);
+  CHECK(dual.stage1_ir_patch_succeeded);
+  CHECK(dual.stage2_structural_verification_succeeded);
+  CHECK(dual.stage2_ir_patch_succeeded);
+  CHECK(dual.llvm_ir.find(
+      "  %first_stage = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      std::string::npos);
+  CHECK(dual.llvm_ir.find(
+      "  %second_stage = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      std::string::npos);
+
+  // The special experiment is fail-closed: one or three threshold stages is
+  // not accepted as its required exactly-two-stage structure.
+  const auto missing_stage = wuwa_tfr::PatchSelectedDualDitherStagesToIdentity(
+      make_ir("%dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]"));
+  CHECK(!missing_stage.success);
+  CHECK(!missing_stage.stage1_structural_verification_succeeded);
+  CHECK(!missing_stage.stage2_structural_verification_succeeded);
+
+  const std::string all_instances_ir = R"(
+; SV_Position              0   xyzw
+@thresholds = internal constant [9 x float] zeroinitializer
+%x = call float @dx.op.loadInput.f32(i32 4, i32 0, i32 0, i8 0, i32 undef)
+%y = call float @dx.op.loadInput.f32(i32 4, i32 0, i32 0, i8 1, i32 undef)
+%cb0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb, i32 7)
+%g0 = extractvalue %dx.types.CBufRet.f32 %cb0, 1
+%c0 = fcmp fast ogt float %g0, 0.000000e+00
+br i1 %c0, label %on0, label %merge0
+; <label>:on0
+%xi0 = fptosi float %x to i32
+%yi0 = fptosi float %y to i32
+%mx0 = srem i32 %xi0, 3
+%my0 = srem i32 %yi0, 3
+%row0 = mul nsw i32 %mx0, 3
+%index0 = add nsw i32 %row0, %my0
+%ptr0 = getelementptr inbounds [9 x float], [9 x float]* @thresholds, i32 0, i32 %index0
+%threshold0 = load float, float* %ptr0, align 4
+%twice0 = fmul fast float %coverage0, 2.000000e+00
+%sub0 = fsub fast float %twice0, %threshold0
+%lo0 = call float @dx.op.binary.f32(i32 35, float %sub0, float 0.000000e+00)  ; FMax(a,b)
+%hi0 = call float @dx.op.binary.f32(i32 36, float %lo0, float 1.000000e+00)  ; FMin(a,b)
+%computed0 = fadd fast float %hi0, 0x3FD50F9F00000000
+br label %merge0
+; <label>:merge0
+%d0 = phi float [ %computed0, %on0 ], [ 1.000000e+00, %entry0 ]
+%cb1 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb, i32 8)
+%g1 = extractvalue %dx.types.CBufRet.f32 %cb1, 1
+%c1 = fcmp fast ogt float %g1, 0.000000e+00
+br i1 %c1, label %on1, label %merge1
+; <label>:on1
+%xi1 = fptosi float %x to i32
+%yi1 = fptosi float %y to i32
+%mx1 = srem i32 %xi1, 3
+%my1 = srem i32 %yi1, 3
+%row1 = mul nsw i32 %mx1, 3
+%index1 = add nsw i32 %row1, %my1
+%ptr1 = getelementptr inbounds [9 x float], [9 x float]* @thresholds, i32 0, i32 %index1
+%threshold1 = load float, float* %ptr1, align 4
+%twice1 = fmul fast float %coverage1, 2.000000e+00
+%sub1 = fsub fast float %twice1, %threshold1
+%lo1 = call float @dx.op.binary.f32(i32 35, float %sub1, float 0.000000e+00)  ; FMax(a,b)
+%hi1 = call float @dx.op.binary.f32(i32 36, float %lo1, float 1.000000e+00)  ; FMin(a,b)
+%computed1 = fadd fast float %hi1, 0x3FD50F9F00000000
+br label %merge1
+; <label>:merge1
+%d1 = phi float [ %computed1, %on1 ], [ 1.000000e+00, %entry1 ]
+%alpha = fmul fast float %d0, %opacity
+call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %alpha)  ; SV_Target
+%kill = fcmp fast olt float %d1, 0.000000e+00
+call void @dx.op.discard(i32 82, i1 %kill)
+)";
+  const auto all_instances =
+      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+          all_instances_ir);
+  CHECK(all_instances.success);
+  CHECK(all_instances.structural_verification_succeeded);
+  CHECK(all_instances.ir_patch_succeeded);
+  CHECK(all_instances.verified_instance_count == 2);
+  CHECK(all_instances.patched_instance_count == 2);
+  CHECK(all_instances.llvm_ir.find(
+      "%d0 = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      std::string::npos);
+  CHECK(all_instances.llvm_ir.find(
+      "%d1 = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      std::string::npos);
+  return 0;
+}
