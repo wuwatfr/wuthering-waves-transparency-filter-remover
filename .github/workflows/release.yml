@@ -34,5 +34,13 @@ jobs:
         run: |
           $archive = "WuwaTFR-$env:GITHUB_REF_NAME.zip"
           Compress-Archive -Path 'dist/release/*' -DestinationPath $archive -Force
-          gh release create $env:GITHUB_REF_NAME $archive --verify-tag `
-            --title "WuwaTFR $env:GITHUB_REF_NAME" --generate-notes
+          $releaseArguments = @(
+            'release', 'create', $env:GITHUB_REF_NAME, $archive,
+            '--verify-tag', '--title', "WuwaTFR $env:GITHUB_REF_NAME",
+            '--generate-notes'
+          )
+          if ($env:GITHUB_REF_NAME -match '^v\d+\.\d+\.\d+-') {
+            $releaseArguments += '--prerelease'
+          }
+          & gh @releaseArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

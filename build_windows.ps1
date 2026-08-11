@@ -69,8 +69,9 @@ New-Item -ItemType Directory -Force -Path $deps | Out-Null
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force -Path $dist, $distRelease, $distDev | Out-Null
 
-# Pin DXC and Dear ImGui. ReShade headers are still taken from main for the current add-on API.
-$reshadeUrl = 'https://github.com/crosire/reshade/archive/refs/heads/main.zip'
+# Pin all build-time dependencies, including the ReShade add-on API headers.
+$reshadeRevision = 'aae2b7ecc18096ccddca2c073b50727541220292'
+$reshadeUrl = "https://github.com/crosire/reshade/archive/$reshadeRevision.zip"
 $dxcSourceUrl = 'https://github.com/microsoft/DirectXShaderCompiler/archive/refs/tags/v1.9.2602.24.zip'
 $dxcBinaryUrl = 'https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2602.24/dxc_2026_05_27.zip'
 $imguiUrl = 'https://github.com/ocornut/imgui/archive/refs/tags/v1.92.5-docking.zip'

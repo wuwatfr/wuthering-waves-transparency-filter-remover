@@ -3756,7 +3756,7 @@ void DrawFadePrimitiveTargetModes() {
     return;
 
   bool enabled = g_target_bypass_enabled.load(std::memory_order_relaxed);
-  if (ImGui::Checkbox("Remove transparency filter", &enabled))
+  if (ImGui::Checkbox("Remove Transparency Filter", &enabled))
     g_target_bypass_enabled.store(enabled, std::memory_order_relaxed);
 
   TargetBypassMode mode = g_target_bypass_mode.load(
@@ -4705,7 +4705,7 @@ void DrawOverlay(effect_runtime*) {
 #else
   ImGui::TextUnformatted("Automatic verified transparency-filter matching");
   bool antifade_enabled = g_public_antifade_runtime.enabled();
-  if (ImGui::Checkbox("Remove transparency filter", &antifade_enabled)) {
+  if (ImGui::Checkbox("Remove Transparency Filter", &antifade_enabled)) {
     g_public_antifade_runtime.set_enabled(antifade_enabled);
     SaveConfigFlag(L"EnableTFR", antifade_enabled);
   }
