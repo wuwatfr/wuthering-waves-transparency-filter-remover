@@ -108,6 +108,7 @@ struct FadePrimitiveRuntime::Impl {
   std::mutex preparation_mutex;
   std::unordered_map<std::uint64_t, PreparedShader> prepared;
   std::unique_ptr<DxcBridge> dxc;
+  std::filesystem::path dxc_runtime_directory;
   std::atomic<std::uint32_t> device_count{0};
   DeviceActivityState<DeviceId> activity;
   PipelineReplacementState<DeviceId, pipeline> replacements;
@@ -125,7 +126,8 @@ struct FadePrimitiveRuntime::Impl {
       return entry->second.bytecode;
     PreparedShader state;
     state.attempted = true;
-    if (!dxc) dxc = std::make_unique<DxcBridge>();
+    if (!dxc)
+      dxc = std::make_unique<DxcBridge>(dxc_runtime_directory);
     if (!dxc->available()) {
       state.failure = dxc->init_error();
     } else {
@@ -168,6 +170,11 @@ struct FadePrimitiveRuntime::Impl {
 
 FadePrimitiveRuntime::FadePrimitiveRuntime() : impl_(new Impl()) {}
 FadePrimitiveRuntime::~FadePrimitiveRuntime() { delete impl_; }
+
+void FadePrimitiveRuntime::set_dxc_runtime_directory(
+    std::filesystem::path addon_directory) {
+  impl_->dxc_runtime_directory = std::move(addon_directory);
+}
 
 void FadePrimitiveRuntime::OnInitDevice(device* owner) {
   if (!owner || owner->get_api() != device_api::d3d12) return;

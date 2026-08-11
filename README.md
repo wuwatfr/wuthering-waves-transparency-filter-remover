@@ -50,13 +50,12 @@ The Production package contains these required runtime files:
 
 - `WuwaTFR.addon64`
 - `WuwaTFR.ini`
-- `dxcompiler.dll`
-- `dxil.dll`
+- `WuwaTFR.dxcompiler.dll`
 
-Place `WuwaTFR.addon64` in the location from which your ReShade installation
-loads add-ons. The DXC bridge loads `dxcompiler.dll` from the Wuthering Waves
-game executable directory; `dxil.dll` and `WuwaTFR.ini` must also be placed in
-that directory. Copying only `WuwaTFR.addon64` is insufficient.
+Keep these runtime files together in the directory from which ReShade loads
+`WuwaTFR.addon64`. ReShade's `AddonPath` may be customized; the add-on does
+not need to be beside the Wuthering Waves executable. Copying only
+`WuwaTFR.addon64` is insufficient.
 
 The package also includes `LICENSE`, `NOTICE`, and the DXC runtime license
 files described in [Third-Party Software](#third-party-software).
@@ -115,7 +114,8 @@ GPLv3, including corresponding-source obligations where applicable.
 - **ReShade API** — BSD 3-Clause license. Its complete required notice is in
   [`NOTICE`](NOTICE).
 - **Microsoft DirectX Shader Compiler runtime** — the build script packages
-  `dxcompiler.dll` and `dxil.dll` from the official
+  the pinned official `dxcompiler.dll` as `WuwaTFR.dxcompiler.dll` from the
+  official
   `v1.9.2602.24` redistributable. Its release notes identify
   `LICENSE-LLVM.txt` as applying to all archive files other than
   `d3d12shader.h`. To retain the complete accompanying upstream materials, the

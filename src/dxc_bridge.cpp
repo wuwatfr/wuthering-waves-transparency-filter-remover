@@ -203,12 +203,18 @@ static bool AssembleDxil(
   return true;
 }
 
-DxcBridge::DxcBridge() : impl_(new Impl) {
-  wchar_t exe_path[MAX_PATH]{};
-  std::filesystem::path compiler_path = L"dxcompiler.dll";
-  if (GetModuleFileNameW(nullptr, exe_path, MAX_PATH)) {
-    compiler_path =
-        std::filesystem::path(exe_path).parent_path() / L"dxcompiler.dll";
+DxcBridge::DxcBridge(const std::filesystem::path& addon_directory)
+    : impl_(new Impl) {
+  if (addon_directory.empty()) {
+    init_error_ = "WuwaTFR add-on directory is unavailable";
+    return;
+  }
+
+  const auto compiler_path = addon_directory / L"WuwaTFR.dxcompiler.dll";
+  if (GetFileAttributesW(compiler_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    init_error_ = "WuwaTFR private DXC runtime is missing: " +
+        compiler_path.string();
+    return;
   }
 
   impl_->module = LoadLibraryExW(

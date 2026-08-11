@@ -6,6 +6,8 @@
 #ifdef _WIN32
 #include <reshade.hpp>
 
+#include <filesystem>
+
 namespace wuwa_tfr {
 
 // Production runtime for the fully verified fade primitive. It intentionally
@@ -27,6 +29,8 @@ class FadePrimitiveRuntime {
       reshade::api::pipeline pipeline);
   void OnBindPipeline(reshade::api::command_list* command_list,
       reshade::api::pipeline_stage stages, reshade::api::pipeline pipeline);
+  // Set during add-on initialization, before ReShade registers callbacks.
+  void set_dxc_runtime_directory(std::filesystem::path addon_directory);
   bool enabled() const;
   void set_enabled(bool enabled);
 

@@ -185,15 +185,8 @@ $dxcompiler = Get-ChildItem -Path $dxcBinaryRoot -Recurse -Filter 'dxcompiler.dl
     Where-Object { $_.FullName -match '[\\/]x64[\\/]' } | Select-Object -First 1
 if (-not $dxcompiler) { Fail 'Could not find the x64 dxcompiler.dll in the official DXC package.' }
 Write-Host "DXC runtime x64: $($dxcompiler.FullName)"
-Copy-Item $dxcompiler.FullName (Join-Path $distRelease 'dxcompiler.dll') -Force
-Copy-Item $dxcompiler.FullName (Join-Path $distDev 'dxcompiler.dll') -Force
-
-$dxil = Get-ChildItem -Path $dxcBinaryRoot -Recurse -Filter 'dxil.dll' -File |
-    Where-Object { $_.FullName -match '[\\/]x64[\\/]' } | Select-Object -First 1
-if (-not $dxil) { Fail 'Could not find the x64 dxil.dll in the official DXC package.' }
-Write-Host "DXIL runtime x64: $($dxil.FullName)"
-Copy-Item $dxil.FullName (Join-Path $distRelease 'dxil.dll') -Force
-Copy-Item $dxil.FullName (Join-Path $distDev 'dxil.dll') -Force
+Copy-Item $dxcompiler.FullName (Join-Path $distRelease 'WuwaTFR.dxcompiler.dll') -Force
+Copy-Item $dxcompiler.FullName (Join-Path $distDev 'WuwaTFR.dxcompiler.dll') -Force
 # Preserve the exact upstream license materials that accompany the DXC runtime.
 foreach ($licenseName in @('LICENSE-LLVM.txt', 'LICENSE-MIT.txt', 'LICENSE-MS.txt')) {
     $licensePath = Join-Path $dxcBinaryRoot $licenseName
@@ -212,8 +205,8 @@ Install only one folder at a time:
   dist\dev      = developer diagnostics build
 
 The public release asset is the production add-on in dist\release together
-with dxcompiler.dll and dxil.dll. Developer diagnostics are not normal user
-features and are not part of the release package.
+with WuwaTFR.ini and WuwaTFR.dxcompiler.dll. Developer diagnostics are not
+normal user features and are not part of the release package.
 '@ | Set-Content -Encoding UTF8 (Join-Path $distDev 'FIRST_TEST.txt')
 
 Write-Host ''

@@ -512,6 +512,7 @@ bool g_target_process = false;
 bool g_diagnostic = false;
 bool g_dump = false;
 std::filesystem::path g_dump_path;
+std::filesystem::path g_addon_directory;
 #if !WUWA_TFR_DEVTOOLS
 wuwa_tfr::FadePrimitiveRuntime g_public_antifade_runtime;
 #endif
@@ -730,9 +731,21 @@ bool EnvFlag(const wchar_t* name) {
 }
 
 std::filesystem::path ConfigPath() {
-  wchar_t executable_path[MAX_PATH]{};
-  if (!GetModuleFileNameW(nullptr, executable_path, MAX_PATH)) return {};
-  return std::filesystem::path(executable_path).parent_path() / L"WuwaTFR.ini";
+  if (g_addon_directory.empty()) return {};
+  return g_addon_directory / L"WuwaTFR.ini";
+}
+
+bool ResolveAddonDirectory(HMODULE module) {
+  wchar_t module_path[MAX_PATH]{};
+  const DWORD length = GetModuleFileNameW(
+      module, module_path, static_cast<DWORD>(std::size(module_path)));
+  if (length == 0 || length >= std::size(module_path)) return false;
+
+  const auto directory =
+      std::filesystem::path(module_path, module_path + length).parent_path();
+  if (directory.empty()) return false;
+  g_addon_directory = directory;
+  return true;
 }
 
 bool ConfigFlag(const wchar_t* key, bool fallback) {
@@ -906,7 +919,7 @@ void InspectPixelShader(const shader_desc& descriptor) {
   InspectionRecord record;
   record.bytecode_size = descriptor.code_size;
 
-  if (!g_dxc) g_dxc = new wuwa_tfr::DxcBridge();
+  if (!g_dxc) g_dxc = new wuwa_tfr::DxcBridge(g_addon_directory);
   if (!g_dxc->available()) {
     record.error = g_dxc->init_error();
     g_disassembly_failures.fetch_add(1, std::memory_order_relaxed);
@@ -1432,7 +1445,7 @@ GetTargetBypassBytecode(
   g_target_bypass_bytecode_hash = target_hash;
 
   std::lock_guard inspection_lock(g_inspection_mutex);
-  if (!g_dxc) g_dxc = new wuwa_tfr::DxcBridge();
+  if (!g_dxc) g_dxc = new wuwa_tfr::DxcBridge(g_addon_directory);
   if (!g_dxc->available()) {
     SetTargetBypassFailureLocked("disassembly", g_dxc->init_error());
     return {};
@@ -1655,7 +1668,7 @@ GetFadePrimitiveExecutionBytecode(
   }
 
   std::lock_guard inspection_lock(g_inspection_mutex);
-  if (!g_dxc) g_dxc = new wuwa_tfr::DxcBridge();
+  if (!g_dxc) g_dxc = new wuwa_tfr::DxcBridge(g_addon_directory);
   if (!g_dxc->available()) {
     RecordFadePrimitiveExecutionFailure(shader_hash, "disassembly",
         g_dxc->init_error());
@@ -4741,6 +4754,7 @@ extern "C" __declspec(dllexport) const char* DESCRIPTION =
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
   switch (reason) {
     case DLL_PROCESS_ATTACH: {
+      if (!ResolveAddonDirectory(module)) return FALSE;
       g_target_process = IsWuwaProcess();
 #if WUWA_TFR_DEVTOOLS
       g_diagnostic = ConfigFlag(
@@ -4748,6 +4762,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
       g_dump = ConfigFlag(L"Dump", EnvFlag(L"WUWA_TFR_DUMP"));
       g_dump_path = ConfigPathValue(L"DumpPath");
 #else
+      g_public_antifade_runtime.set_dxc_runtime_directory(g_addon_directory);
       g_public_antifade_runtime.set_enabled(ConfigFlag(L"EnableTFR", true));
 #endif
 

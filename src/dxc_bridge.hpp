@@ -4,6 +4,7 @@
 #pragma once
 
 #ifdef _WIN32
+#include <filesystem>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -27,7 +28,7 @@ struct DxilAssemblyValidationOutput {
 // contains no game classifier, matcher, or rewrite policy.
 class DxcBridge {
  public:
-  DxcBridge();
+  explicit DxcBridge(const std::filesystem::path& addon_directory);
   ~DxcBridge();
   DxcBridge(const DxcBridge&) = delete;
   DxcBridge& operator=(const DxcBridge&) = delete;
