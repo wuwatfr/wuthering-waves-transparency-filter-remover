@@ -6,6 +6,8 @@
 #include "fade_primitive_detector.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <string_view>
 #include <unordered_set>
 #include <vector>
@@ -40,6 +42,10 @@ std::size_t Count(const std::string& text, std::string_view needle) {
 struct DitherIdentityPhi {
   std::size_t start = std::string::npos;
   std::size_t end = std::string::npos;
+  std::size_t non_identity_value_start = std::string::npos;
+  std::size_t non_identity_value_end = std::string::npos;
+  std::string result_value;
+  std::string non_identity_value;
 };
 
 bool IsSsaNameCharacter(char value) noexcept {
@@ -47,6 +53,126 @@ bool IsSsaNameCharacter(char value) noexcept {
       (value >= 'A' && value <= 'Z') ||
       (value >= '0' && value <= '9') || value == '-' ||
       value == '_' || value == '.' || value == '$';
+}
+
+bool IsSsaValue(std::string_view value) noexcept {
+  if (value.size() < 2 || value.front() != '%') return false;
+  for (std::size_t index = 1; index < value.size(); ++index)
+    if (!IsSsaNameCharacter(value[index])) return false;
+  return true;
+}
+
+bool IsIdentityOne(std::string_view value) noexcept {
+  return value == "1.000000e+00";
+}
+
+std::string_view TrimWhitespace(std::string_view text) {
+  std::size_t first = 0;
+  while (first < text.size() &&
+      std::isspace(static_cast<unsigned char>(text[first])) != 0)
+    ++first;
+  std::size_t last = text.size();
+  while (last > first &&
+      std::isspace(static_cast<unsigned char>(text[last - 1])) != 0)
+    --last;
+  return text.substr(first, last - first);
+}
+
+struct PhiArm {
+  std::size_t value_start = std::string::npos;
+  std::size_t value_end = std::string::npos;
+  std::string_view value;
+  std::string_view predecessor;
+};
+
+bool ParsePhiArm(
+    std::string_view phi, std::size_t& cursor, PhiArm& arm) {
+  while (cursor < phi.size() &&
+      std::isspace(static_cast<unsigned char>(phi[cursor])) != 0)
+    ++cursor;
+  if (cursor == phi.size() || phi[cursor] != '[') return false;
+  const std::size_t value_begin = ++cursor;
+  const std::size_t comma = phi.find(',', cursor);
+  const std::size_t close = phi.find(']', cursor);
+  if (comma == std::string_view::npos || close == std::string_view::npos ||
+      comma >= close)
+    return false;
+  const std::string_view raw_value = phi.substr(value_begin, comma - value_begin);
+  const std::string_view value = TrimWhitespace(raw_value);
+  const std::string_view predecessor =
+      TrimWhitespace(phi.substr(comma + 1, close - comma - 1));
+  if (value.empty() || !IsSsaValue(predecessor)) return false;
+  arm.value_start = value_begin + (value.data() - raw_value.data());
+  arm.value_end = arm.value_start + value.size();
+  arm.value = value;
+  arm.predecessor = predecessor;
+  cursor = close + 1;
+  return true;
+}
+
+bool ParseVerifiedDitherIdentityPhi(
+    const std::string& text, DitherIdentityPhi& result, std::string& error) {
+  if (result.start == std::string::npos || result.end == std::string::npos ||
+      result.start >= result.end || result.end > text.size()) {
+    error = "dither identity phi has an invalid source range";
+    return false;
+  }
+  const std::string_view raw_candidate(
+      text.data() + result.start, result.end - result.start);
+  const std::string_view candidate = TrimLeadingWhitespace(raw_candidate);
+  const std::size_t leading_whitespace = raw_candidate.size() - candidate.size();
+  constexpr std::string_view kPhiPrefix = " = phi float ";
+  const std::size_t equals = candidate.find(kPhiPrefix);
+  if (equals == std::string_view::npos ||
+      !IsSsaValue(candidate.substr(0, equals))) {
+    error = "dither identity phi has an invalid SSA definition";
+    return false;
+  }
+
+  std::size_t cursor = equals + kPhiPrefix.size();
+  std::array<PhiArm, 2> arms;
+  if (!ParsePhiArm(candidate, cursor, arms[0])) {
+    error = "dither identity phi has an invalid first incoming arm";
+    return false;
+  }
+  while (cursor < candidate.size() &&
+      std::isspace(static_cast<unsigned char>(candidate[cursor])) != 0)
+    ++cursor;
+  if (cursor == candidate.size() || candidate[cursor++] != ',') {
+    error = "dither identity phi must have exactly two incoming arms";
+    return false;
+  }
+  if (!ParsePhiArm(candidate, cursor, arms[1])) {
+    error = "dither identity phi has an invalid second incoming arm";
+    return false;
+  }
+  while (cursor < candidate.size() &&
+      std::isspace(static_cast<unsigned char>(candidate[cursor])) != 0)
+    ++cursor;
+  if (cursor != candidate.size() || arms[0].predecessor == arms[1].predecessor) {
+    error = "dither identity phi must have exactly two distinct predecessors";
+    return false;
+  }
+
+  const bool first_is_identity = IsIdentityOne(arms[0].value);
+  const bool second_is_identity = IsIdentityOne(arms[1].value);
+  if (first_is_identity == second_is_identity) {
+    error = "dither identity phi must have exactly one identity arm";
+    return false;
+  }
+  const PhiArm& non_identity = first_is_identity ? arms[1] : arms[0];
+  if (!IsSsaValue(non_identity.value)) {
+    error = "dither identity phi has no non-identity SSA incoming value";
+    return false;
+  }
+
+  result.non_identity_value_start = result.start + leading_whitespace +
+      non_identity.value_start;
+  result.non_identity_value_end = result.start + leading_whitespace +
+      non_identity.value_end;
+  result.result_value = std::string(candidate.substr(0, equals));
+  result.non_identity_value = std::string(non_identity.value);
+  return true;
 }
 
 std::vector<std::string> FindSsaValues(std::string_view text) {
@@ -141,9 +267,16 @@ bool FindUniqueDitherIdentityPhi(
     const std::string_view line = TrimLeadingWhitespace(raw_line);
     if (line.find(" = phi float ") != std::string_view::npos &&
         line.find(kDitherIdentityArm) != std::string_view::npos) {
-      const std::size_t equals = line.find(" = phi float ");
+      DitherIdentityPhi candidate;
+      candidate.start = line_start;
+      candidate.end = bounded_end;
+      std::string parse_error;
+      if (!ParseVerifiedDitherIdentityPhi(text, candidate, parse_error)) {
+        error = parse_error;
+        return false;
+      }
       if (!required_threshold_value.empty() &&
-          !DependsOnSsaValue(text, line.substr(0, equals),
+          !DependsOnSsaValue(text, candidate.non_identity_value,
               required_threshold_value)) {
         if (line_end == std::string::npos) break;
         line_start = line_end;
@@ -153,8 +286,7 @@ bool FindUniqueDitherIdentityPhi(
         error = "dither threshold region has multiple identity phis";
         return false;
       }
-      result.start = line_start;
-      result.end = bounded_end;
+      result = std::move(candidate);
     }
     if (line_end == std::string::npos) break;
     line_start = line_end;
@@ -164,29 +296,24 @@ bool FindUniqueDitherIdentityPhi(
     return false;
   }
 
-  const std::string_view raw_candidate(
-      text.data() + result.start, result.end - result.start);
-  const std::string_view candidate = TrimLeadingWhitespace(raw_candidate);
-  const std::size_t equals = candidate.find(" = phi float ");
-  if (equals == std::string_view::npos || equals == 0 ||
-      candidate.empty() || candidate.front() != '%') {
-    error = "dither identity phi has an invalid SSA definition";
-    return false;
-  }
   return true;
 }
 
-std::string IdentityReplacement(
-    const std::string& text,
-    const DitherIdentityPhi& phi) {
-  const std::string_view raw_candidate(
-      text.data() + phi.start, phi.end - phi.start);
-  const std::string_view candidate = TrimLeadingWhitespace(raw_candidate);
-  const std::size_t equals = candidate.find(" = phi float ");
-  const std::size_t leading_whitespace = raw_candidate.size() - candidate.size();
-  return std::string(raw_candidate.substr(0, leading_whitespace)) +
-      std::string(candidate.substr(0, equals)) +
-      " = fadd fast float 1.000000e+00, 0.000000e+00";
+bool RewriteVerifiedDitherIdentityPhi(
+    std::string& text, const DitherIdentityPhi& expected, std::string& error) {
+  DitherIdentityPhi current;
+  current.start = expected.start;
+  current.end = expected.end;
+  if (!ParseVerifiedDitherIdentityPhi(text, current, error) ||
+      current.result_value != expected.result_value ||
+      current.non_identity_value != expected.non_identity_value) {
+    if (error.empty()) error = "dither identity phi changed before rewrite";
+    return false;
+  }
+  text.replace(current.non_identity_value_start,
+      current.non_identity_value_end - current.non_identity_value_start,
+      "1.000000e+00");
+  return true;
 }
 
 std::vector<std::size_t> FindThresholdAccesses(
@@ -204,7 +331,8 @@ std::vector<std::size_t> FindThresholdAccesses(
 bool FindVerifiedPhiLine(
     const std::string& text,
     std::string_view merge_value,
-    DitherIdentityPhi& result) {
+    DitherIdentityPhi& result,
+    std::string& error) {
   for (std::size_t line_start = 0; line_start < text.size();) {
     const std::size_t line_end = text.find('\n', line_start);
     const std::size_t bounded_end =
@@ -215,8 +343,15 @@ bool FindVerifiedPhiLine(
     if (line.starts_with(merge_value) &&
         line.substr(merge_value.size()).starts_with(" = phi float ") &&
         line.find(kDitherIdentityArm) != std::string_view::npos) {
-      result.start = line_start;
-      result.end = bounded_end;
+      DitherIdentityPhi candidate;
+      candidate.start = line_start;
+      candidate.end = bounded_end;
+      if (!ParseVerifiedDitherIdentityPhi(text, candidate, error)) return false;
+      if (candidate.result_value != merge_value) {
+        error = "verified primitive merge has an inconsistent SSA definition";
+        return false;
+      }
+      result = std::move(candidate);
       return true;
     }
     if (line_end == std::string::npos) break;
@@ -252,11 +387,13 @@ TargetDitherBypassResult PatchSelectedTargetDitherToIdentity(
 
   result.structural_verification_succeeded = true;
   result.stage1_structural_verification_succeeded = true;
-  result.llvm_ir = original_llvm_ir;
-  const std::string replacement =
-      IdentityReplacement(original_llvm_ir, candidate);
-  result.llvm_ir.replace(
-      candidate.start, candidate.end - candidate.start, replacement);
+  std::string patched_llvm_ir = original_llvm_ir;
+  if (!RewriteVerifiedDitherIdentityPhi(
+          patched_llvm_ir, candidate, result.error)) {
+    result.error = "selected target rewrite failed: " + result.error;
+    return result;
+  }
+  result.llvm_ir = std::move(patched_llvm_ir);
   result.ir_patch_succeeded = true;
   result.stage1_ir_patch_succeeded = true;
   result.success = true;
@@ -308,13 +445,20 @@ TargetDitherBypassResult PatchSelectedDualDitherStagesToIdentity(
   result.stage2_structural_verification_succeeded = true;
   result.structural_verification_succeeded = true;
 
-  result.llvm_ir = original_llvm_ir;
-  result.llvm_ir.replace(stage2.start, stage2.end - stage2.start,
-      IdentityReplacement(original_llvm_ir, stage2));
-  result.stage2_ir_patch_succeeded = true;
-  result.llvm_ir.replace(stage1.start, stage1.end - stage1.start,
-      IdentityReplacement(original_llvm_ir, stage1));
+  std::string patched_llvm_ir = original_llvm_ir;
+  if (!RewriteVerifiedDitherIdentityPhi(
+          patched_llvm_ir, stage2, result.error)) {
+    result.error = "stage 2 rewrite failed: " + result.error;
+    return result;
+  }
+  if (!RewriteVerifiedDitherIdentityPhi(
+          patched_llvm_ir, stage1, result.error)) {
+    result.error = "stage 1 rewrite failed: " + result.error;
+    return result;
+  }
+  result.llvm_ir = std::move(patched_llvm_ir);
   result.stage1_ir_patch_succeeded = true;
+  result.stage2_ir_patch_succeeded = true;
   result.ir_patch_succeeded = true;
   result.success = true;
   return result;
@@ -341,8 +485,10 @@ TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesToIdentity(
       return result;
     }
     DitherIdentityPhi phi;
-    if (!FindVerifiedPhiLine(original_llvm_ir, instance.merge_value, phi)) {
-      result.error = "verified primitive merge could not be located";
+    if (!FindVerifiedPhiLine(
+            original_llvm_ir, instance.merge_value, phi, result.error)) {
+      result.error = "verified primitive merge could not be located: " +
+          result.error;
       return result;
     }
     replacements.push_back(phi);
@@ -353,19 +499,21 @@ TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesToIdentity(
         return left.start > right.start;
       });
   result.structural_verification_succeeded = true;
-  result.llvm_ir = original_llvm_ir;
+  std::string patched_llvm_ir = original_llvm_ir;
   for (const DitherIdentityPhi& replacement : replacements) {
-    result.llvm_ir.replace(replacement.start,
-        replacement.end - replacement.start,
-        IdentityReplacement(original_llvm_ir, replacement));
+    if (!RewriteVerifiedDitherIdentityPhi(
+            patched_llvm_ir, replacement, result.error)) {
+      result.error = "verified primitive rewrite failed: " + result.error;
+      return result;
+    }
   }
   const FadePrimitiveDiagnostic post_patch =
-      AnalyzeFadePrimitiveV1(result.llvm_ir);
+      AnalyzeFadePrimitiveV1(patched_llvm_ir);
   if (!post_patch.instances.empty()) {
-    result.llvm_ir.clear();
     result.error = "post-patch verification still found a primitive instance";
     return result;
   }
+  result.llvm_ir = std::move(patched_llvm_ir);
   result.ir_patch_succeeded = true;
   result.patched_instance_count = replacements.size();
   result.success = true;

@@ -18,27 +18,34 @@ call void @dx.op.discard(i32 82, i1 %kill)
 )";
   };
 
-  const auto expect_patched = [&](std::string_view phi) {
+  const auto expect_patched = [&](std::string_view phi,
+                                  std::string_view expected_phi) {
     const auto patched = wuwa_tfr::PatchSelectedTargetDitherToIdentity(
         make_ir(phi));
     CHECK(patched.success);
     CHECK(patched.structural_verification_succeeded);
     CHECK(patched.ir_patch_succeeded);
-    CHECK(patched.llvm_ir.find(
-        "%dither_factor = fadd fast float 1.000000e+00, 0.000000e+00") !=
+    CHECK(patched.llvm_ir.find(expected_phi) != std::string::npos);
+    CHECK(patched.llvm_ir.find(" = fadd fast float 1.000000e+00, 0.000000e+00") ==
         std::string::npos);
     CHECK(patched.llvm_ir.find("call void @dx.op.discard(i32 82, i1 %kill)") !=
         std::string::npos);
   };
 
   // Unindented, two-space indented, and mixed leading whitespace all parse
-  // identically; replacement preserves the original leading whitespace.
+  // identically; replacement changes only the verified incoming value token.
   expect_patched(
-      "%dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]");
+      "%dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]",
+      "%dither_factor = phi float [ 1.000000e+00, %enabled ], [ 1.000000e+00, %disabled ]");
   expect_patched(
-      "  %dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]");
+      "  %dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]",
+      "  %dither_factor = phi float [ 1.000000e+00, %enabled ], [ 1.000000e+00, %disabled ]");
   expect_patched(
-      "\t \t%dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]");
+      "\t \t%dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]",
+      "\t \t%dither_factor = phi float [ 1.000000e+00, %enabled ], [ 1.000000e+00, %disabled ]");
+  expect_patched(
+      "%dither_factor = phi float [ 1.000000e+00, %disabled ], [ %computed, %enabled ]",
+      "%dither_factor = phi float [ 1.000000e+00, %disabled ], [ 1.000000e+00, %enabled ]");
 
   // The exact real target phi shape is accepted after semantic trimming.
   const auto real_shape = wuwa_tfr::PatchSelectedTargetDitherToIdentity(make_ir(
@@ -47,8 +54,25 @@ call void @dx.op.discard(i32 82, i1 %kill)
   CHECK(real_shape.structural_verification_succeeded);
   CHECK(real_shape.ir_patch_succeeded);
   CHECK(real_shape.llvm_ir.find(
-      "  %1302 = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      "  %1302 = phi float [ 1.000000e+00, %1285 ], [ 1.000000e+00, %1279 ]") !=
       std::string::npos);
+
+  const auto adjacent_phis = wuwa_tfr::PatchSelectedTargetDitherToIdentity(
+      make_ir(
+          "%before = phi float [ %before_a, %before_left ], [ %before_b, %before_right ]\n"
+          "%target = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]\n"
+          "%after = phi float [ %after_a, %after_left ], [ %after_b, %after_right ]\n"
+          "%unrelated_use = fmul fast float %computed, %opacity"));
+  CHECK(adjacent_phis.success);
+  CHECK(adjacent_phis.llvm_ir.find(
+      "%before = phi float [ %before_a, %before_left ], [ %before_b, %before_right ]\n"
+      "%target = phi float [ 1.000000e+00, %enabled ], [ 1.000000e+00, %disabled ]\n"
+      "%after = phi float [ %after_a, %after_left ], [ %after_b, %after_right ]") !=
+      std::string::npos);
+  CHECK(adjacent_phis.llvm_ir.find(
+      "%unrelated_use = fmul fast float %computed, %opacity") !=
+      std::string::npos);
+  CHECK(adjacent_phis.llvm_ir.find("%target = fadd") == std::string::npos);
 
   // A non-SSA line retains the dither-like text but must fail verification.
   const auto rejected = wuwa_tfr::PatchSelectedTargetDitherToIdentity(
@@ -56,6 +80,19 @@ call void @dx.op.discard(i32 82, i1 %kill)
   CHECK(!rejected.success);
   CHECK(!rejected.structural_verification_succeeded);
   CHECK(!rejected.ir_patch_succeeded);
+
+  const auto malformed = wuwa_tfr::PatchSelectedTargetDitherToIdentity(make_ir(
+      "%dither_factor = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled"));
+  CHECK(!malformed.success);
+  CHECK(!malformed.ir_patch_succeeded);
+  CHECK(malformed.llvm_ir.empty());
+
+  const auto ambiguous = wuwa_tfr::PatchSelectedTargetDitherToIdentity(make_ir(
+      "%first = phi float [ %computed, %enabled ], [ 1.000000e+00, %disabled ]\n"
+      "%second = phi float [ %other_computed, %other_enabled ], [ 1.000000e+00, %other_disabled ]"));
+  CHECK(!ambiguous.success);
+  CHECK(!ambiguous.ir_patch_succeeded);
+  CHECK(ambiguous.llvm_ir.empty());
 
   const auto make_dual_ir = [] {
     return std::string(R"(
@@ -83,10 +120,12 @@ call void @dx.op.discard(i32 82, i1 %kill)
   CHECK(dual.stage2_structural_verification_succeeded);
   CHECK(dual.stage2_ir_patch_succeeded);
   CHECK(dual.llvm_ir.find(
-      "  %first_stage = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      "  %first_stage = phi float [ 1.000000e+00, %first_enabled ], [ 1.000000e+00, %first_disabled ]") !=
       std::string::npos);
   CHECK(dual.llvm_ir.find(
-      "  %second_stage = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      "  %second_stage = phi float [ 1.000000e+00, %second_enabled ], [ 1.000000e+00, %second_disabled ]") !=
+      std::string::npos);
+  CHECK(dual.llvm_ir.find(" = fadd fast float 1.000000e+00, 0.000000e+00") ==
       std::string::npos);
 
   // The special experiment is fail-closed: one or three threshold stages is
@@ -158,10 +197,10 @@ call void @dx.op.discard(i32 82, i1 %kill)
   CHECK(all_instances.verified_instance_count == 2);
   CHECK(all_instances.patched_instance_count == 2);
   CHECK(all_instances.llvm_ir.find(
-      "%d0 = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      "%d0 = phi float [ 1.000000e+00, %on0 ], [ 1.000000e+00, %entry0 ]") !=
       std::string::npos);
   CHECK(all_instances.llvm_ir.find(
-      "%d1 = fadd fast float 1.000000e+00, 0.000000e+00") !=
+      "%d1 = phi float [ 1.000000e+00, %on1 ], [ 1.000000e+00, %entry1 ]") !=
       std::string::npos);
   return 0;
 }
