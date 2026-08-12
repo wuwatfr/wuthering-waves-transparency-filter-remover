@@ -9,6 +9,7 @@
 #include "device_activity_state.hpp"
 #include "dxc_bridge.hpp"
 #include "fade_primitive_runtime.hpp"
+#include "wuwa_process.hpp"
 #if WUWA_TFR_DEVTOOLS
 #include "dxil_dither_diagnostic.hpp"
 #include "fade_primitive_detector.hpp"
@@ -787,15 +788,14 @@ std::filesystem::path ConfigPathValue(const wchar_t* key) {
 }
 
 bool IsWuwaProcess() {
-  wchar_t executable_path[MAX_PATH]{};
-  if (!GetModuleFileNameW(nullptr, executable_path, MAX_PATH)) return false;
-  std::wstring name =
-      std::filesystem::path(executable_path).filename().wstring();
-  std::transform(name.begin(), name.end(), name.begin(), [](wchar_t c) {
-    return static_cast<wchar_t>(std::towlower(c));
-  });
-  return name.find(L"client-win64-shipping") != std::wstring::npos ||
-      name.find(L"wuthering") != std::wstring::npos;
+  std::array<wchar_t, 32768> executable_path{};
+  const DWORD length = GetModuleFileNameW(
+      nullptr, executable_path.data(),
+      static_cast<DWORD>(executable_path.size()));
+  if (length == 0 || length >= executable_path.size()) return false;
+  return wuwa_tfr::IsWuwaExecutable(
+      std::filesystem::path(executable_path.data(),
+                            executable_path.data() + length));
 }
 
 void Log(reshade::log::level level, const std::string& message) {

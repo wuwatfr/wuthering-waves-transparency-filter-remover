@@ -2,6 +2,7 @@
 // Copyright (C) 2026 WuwaTFR contributors
 
 #include "device_activity_state.hpp"
+#include "wuwa_process.hpp"
 
 #include <atomic>
 #ifdef NDEBUG
@@ -13,6 +14,30 @@
 #include <thread>
 
 int main() {
+  CHECK(wuwa_tfr::IsWuwaExecutable(
+      LR"(C:\Program Files\Wuthering Waves\Wuthering Waves Game\Client\Binaries\Win64\Client-Win64-Shipping.exe)"));
+  CHECK(wuwa_tfr::IsWuwaExecutable(
+      LR"(D:\我的游戏\鸣潮\Wuthering Waves Game\Client\Binaries\Win64\Client-Win64-Shipping.exe)"));
+  CHECK(wuwa_tfr::IsWuwaExecutable(
+      LR"(D:\SomeGame\Client\Binaries\Win64\Client-Win64-Shipping.exe)"));
+  CHECK(wuwa_tfr::IsWuwaExecutable(
+      LR"(D:\Wuthering Waves Game\Backup\Client\Binaries\Win64\Client-Win64-Shipping.exe)"));
+  CHECK(wuwa_tfr::IsWuwaExecutable(
+      LR"(D:\Games\CLIENT\BINARIES\WIN64\CLIENT-WIN64-SHIPPING.EXE)"));
+
+  CHECK(!wuwa_tfr::IsWuwaExecutable(
+      LR"(C:\Epic\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe)"));
+  CHECK(!wuwa_tfr::IsWuwaExecutable(
+      LR"(D:\Steam\TheIsle\Binaries\Win64\TheIsleClient-Win64-Shipping.exe)"));
+  CHECK(!wuwa_tfr::IsWuwaExecutable(
+      LR"(D:\SomeGame\Client\Binaries\Win64\Client-Win64-Shipping-copy.exe)"));
+  CHECK(!wuwa_tfr::IsWuwaExecutable(
+      LR"(D:\SomeGame\Client\Backup\Binaries\Win64\Client-Win64-Shipping.exe)"));
+  CHECK(!wuwa_tfr::IsWuwaExecutable(
+      LR"(D:\SomeGame\WrongClient\Binaries\Win64\Client-Win64-Shipping.exe)"));
+  CHECK(!wuwa_tfr::IsWuwaExecutable(
+      LR"(D:\Client\Binaries\Win64\Client-Win64-Shipping.exe\archive\Client\Binaries\Win64\Other.exe)"));
+
   wuwa_tfr::DeviceActivityState<int> state;
   CHECK(state.Activate(1));
   CHECK(state.Activate(2));
