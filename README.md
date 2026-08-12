@@ -1,4 +1,4 @@
-# WuwaTFR
+# WuwaTFR — Wuthering Waves Transparency Filter Remover
 
 WuwaTFR is a ReShade add-on for Wuthering Waves (DirectX 12) that removes the
 Transparency Filter applied to playable characters when the camera gets too
