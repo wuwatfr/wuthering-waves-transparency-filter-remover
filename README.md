@@ -111,8 +111,8 @@ GPLv3, including corresponding-source obligations where applicable.
 
 ## Third-Party Software
 
-- **ReShade API** — BSD 3-Clause license. Its complete required notice is in
-  [`NOTICE`](NOTICE).
+- **ReShade API headers** — dual-licensed under BSD-3-Clause OR MIT; WuwaTFR
+  uses them under the MIT license. The required notice is in [`NOTICE`](NOTICE).
 - **Microsoft DirectX Shader Compiler runtime** — the build script packages
   the pinned official `dxcompiler.dll` as `WuwaTFR.dxcompiler.dll` from the
   official
