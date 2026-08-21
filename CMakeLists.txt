@@ -45,7 +45,8 @@ target_include_directories(dxil_dither_diagnostic_tests PRIVATE src)
 
 add_executable(fade_primitive_detector_tests
   tests/test_fade_primitive_detector.cpp
-  src/fade_primitive_detector.cpp)
+  src/fade_primitive_detector.cpp
+  src/target_dither_bypass.cpp)
 target_include_directories(fade_primitive_detector_tests PRIVATE src)
 
 add_executable(fade_primitive_audit EXCLUDE_FROM_ALL
@@ -78,6 +79,8 @@ if(WIN32)
   set(IMGUI_INCLUDE_DIR "" CACHE PATH "Directory containing imgui.h")
 
   if(RESHADE_INCLUDE_DIR AND DXC_INCLUDE_DIR AND IMGUI_INCLUDE_DIR)
+    set(DXC_RUNTIME_DIR "" CACHE PATH
+      "Directory containing the pinned x64 dxcompiler.dll and dxil.dll")
     function(add_wuwa_addon TARGET_NAME OUTPUT_NAME DEVTOOLS_VALUE)
       set(addon_sources
         src/addon.cpp
@@ -121,6 +124,26 @@ if(WIN32)
 
     # Developer target reserved for diagnostics.
     add_wuwa_addon(WuwaTFRDev WuwaTFRDev 1)
+
+    if(DXC_RUNTIME_DIR)
+      add_executable(complete_dxil_validation_tests
+        tests/test_complete_dxil_validation.cpp
+        src/dxc_bridge.cpp
+        src/fade_primitive_detector.cpp
+        src/target_dither_bypass.cpp)
+      target_include_directories(complete_dxil_validation_tests PRIVATE
+        src "${DXC_INCLUDE_DIR}")
+      add_custom_command(TARGET complete_dxil_validation_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${DXC_RUNTIME_DIR}/dxcompiler.dll"
+          "$<TARGET_FILE_DIR:complete_dxil_validation_tests>/WuwaTFR.dxcompiler.dll"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${DXC_RUNTIME_DIR}/dxil.dll"
+          "$<TARGET_FILE_DIR:complete_dxil_validation_tests>/dxil.dll")
+      add_test(NAME complete_dxil_validation_tests
+        COMMAND complete_dxil_validation_tests
+          "${CMAKE_SOURCE_DIR}/tests/fixtures/fade_primitive_validation.ll")
+    endif()
   else()
     message(STATUS "Windows add-on targets disabled: set RESHADE_INCLUDE_DIR, DXC_INCLUDE_DIR and IMGUI_INCLUDE_DIR")
   endif()

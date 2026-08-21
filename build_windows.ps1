@@ -127,6 +127,7 @@ Write-Host "Configuring x64 Release build with: $generator"
 & $cmake.Source -S $root -B $build -G $generator -A x64 `
     "-DRESHADE_INCLUDE_DIR=$reshadeInclude" `
     "-DDXC_INCLUDE_DIR=$dxcInclude" `
+    "-DDXC_RUNTIME_DIR=$(Join-Path $dxcBinaryRoot 'bin/x64')" `
     "-DIMGUI_INCLUDE_DIR=$imguiInclude"
 if ($LASTEXITCODE -ne 0) {
     Fail 'CMake configuration failed. Make sure the installed Visual Studio Build Tools include Desktop development with C++.'
@@ -139,7 +140,8 @@ $testTargets = @(
     'dxil_dither_diagnostic_tests',
     'fade_primitive_detector_tests',
     'target_dither_bypass_tests',
-    'trace_submission_identity_tests'
+    'trace_submission_identity_tests',
+    'complete_dxil_validation_tests'
 )
 
 Write-Host 'Compiling test targets...'

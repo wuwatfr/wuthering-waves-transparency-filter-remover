@@ -328,36 +328,37 @@ std::vector<std::size_t> FindThresholdAccesses(
   }
 }
 
-bool FindVerifiedPhiLine(
+bool FindVerifiedPhiAtRange(
     const std::string& text,
-    std::string_view merge_value,
+    const FadePrimitiveInstance& instance,
     DitherIdentityPhi& result,
     std::string& error) {
-  for (std::size_t line_start = 0; line_start < text.size();) {
-    const std::size_t line_end = text.find('\n', line_start);
-    const std::size_t bounded_end =
-        line_end == std::string::npos ? text.size() : line_end;
-    const std::string_view raw_line(
-        text.data() + line_start, bounded_end - line_start);
-    const std::string_view line = TrimLeadingWhitespace(raw_line);
-    if (line.starts_with(merge_value) &&
-        line.substr(merge_value.size()).starts_with(" = phi float ") &&
-        line.find(kDitherIdentityArm) != std::string_view::npos) {
-      DitherIdentityPhi candidate;
-      candidate.start = line_start;
-      candidate.end = bounded_end;
-      if (!ParseVerifiedDitherIdentityPhi(text, candidate, error)) return false;
-      if (candidate.result_value != merge_value) {
-        error = "verified primitive merge has an inconsistent SSA definition";
-        return false;
-      }
-      result = std::move(candidate);
-      return true;
-    }
-    if (line_end == std::string::npos) break;
-    line_start = line_end + 1;
+  if (instance.function_identity.empty() || instance.merge_value.empty() ||
+      instance.phi_start >= instance.phi_end || instance.phi_end > text.size()) {
+    error = "verified primitive has an invalid function/source identity";
+    return false;
   }
-  return false;
+  // The matcher records whole-line offsets.  Refuse a shifted range instead
+  // of searching another function for an identically named SSA value.
+  if ((instance.phi_start != 0 && text[instance.phi_start - 1] != '\n') ||
+      (instance.phi_end != text.size() && text[instance.phi_end] != '\n')) {
+    error = "verified primitive phi range is not a complete source line";
+    return false;
+  }
+  result.start = instance.phi_start;
+  result.end = instance.phi_end;
+  if (!ParseVerifiedDitherIdentityPhi(text, result, error)) return false;
+  if (result.result_value != instance.merge_value) {
+    error = "verified primitive merge has an inconsistent SSA definition";
+    return false;
+  }
+  return true;
+}
+
+bool IsProductionConsumer(FadePrimitiveConsumer consumer) noexcept {
+  return consumer == FadePrimitiveConsumer::Discard ||
+      consumer == FadePrimitiveConsumer::SvTargetAlpha ||
+      consumer == FadePrimitiveConsumer::DiscardAndSvTargetAlpha;
 }
 
 } // namespace
@@ -477,17 +478,20 @@ TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesToIdentity(
 
   std::vector<DitherIdentityPhi> replacements;
   replacements.reserve(diagnostic.instances.size());
-  std::unordered_set<std::string> merge_values;
+  std::unordered_set<std::size_t> phi_starts;
   for (const FadePrimitiveInstance& instance : diagnostic.instances) {
-    if (instance.merge_value.empty() ||
-        !merge_values.insert(instance.merge_value).second) {
-      result.error = "verified primitive instances do not have unique merges";
+    if (!IsProductionConsumer(instance.consumer)) {
+      result.error = "verified primitive has an unsupported production consumer";
+      return result;
+    }
+    if (!phi_starts.insert(instance.phi_start).second) {
+      result.error = "verified primitive instances do not have unique source identities";
       return result;
     }
     DitherIdentityPhi phi;
-    if (!FindVerifiedPhiLine(
-            original_llvm_ir, instance.merge_value, phi, result.error)) {
-      result.error = "verified primitive merge could not be located: " +
+    if (!FindVerifiedPhiAtRange(
+            original_llvm_ir, instance, phi, result.error)) {
+      result.error = "verified primitive phi could not be revalidated: " +
           result.error;
       return result;
     }

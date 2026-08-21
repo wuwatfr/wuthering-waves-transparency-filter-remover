@@ -3,6 +3,8 @@
 
 #include "target_dither_bypass.hpp"
 
+#include "fade_primitive_detector.hpp"
+
 #include "test_check.hpp"
 #include <string>
 #include <string_view>
@@ -139,6 +141,8 @@ call void @dx.op.discard(i32 82, i1 %kill)
   const std::string all_instances_ir = R"(
 ; SV_Position              0   xyzw
 @thresholds = internal constant [9 x float] zeroinitializer
+define void @all_instances() {
+entry:
 %x = call float @dx.op.loadInput.f32(i32 4, i32 0, i32 0, i8 0, i32 undef)
 %y = call float @dx.op.loadInput.f32(i32 4, i32 0, i32 0, i8 1, i32 undef)
 %cb0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb, i32 7)
@@ -187,6 +191,7 @@ br label %merge1
 call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %alpha)  ; SV_Target
 %kill = fcmp fast olt float %d1, 0.000000e+00
 call void @dx.op.discard(i32 82, i1 %kill)
+}
 )";
   const auto all_instances =
       wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
@@ -202,5 +207,64 @@ call void @dx.op.discard(i32 82, i1 %kill)
   CHECK(all_instances.llvm_ir.find(
       "%d1 = phi float [ 1.000000e+00, %on1 ], [ 1.000000e+00, %entry1 ]") !=
       std::string::npos);
+
+  // Function/source identity, rather than local SSA spelling, selects each
+  // independently verified phi. Both functions intentionally reuse every SSA
+  // name in this fixture.
+  const std::size_t body_start = all_instances_ir.find("entry:\n");
+  const std::size_t body_end = all_instances_ir.rfind("\n}");
+  CHECK(body_start != std::string::npos && body_end != std::string::npos);
+  const std::string globals = all_instances_ir.substr(0,
+      all_instances_ir.find("define void @all_instances"));
+  const std::string body = all_instances_ir.substr(
+      body_start + std::string("entry:\n").size(),
+      body_end - (body_start + std::string("entry:\n").size()));
+  const std::string two_functions = globals +
+      "define void @first() {\nentry:\n" + body + "\n}\n" +
+      "define void @second() {\nentry:\n" + body + "\n}\n";
+  const auto independently_patched =
+      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(two_functions);
+  CHECK(independently_patched.success);
+  CHECK(independently_patched.verified_instance_count == 4);
+  CHECK(independently_patched.patched_instance_count == 4);
+
+  // An unrelated same-named phi in function A is never located in place of
+  // the verified target in function B.
+  const std::string unrelated = globals + R"(define void @unrelated() {
+entry:
+%d0 = phi float [ %unrelated_a, %left ], [ 1.000000e+00, %right ]
+}
+)" + "define void @target() {\nentry:\n" + body + "\n}\n";
+  const auto exact_target =
+      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(unrelated);
+  CHECK(exact_target.success);
+  CHECK(exact_target.llvm_ir.find(
+      "%d0 = phi float [ %unrelated_a, %left ], [ 1.000000e+00, %right ]") !=
+      std::string::npos);
+  CHECK(exact_target.llvm_ir.find(
+      "%d0 = phi float [ 1.000000e+00, %on0 ], [ 1.000000e+00, %entry0 ]") !=
+      std::string::npos);
+
+  // Diagnostic classifications are useful, but Production accepts only the
+  // three explicit visibility consumers.
+  auto unknown_consumer = all_instances_ir;
+  const std::size_t output = unknown_consumer.find("@dx.op.storeOutput.f32");
+  unknown_consumer.replace(output, std::string("@dx.op.storeOutput.f32").size(),
+      "@dx.op.notAConsumer");
+  const auto unknown_diagnostic = wuwa_tfr::AnalyzeFadePrimitiveV1(unknown_consumer);
+  CHECK(!unknown_diagnostic.instances.empty());
+  CHECK(unknown_diagnostic.instances.front().consumer ==
+      wuwa_tfr::FadePrimitiveConsumer::Unknown);
+  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      unknown_consumer).success);
+  auto other_consumer = all_instances_ir;
+  const std::size_t component = other_consumer.find("i8 3, float %alpha");
+  other_consumer.replace(component, std::string("i8 3").size(), "i8 2");
+  const auto other_diagnostic = wuwa_tfr::AnalyzeFadePrimitiveV1(other_consumer);
+  CHECK(!other_diagnostic.instances.empty());
+  CHECK(other_diagnostic.instances.front().consumer ==
+      wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
+  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      other_consumer).success);
   return 0;
 }
