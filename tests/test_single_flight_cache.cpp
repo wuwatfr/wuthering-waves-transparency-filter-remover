@@ -22,6 +22,17 @@ struct Result {
   bool success = false;
 };
 
+struct PayloadResult {
+  bool success = false;
+  std::shared_ptr<const std::vector<std::uint8_t>> payload;
+};
+
+struct PayloadBytes {
+  std::size_t operator()(const PayloadResult& value) const noexcept {
+    return value.payload ? value.payload->size() : 0;
+  }
+};
+
 class Gate {
  public:
   void ArriveAndWait() {
@@ -192,6 +203,61 @@ void MixedTrafficHasOnePublicationPerKey() {
   }
 }
 
+void CacheSnapshotTracksExactRetainedPayload() {
+  wuwa_tfr::SingleFlightCache<int, PayloadResult, std::hash<int>, PayloadBytes>
+      cache;
+  CHECK(cache.GetSnapshot().completed_entries == 0);
+  CHECK(cache.GetSnapshot().in_flight_entries == 0);
+  CHECK(cache.GetSnapshot().retained_payload_bytes == 0);
+
+  Gate owner_entered;
+  std::thread owner([&] {
+    cache.GetOrPrepare(1, [&] {
+      owner_entered.ArriveAndWait();
+      return PayloadResult{true,
+          std::make_shared<const std::vector<std::uint8_t>>(3, 1)};
+    }, [] { return PayloadResult{}; });
+  });
+  owner_entered.WaitFor(1);
+  std::thread duplicate([&] {
+    cache.GetOrPrepare(1, [] { return PayloadResult{}; },
+        [] { return PayloadResult{}; });
+  });
+  const auto in_flight = cache.GetSnapshot();
+  CHECK(in_flight.completed_entries == 0);
+  CHECK(in_flight.in_flight_entries == 1);
+  CHECK(in_flight.retained_payload_bytes == 0);
+  owner_entered.Open();
+  owner.join();
+  duplicate.join();
+
+  const PayloadResult successful = cache.GetOrPrepare(2, [] {
+    return PayloadResult{true,
+        std::make_shared<const std::vector<std::uint8_t>>(5, 1)};
+  }, [] { return PayloadResult{}; });
+  CHECK(successful.success);
+  const PayloadResult failed = cache.GetOrPrepare(3, [] {
+    return PayloadResult{};
+  }, [] { return PayloadResult{}; });
+  CHECK(!failed.success);
+  int duplicate_work = 0;
+  const PayloadResult cached = cache.GetOrPrepare(2, [&] {
+    ++duplicate_work;
+    return PayloadResult{};
+  }, [] { return PayloadResult{}; });
+  CHECK(cached.success && duplicate_work == 0);
+
+  const auto completed = cache.GetSnapshot();
+  CHECK(completed.completed_entries == 3);
+  CHECK(completed.in_flight_entries == 0);
+  CHECK(completed.retained_payload_bytes == 8);
+  cache.Clear();
+  const auto cleared = cache.GetSnapshot();
+  CHECK(cleared.completed_entries == 0);
+  CHECK(cleared.in_flight_entries == 0);
+  CHECK(cleared.retained_payload_bytes == 0);
+}
+
 void ContextPoolDrainWaitsForActiveLease() {
   std::atomic<int> created{0};
   wuwa_tfr::PreparationContextPool<int> pool(2, [&] {
@@ -232,6 +298,7 @@ int main() {
   SameKeyIsSingleFlight();
   FailureAndThrownOwnerAreCachedAndWakeWaiters();
   MixedTrafficHasOnePublicationPerKey();
+  CacheSnapshotTracksExactRetainedPayload();
   ContextPoolDrainWaitsForActiveLease();
   return 0;
 }

@@ -104,6 +104,12 @@ struct PreparedShader {
   std::string failure;
 };
 
+struct PreparedShaderPayloadBytes {
+  std::size_t operator()(const PreparedShader& state) const noexcept {
+    return state.bytecode ? state.bytecode->size() : 0;
+  }
+};
+
 constexpr std::size_t kDxcContextPoolCapacity = 4;
 } // namespace
 
@@ -112,13 +118,16 @@ struct FadePrimitiveRuntime::Impl {
   // is released before a context is acquired or any DXC call begins. Last-
   // device teardown holds activity exclusively, then drains the pool; it never
   // takes the cache lock, so it cannot wait in a lock cycle with a callback.
-  SingleFlightCache<std::uint64_t, PreparedShader> prepared;
+  SingleFlightCache<std::uint64_t, PreparedShader, std::hash<std::uint64_t>,
+      PreparedShaderPayloadBytes> prepared;
   std::filesystem::path dxc_runtime_directory;
   PreparationContextPool<DxcBridge> dxc_pool;
   std::atomic<std::uint32_t> device_count{0};
   DeviceActivityState<DeviceId> activity;
   PipelineReplacementState<DeviceId, pipeline> replacements;
   std::atomic<bool> enabled{false};
+  // These are cumulative runtime activity counters, not retained-object
+  // gauges. Telemetry snapshots only load them and never increment them.
   std::atomic<std::uint64_t> matched_shaders{0};
   std::atomic<std::uint64_t> prepared_shaders{0};
   std::atomic<std::uint64_t> replacements_created{0};
@@ -303,6 +312,26 @@ bool FadePrimitiveRuntime::enabled() const {
 
 void FadePrimitiveRuntime::set_enabled(bool enabled) {
   impl_->enabled.store(enabled, std::memory_order_relaxed);
+}
+
+FadePrimitiveRuntimeTelemetrySnapshot
+FadePrimitiveRuntime::memory_telemetry_snapshot() const {
+  // GetSnapshot() releases the single-flight cache lock before this function
+  // separately obtains the replacement-state lock via Sizes(). Do not combine
+  // these two snapshots under nested locks.
+  const auto cache = impl_->prepared.GetSnapshot();
+  const auto replacement_sizes = impl_->replacements.Sizes();
+  return {
+      static_cast<std::uint64_t>(cache.completed_entries),
+      static_cast<std::uint64_t>(cache.retained_payload_bytes),
+      static_cast<std::uint64_t>(cache.in_flight_entries),
+      static_cast<std::uint64_t>(replacement_sizes.second),
+      impl_->device_count.load(std::memory_order_relaxed),
+      impl_->matched_shaders.load(std::memory_order_relaxed),
+      impl_->prepared_shaders.load(std::memory_order_relaxed),
+      impl_->replacements_created.load(std::memory_order_relaxed),
+      impl_->replacements_failed.load(std::memory_order_relaxed),
+      impl_->replacement_binds.load(std::memory_order_relaxed)};
 }
 
 } // namespace wuwa_tfr

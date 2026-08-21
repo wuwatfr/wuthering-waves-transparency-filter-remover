@@ -3,12 +3,14 @@
 
 #ifdef _WIN32
 #include <Windows.h>
+#include <Psapi.h>
 #include <imgui.h>
 #include <reshade.hpp>
 
 #include "device_activity_state.hpp"
 #include "dxc_bridge.hpp"
 #include "fade_primitive_runtime.hpp"
+#include "memory_telemetry.hpp"
 #include "wuwa_process.hpp"
 #if WUWA_TFR_DEVTOOLS
 #include "dxil_dither_diagnostic.hpp"
@@ -36,6 +38,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -516,6 +519,7 @@ std::filesystem::path g_dump_path;
 std::filesystem::path g_addon_directory;
 #if !WUWA_TFR_DEVTOOLS
 wuwa_tfr::FadePrimitiveRuntime g_public_antifade_runtime;
+wuwa_tfr::MemoryTelemetryController g_memory_telemetry;
 #endif
 
 std::uint64_t Fnv1a64(const void* data, std::size_t size) {
@@ -801,6 +805,43 @@ bool IsWuwaProcess() {
 void Log(reshade::log::level level, const std::string& message) {
   reshade::log::message(level, ("[WuwaTFR] " + message).c_str());
 }
+
+#if !WUWA_TFR_DEVTOOLS
+struct ProcessMemoryTelemetryMetrics {
+  std::uint64_t working_set_bytes = 0;
+  std::uint64_t private_commit_bytes = 0;
+  std::uint64_t handle_count = 0;
+  bool memory_query_succeeded = false;
+  bool handle_query_succeeded = false;
+};
+
+ProcessMemoryTelemetryMetrics QueryCurrentProcessMemoryTelemetry() noexcept {
+  ProcessMemoryTelemetryMetrics metrics;
+  PROCESS_MEMORY_COUNTERS_EX counters{};
+  counters.cb = sizeof(counters);
+  if (GetProcessMemoryInfo(GetCurrentProcess(),
+          reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+          sizeof(counters))) {
+    metrics.working_set_bytes =
+        static_cast<std::uint64_t>(counters.WorkingSetSize);
+    metrics.private_commit_bytes =
+        static_cast<std::uint64_t>(counters.PrivateUsage);
+    metrics.memory_query_succeeded = true;
+  }
+  DWORD handle_count = 0;
+  if (GetProcessHandleCount(GetCurrentProcess(), &handle_count)) {
+    metrics.handle_count = handle_count;
+    metrics.handle_query_succeeded = true;
+  }
+  return metrics;
+}
+
+void LogMemoryTelemetry(reshade::log::level level, std::string_view message) {
+  std::string line = "[WuwaTFR][memory] ";
+  line.append(message);
+  reshade::log::message(level, line.c_str());
+}
+#endif
 
 std::filesystem::path DumpDir() {
   if (g_dump_path.empty()) return {};
@@ -3988,6 +4029,7 @@ void OnBindPublicPipeline(command_list* list, pipeline_stage stages,
   if (g_target_process)
     g_public_antifade_runtime.OnBindPipeline(list, stages, application_pipeline);
 }
+
 #endif
 
 void DrawTraceOverlay() {
@@ -4694,6 +4736,65 @@ void OnBindPublicPipeline(command_list* list, pipeline_stage stages,
   if (g_target_process)
     g_public_antifade_runtime.OnBindPipeline(list, stages, application_pipeline);
 }
+
+void EmitPublicMemoryTelemetryPresent() {
+  const auto now = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+  const auto ticket = g_memory_telemetry.TryAcquireSample(now);
+  if (!ticket || !g_memory_telemetry.IsCurrent(*ticket)) return;
+
+  const auto process = QueryCurrentProcessMemoryTelemetry();
+  const auto runtime = g_public_antifade_runtime.memory_telemetry_snapshot();
+  if (!g_memory_telemetry.IsCurrent(*ticket)) return;
+
+  wuwa_tfr::MemoryTelemetrySnapshot snapshot;
+  snapshot.working_set_bytes = process.working_set_bytes;
+  snapshot.private_commit_bytes = process.private_commit_bytes;
+  snapshot.handle_count = process.handle_count;
+  snapshot.shader_cache_entries = runtime.shader_cache_entries;
+  snapshot.shader_cache_bytecode_bytes = runtime.shader_cache_bytecode_bytes;
+  snapshot.preparations_in_flight = runtime.preparations_in_flight;
+  snapshot.live_replacement_pipelines = runtime.live_replacement_pipelines;
+  snapshot.active_devices = runtime.active_devices;
+  snapshot.matched_shaders_total = runtime.matched_shaders_total;
+  snapshot.prepared_shaders_total = runtime.prepared_shaders_total;
+  snapshot.replacements_created_total = runtime.replacements_created_total;
+  snapshot.replacements_failed_total = runtime.replacements_failed_total;
+  snapshot.replacement_binds_total = runtime.replacement_binds_total;
+
+  const bool process_query_failed = !process.memory_query_succeeded ||
+      !process.handle_query_succeeded;
+  const std::string start_line = ticket->schema_start
+      ? wuwa_tfr::FormatMemoryTelemetryStart(*ticket) : std::string{};
+  const std::string sample_line =
+      wuwa_tfr::FormatMemoryTelemetrySample(*ticket, snapshot);
+  g_memory_telemetry.EmitIfCurrent(*ticket, [&] {
+    if (!start_line.empty())
+      LogMemoryTelemetry(reshade::log::level::info, start_line);
+    // At most one warning every ten minutes (and at session start) if a
+    // Windows process query is unavailable. The sample still reports all
+    // available WuwaTFR retention and activity counters.
+    if (process_query_failed &&
+        (ticket->sample == 0 || ticket->sample %
+            wuwa_tfr::kMemoryTelemetryWarningIntervalSamples == 0)) {
+      LogMemoryTelemetry(reshade::log::level::warning,
+          "process_query_failed=1 session=" + std::to_string(ticket->session) +
+          " sample=" + std::to_string(ticket->sample) +
+          " unavailable_process_fields_are_zero=1");
+    }
+    LogMemoryTelemetry(reshade::log::level::info, sample_line);
+  });
+}
+
+void OnPublicMemoryTelemetryPresent(
+    command_queue*, swapchain*, const rect*, const rect*, std::uint32_t,
+    const rect*) noexcept {
+  // Keep the disabled production present path to this atomic check only.
+  if (!g_memory_telemetry.enabled()) return;
+  (void)wuwa_tfr::InvokeMemoryTelemetryNoThrow(
+      [] { EmitPublicMemoryTelemetryPresent(); });
+}
 #endif
 
 void DrawOverlay(effect_runtime*) {
@@ -4710,6 +4811,11 @@ void DrawOverlay(effect_runtime*) {
     g_public_antifade_runtime.set_enabled(antifade_enabled);
     SaveConfigFlag(L"EnableTFR", antifade_enabled);
   }
+  bool memory_telemetry_enabled = g_memory_telemetry.enabled();
+  if (ImGui::Checkbox("Log memory telemetry (10 s)", &memory_telemetry_enabled))
+    g_memory_telemetry.SetEnabled(memory_telemetry_enabled);
+  ImGui::TextDisabled(
+      "Session-only; writes one sample every 10 seconds to ReShade.log.");
 #endif
 
 #if WUWA_TFR_DEVTOOLS
@@ -4779,6 +4885,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
       reshade::register_event<reshade::addon_event::init_pipeline>(OnInitPublicPipeline);
       reshade::register_event<reshade::addon_event::destroy_pipeline>(OnDestroyPublicPipeline);
       reshade::register_event<reshade::addon_event::bind_pipeline>(OnBindPublicPipeline);
+      reshade::register_event<reshade::addon_event::present>(
+          OnPublicMemoryTelemetryPresent);
 #endif
 #if WUWA_TFR_DEVTOOLS
       reshade::register_event<reshade::addon_event::init_resource>(
