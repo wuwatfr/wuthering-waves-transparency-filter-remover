@@ -14,6 +14,7 @@ enum class FadePrimitiveConsumer : std::uint8_t {
   Unknown,
   Discard,
   SvTargetAlpha,
+  SvTargetRgb,
   DiscardAndSvTargetAlpha,
   OtherVisibilityOrOutput,
 };

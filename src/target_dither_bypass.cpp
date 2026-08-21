@@ -358,6 +358,7 @@ bool FindVerifiedPhiAtRange(
 bool IsProductionConsumer(FadePrimitiveConsumer consumer) noexcept {
   return consumer == FadePrimitiveConsumer::Discard ||
       consumer == FadePrimitiveConsumer::SvTargetAlpha ||
+      consumer == FadePrimitiveConsumer::SvTargetRgb ||
       consumer == FadePrimitiveConsumer::DiscardAndSvTargetAlpha;
 }
 

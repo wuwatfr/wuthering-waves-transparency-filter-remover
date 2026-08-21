@@ -208,6 +208,45 @@ call void @dx.op.discard(i32 82, i1 %kill)
       "%d1 = phi float [ 1.000000e+00, %on1 ], [ 1.000000e+00, %entry1 ]") !=
       std::string::npos);
 
+  // A second real shader shape sends one verified primitive to all three RGB
+  // components of an SV_Target while another primitive controls discard.
+  // Rejecting the first as a generic output used to reject the whole shader
+  // and leave the character's outer surface faded.
+  std::string rgb_and_discard = all_instances_ir;
+  const std::string alpha_output =
+      "%alpha = fmul fast float %d0, %opacity\n"
+      "call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %alpha)  ; SV_Target";
+  const std::string rgb_output =
+      "%red = fmul fast float %d0, %color0\n"
+      "%green = fmul fast float %d0, %color1\n"
+      "%blue = fmul fast float %d0, %color2\n"
+      "call void @dx.op.storeOutput.f32(i32 5, i32 3, i32 0, i8 0, float %red)\n"
+      "call void @dx.op.storeOutput.f32(i32 5, i32 3, i32 0, i8 1, float %green)\n"
+      "call void @dx.op.storeOutput.f32(i32 5, i32 3, i32 0, i8 2, float %blue)";
+  const std::size_t alpha_output_offset = rgb_and_discard.find(alpha_output);
+  CHECK(alpha_output_offset != std::string::npos);
+  rgb_and_discard.replace(alpha_output_offset, alpha_output.size(), rgb_output);
+  rgb_and_discard += "!900 = !{i32 3, !\"SV_Target\", i8 9}\n";
+  const auto rgb_diagnostic =
+      wuwa_tfr::AnalyzeFadePrimitiveV1(rgb_and_discard);
+  CHECK(rgb_diagnostic.instances.size() == 2);
+  CHECK(rgb_diagnostic.instances[0].consumer ==
+      wuwa_tfr::FadePrimitiveConsumer::SvTargetRgb);
+  CHECK(rgb_diagnostic.instances[1].consumer ==
+      wuwa_tfr::FadePrimitiveConsumer::Discard);
+  const auto rgb_patched =
+      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+          rgb_and_discard);
+  CHECK(rgb_patched.success);
+  CHECK(rgb_patched.verified_instance_count == 2);
+  CHECK(rgb_patched.patched_instance_count == 2);
+  CHECK(rgb_patched.llvm_ir.find(
+      "%d0 = phi float [ 1.000000e+00, %on0 ], [ 1.000000e+00, %entry0 ]") !=
+      std::string::npos);
+  CHECK(rgb_patched.llvm_ir.find(
+      "%d1 = phi float [ 1.000000e+00, %on1 ], [ 1.000000e+00, %entry1 ]") !=
+      std::string::npos);
+
   // Function/source identity, rather than local SSA spelling, selects each
   // independently verified phi. Both functions intentionally reuse every SSA
   // name in this fixture.
@@ -246,7 +285,7 @@ entry:
       std::string::npos);
 
   // Diagnostic classifications are useful, but Production accepts only the
-  // three explicit visibility consumers.
+  // four explicit visibility consumers.
   auto unknown_consumer = all_instances_ir;
   const std::size_t output = unknown_consumer.find("@dx.op.storeOutput.f32");
   unknown_consumer.replace(output, std::string("@dx.op.storeOutput.f32").size(),

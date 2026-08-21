@@ -52,6 +52,22 @@ std::string DiscardConsumer() {
       "call void @dx.op.discard(i32 82, i1 %kill)";
 }
 
+std::string SvTargetRgbConsumer() {
+  return "%red = fmul fast float %dither, %color0\n"
+      "%green = fmul fast float %dither, %color1\n"
+      "%blue = fmul fast float %dither, %color2\n"
+      "call void @dx.op.storeOutput.f32(i32 5, i32 3, i32 0, i8 0, float %red)\n"
+      "call void @dx.op.storeOutput.f32(i32 5, i32 3, i32 0, i8 1, float %green)\n"
+      "call void @dx.op.storeOutput.f32(i32 5, i32 3, i32 0, i8 2, float %blue)";
+}
+
+std::string SvTargetMetadata(std::uint32_t signature = 3,
+    std::uint32_t metadata = 900) {
+  return "!" + std::to_string(metadata) + " = !{i32 " +
+      std::to_string(signature) +
+      ", !\"SV_Target\", i8 9}\n";
+}
+
 } // namespace
 
 int main() {
@@ -109,6 +125,86 @@ int main() {
             DiscardConsumer())));
     CHECK(result.instances.size() == 1);
     CHECK(result.instances.front().consumer == wuwa_tfr::FadePrimitiveConsumer::DiscardAndSvTargetAlpha);
+  }
+  {
+    const std::string rgb = Module(PrimitiveFunction(
+        "target_rgb", SvTargetRgbConsumer())) + SvTargetMetadata();
+    const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(rgb);
+    CHECK(result.instances.size() == 1);
+    CHECK(result.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::SvTargetRgb);
+    const auto patched =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(rgb);
+    CHECK(patched.success);
+    CHECK(patched.verified_instance_count == 1);
+    CHECK(patched.patched_instance_count == 1);
+
+    // Production authorizes only an exact row-zero RGB triplet on one
+    // signature whose DXIL metadata names it SV_Target.
+    const std::string blue_store =
+        "call void @dx.op.storeOutput.f32(i32 5, i32 3, i32 0, i8 2, float %blue)";
+    std::string missing_blue = rgb;
+    missing_blue.erase(missing_blue.find(blue_store), blue_store.size());
+    const auto missing_blue_diagnostic =
+        wuwa_tfr::AnalyzeFadePrimitiveV1(missing_blue);
+    CHECK(missing_blue_diagnostic.instances.size() == 1);
+    CHECK(missing_blue_diagnostic.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+        missing_blue).success);
+
+    std::string duplicate_column = rgb;
+    duplicate_column.replace(duplicate_column.find("i8 2, float %blue"),
+        std::string("i8 2").size(), "i8 1");
+    const auto duplicate_column_diagnostic =
+        wuwa_tfr::AnalyzeFadePrimitiveV1(duplicate_column);
+    CHECK(duplicate_column_diagnostic.instances.size() == 1);
+    CHECK(duplicate_column_diagnostic.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
+
+    std::string wrong_row = rgb;
+    wrong_row.replace(wrong_row.find("i32 0, i8 2, float %blue"),
+        std::string("i32 0").size(), "i32 1");
+    const auto wrong_row_diagnostic =
+        wuwa_tfr::AnalyzeFadePrimitiveV1(wrong_row);
+    CHECK(wrong_row_diagnostic.instances.size() == 1);
+    CHECK(wrong_row_diagnostic.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
+
+    const std::string without_metadata = Module(PrimitiveFunction(
+        "target_rgb_without_metadata", SvTargetRgbConsumer()));
+    const auto without_metadata_diagnostic =
+        wuwa_tfr::AnalyzeFadePrimitiveV1(without_metadata);
+    CHECK(without_metadata_diagnostic.instances.size() == 1);
+    CHECK(without_metadata_diagnostic.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
+
+    std::string mixed_signature = rgb + SvTargetMetadata(4, 901);
+    mixed_signature.replace(mixed_signature.find(
+        "i32 3, i32 0, i8 2, float %blue"), std::string("i32 3").size(),
+        "i32 4");
+    const auto mixed_signature_diagnostic =
+        wuwa_tfr::AnalyzeFadePrimitiveV1(mixed_signature);
+    CHECK(mixed_signature_diagnostic.instances.size() == 1);
+    CHECK(mixed_signature_diagnostic.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
+
+    const std::string duplicate_signature_metadata =
+        rgb + SvTargetMetadata(3, 901);
+    const auto duplicate_signature_diagnostic =
+        wuwa_tfr::AnalyzeFadePrimitiveV1(duplicate_signature_metadata);
+    CHECK(duplicate_signature_diagnostic.instances.size() == 1);
+    CHECK(duplicate_signature_diagnostic.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
+
+    const std::string signature_prefix = Module(PrimitiveFunction(
+        "target_rgb_signature_prefix", SvTargetRgbConsumer())) +
+        SvTargetMetadata(30);
+    const auto signature_prefix_diagnostic =
+        wuwa_tfr::AnalyzeFadePrimitiveV1(signature_prefix);
+    CHECK(signature_prefix_diagnostic.instances.size() == 1);
+    CHECK(signature_prefix_diagnostic.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
   }
   {
     // Same local SSA names in another function must not complete a candidate.

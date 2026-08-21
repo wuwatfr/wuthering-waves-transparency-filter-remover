@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <limits>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -425,9 +426,125 @@ bool IsCoverageExpression(const Function& function, std::string_view enabled_val
 
 struct ConsumerAnalysis { FadePrimitiveConsumer consumer; bool complete = true; };
 
+struct StoreOutputCall {
+  std::uint32_t signature = 0;
+  std::uint32_t row = 0;
+  std::uint32_t column = 0;
+  std::string value;
+};
+
+void SkipWhitespace(std::string_view text, std::size_t& cursor) noexcept {
+  while (cursor < text.size() &&
+      std::isspace(static_cast<unsigned char>(text[cursor])) != 0)
+    ++cursor;
+}
+
+bool Consume(std::string_view text, std::size_t& cursor,
+    std::string_view expected) noexcept {
+  if (!text.substr(cursor).starts_with(expected)) return false;
+  cursor += expected.size();
+  return true;
+}
+
+bool ParseUnsigned(std::string_view text, std::size_t& cursor,
+    std::uint32_t& value) noexcept {
+  SkipWhitespace(text, cursor);
+  const std::size_t start = cursor;
+  std::uint64_t parsed = 0;
+  while (cursor < text.size() &&
+      std::isdigit(static_cast<unsigned char>(text[cursor])) != 0) {
+    parsed = parsed * 10 + static_cast<unsigned>(text[cursor] - '0');
+    if (parsed > std::numeric_limits<std::uint32_t>::max()) return false;
+    ++cursor;
+  }
+  if (cursor == start) return false;
+  value = static_cast<std::uint32_t>(parsed);
+  return true;
+}
+
+bool ParseTypedUnsigned(std::string_view text, std::size_t& cursor,
+    std::string_view type, std::uint32_t& value) noexcept {
+  SkipWhitespace(text, cursor);
+  if (!Consume(text, cursor, type) || cursor == text.size() ||
+      std::isspace(static_cast<unsigned char>(text[cursor])) == 0)
+    return false;
+  return ParseUnsigned(text, cursor, value);
+}
+
+bool ConsumeComma(std::string_view text, std::size_t& cursor) noexcept {
+  SkipWhitespace(text, cursor);
+  if (cursor == text.size() || text[cursor] != ',') return false;
+  ++cursor;
+  return true;
+}
+
+bool ParseStoreOutputF32(std::string_view raw, StoreOutputCall& result) {
+  const std::size_t comment = raw.find(';');
+  const std::string_view line = Trim(raw.substr(0, comment));
+  constexpr std::string_view prefix =
+      "call void @dx.op.storeOutput.f32(";
+  if (!line.starts_with(prefix)) return false;
+
+  std::size_t cursor = prefix.size();
+  std::uint32_t opcode = 0;
+  if (!ParseTypedUnsigned(line, cursor, "i32", opcode) || opcode != 5 ||
+      !ConsumeComma(line, cursor) ||
+      !ParseTypedUnsigned(line, cursor, "i32", result.signature) ||
+      !ConsumeComma(line, cursor) ||
+      !ParseTypedUnsigned(line, cursor, "i32", result.row) ||
+      !ConsumeComma(line, cursor) ||
+      !ParseTypedUnsigned(line, cursor, "i8", result.column) ||
+      !ConsumeComma(line, cursor))
+    return false;
+
+  SkipWhitespace(line, cursor);
+  constexpr std::string_view float_type = "float";
+  if (!Consume(line, cursor, float_type) || cursor == line.size() ||
+      std::isspace(static_cast<unsigned char>(line[cursor])) == 0)
+    return false;
+  SkipWhitespace(line, cursor);
+  const std::size_t value_start = cursor;
+  while (cursor < line.size() && line[cursor] != ')' && line[cursor] != ',')
+    ++cursor;
+  const std::string_view value = Trim(
+      line.substr(value_start, cursor - value_start));
+  if (!IsSsaValue(value) || cursor == line.size() || line[cursor] != ')')
+    return false;
+  result.value = std::string(value);
+  ++cursor;
+  return HasOnlyMetadataAttachments(Trim(line.substr(cursor)));
+}
+
+bool IsSvTargetSignature(const Module& module, std::uint32_t signature) {
+  const std::string prefix = "!{i32 " + std::to_string(signature) +
+      ", !\"SV_Target\",";
+  bool found = false;
+  for (const std::string_view raw : module.globals) {
+    const std::string_view line = Trim(raw);
+    if (line.size() < 2 || line.front() != '!' ||
+        std::isdigit(static_cast<unsigned char>(line[1])) == 0)
+      continue;
+    std::size_t definition_end = 2;
+    while (definition_end < line.size() &&
+        std::isdigit(static_cast<unsigned char>(line[definition_end])) != 0)
+      ++definition_end;
+    const std::size_t equals = line.find(" = ");
+    if (equals != definition_end ||
+        !line.substr(equals + 3).starts_with(prefix))
+      continue;
+    if (found) return false;
+    found = true;
+  }
+  return found;
+}
+
 ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& module,
     std::string_view root) {
   bool discard = false, target_alpha = false, other_output = false;
+  bool has_rgb_signature = false;
+  std::uint32_t rgb_signature = 0;
+  unsigned rgb_columns = 0;
+  std::unordered_set<std::size_t> classified_outputs;
   std::unordered_set<std::string> visited;
   std::vector<std::string> pending{std::string(root)};
   while (!pending.empty()) {
@@ -438,16 +555,35 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
     if (found != function.users.end()) for (const std::size_t index : found->second) {
       const Instruction& user = function.instructions[index];
       if (user.raw.find("@dx.op.discard(") != std::string::npos) discard = true;
-      if (user.raw.find("@dx.op.storeOutput.f32") != std::string::npos) {
+      if (user.raw.find("@dx.op.storeOutput.f32") != std::string::npos &&
+          classified_outputs.insert(index).second) {
         if (user.raw.find("i8 3") != std::string::npos &&
             module.text.find("SV_Target") != std::string_view::npos) target_alpha = true;
-        else other_output = true;
+        else {
+          StoreOutputCall output;
+          if (!ParseStoreOutputF32(user.raw, output) || output.value != value ||
+              output.row != 0 || output.column >= 3 ||
+              !IsSvTargetSignature(module, output.signature) ||
+              (has_rgb_signature && output.signature != rgb_signature) ||
+              (rgb_columns & (1u << output.column)) != 0) {
+            other_output = true;
+          } else {
+            has_rgb_signature = true;
+            rgb_signature = output.signature;
+            rgb_columns |= 1u << output.column;
+          }
+        }
       }
       if (!user.lhs.empty()) pending.push_back(user.lhs);
     }
     if (visited.size() >= kConsumerTraversalLimit && !pending.empty())
       return {FadePrimitiveConsumer::Unknown, false};
   }
+  const bool target_rgb = has_rgb_signature && rgb_columns == 0x7u;
+  if (has_rgb_signature && !target_rgb) other_output = true;
+  if (other_output || (target_rgb && (discard || target_alpha)))
+    return {FadePrimitiveConsumer::OtherVisibilityOrOutput};
+  if (target_rgb) return {FadePrimitiveConsumer::SvTargetRgb};
   if (discard && target_alpha) return {FadePrimitiveConsumer::DiscardAndSvTargetAlpha};
   if (discard) return {FadePrimitiveConsumer::Discard};
   if (target_alpha) return {FadePrimitiveConsumer::SvTargetAlpha};
@@ -498,6 +634,7 @@ const char* FadePrimitiveConsumerName(FadePrimitiveConsumer consumer) noexcept {
     case FadePrimitiveConsumer::Unknown: return "unknown";
     case FadePrimitiveConsumer::Discard: return "discard";
     case FadePrimitiveConsumer::SvTargetAlpha: return "sv_target_alpha";
+    case FadePrimitiveConsumer::SvTargetRgb: return "sv_target_rgb";
     case FadePrimitiveConsumer::DiscardAndSvTargetAlpha: return "discard_and_sv_target_alpha";
     case FadePrimitiveConsumer::OtherVisibilityOrOutput: return "other_visibility_or_output";
   }
