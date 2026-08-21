@@ -64,6 +64,10 @@ add_executable(trace_submission_identity_tests
   tests/test_trace_submission_identity.cpp)
 target_include_directories(trace_submission_identity_tests PRIVATE src)
 
+add_executable(single_flight_cache_tests tests/test_single_flight_cache.cpp)
+target_include_directories(single_flight_cache_tests PRIVATE src)
+target_link_libraries(single_flight_cache_tests PRIVATE Threads::Threads)
+
 enable_testing()
 add_test(NAME pipeline_replacement_state_tests COMMAND pipeline_replacement_state_tests)
 add_test(NAME dxc_validation_policy_tests COMMAND dxc_validation_policy_tests)
@@ -72,6 +76,7 @@ add_test(NAME dxil_dither_diagnostic_tests COMMAND dxil_dither_diagnostic_tests)
 add_test(NAME fade_primitive_detector_tests COMMAND fade_primitive_detector_tests)
 add_test(NAME target_dither_bypass_tests COMMAND target_dither_bypass_tests)
 add_test(NAME trace_submission_identity_tests COMMAND trace_submission_identity_tests)
+add_test(NAME single_flight_cache_tests COMMAND single_flight_cache_tests)
 
 if(WIN32)
   set(RESHADE_INCLUDE_DIR "" CACHE PATH "Directory containing reshade.hpp")

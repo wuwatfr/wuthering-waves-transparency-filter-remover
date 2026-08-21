@@ -141,6 +141,7 @@ $testTargets = @(
     'fade_primitive_detector_tests',
     'target_dither_bypass_tests',
     'trace_submission_identity_tests',
+    'single_flight_cache_tests',
     'complete_dxil_validation_tests'
 )
 

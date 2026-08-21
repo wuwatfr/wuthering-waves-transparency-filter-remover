@@ -8,16 +8,17 @@
 #include "dxc_bridge.hpp"
 #include "fade_primitive_detector.hpp"
 #include "pipeline_replacement_state.hpp"
+#include "preparation_context_pool.hpp"
+#include "single_flight_cache.hpp"
 #include "target_dither_bypass.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace wuwa_tfr {
@@ -102,13 +103,18 @@ struct PreparedShader {
   std::shared_ptr<const std::vector<std::uint8_t>> bytecode;
   std::string failure;
 };
+
+constexpr std::size_t kDxcContextPoolCapacity = 4;
 } // namespace
 
 struct FadePrimitiveRuntime::Impl {
-  std::mutex preparation_mutex;
-  std::unordered_map<std::uint64_t, PreparedShader> prepared;
-  std::unique_ptr<DxcBridge> dxc;
+  // Lock order is activity -> single-flight cache -> DXC pool. The cache lock
+  // is released before a context is acquired or any DXC call begins. Last-
+  // device teardown holds activity exclusively, then drains the pool; it never
+  // takes the cache lock, so it cannot wait in a lock cycle with a callback.
+  SingleFlightCache<std::uint64_t, PreparedShader> prepared;
   std::filesystem::path dxc_runtime_directory;
+  PreparationContextPool<DxcBridge> dxc_pool;
   std::atomic<std::uint32_t> device_count{0};
   DeviceActivityState<DeviceId> activity;
   PipelineReplacementState<DeviceId, pipeline> replacements;
@@ -119,52 +125,77 @@ struct FadePrimitiveRuntime::Impl {
   std::atomic<std::uint64_t> replacements_failed{0};
   std::atomic<std::uint64_t> replacement_binds{0};
 
-  std::shared_ptr<const std::vector<std::uint8_t>> Prepare(
-      std::uint64_t hash, const shader_desc& original) {
-    std::lock_guard lock(preparation_mutex);
-    if (const auto entry = prepared.find(hash); entry != prepared.end())
-      return entry->second.bytecode;
+  Impl()
+      : dxc_pool(kDxcContextPoolCapacity, [this] {
+          // DxcBridge owns its own module, COM interfaces, assembler, and
+          // validator. A leased instance is never called concurrently.
+          return std::make_unique<DxcBridge>(dxc_runtime_directory);
+        }) {}
+
+  PreparedShader PrepareOne(const shader_desc& original) {
     PreparedShader state;
     state.attempted = true;
-    if (!dxc)
-      dxc = std::make_unique<DxcBridge>(dxc_runtime_directory);
-    if (!dxc->available()) {
-      state.failure = dxc->init_error();
-    } else {
-      const auto inspected = dxc->InspectShader(original.code, original.code_size);
-      if (!inspected.success) {
-        state.failure = inspected.error;
+    try {
+      auto dxc = dxc_pool.Acquire();
+      if (!dxc) {
+        state.failure = "DXC context allocation failed";
+      } else if (!dxc->available()) {
+        state.failure = dxc->init_error();
       } else {
-        const auto diagnostic = AnalyzeFadePrimitiveV1(inspected.original_ir);
-        state.matches = !diagnostic.instances.empty();
-        if (!state.matches) {
-          state.failure = "no fully verified transparency-filter primitive";
+        const auto inspected = dxc->InspectShader(original.code, original.code_size);
+        if (!inspected.success) {
+          state.failure = inspected.error;
         } else {
-          matched_shaders.fetch_add(1, std::memory_order_relaxed);
-          const auto patched = PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-              inspected.original_ir);
-          if (!patched.success ||
-              patched.verified_instance_count != diagnostic.instances.size() ||
-              patched.patched_instance_count != diagnostic.instances.size()) {
-            state.failure = patched.error.empty() ? "structural verification failed" : patched.error;
+          const auto diagnostic = AnalyzeFadePrimitiveV1(inspected.original_ir);
+          state.matches = !diagnostic.instances.empty();
+          if (!state.matches) {
+            state.failure = "no fully verified transparency-filter primitive";
           } else {
-            auto bytes = std::make_shared<std::vector<std::uint8_t>>();
-            std::string error;
-            DxilAssemblyValidationOutput result;
-            if (!dxc->AssembleAndValidate(patched.llvm_ir, *bytes, error, result)) {
-              state.failure = error;
+            matched_shaders.fetch_add(1, std::memory_order_relaxed);
+            const auto patched = PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+                inspected.original_ir);
+            if (!patched.success ||
+                patched.verified_instance_count != diagnostic.instances.size() ||
+                patched.patched_instance_count != diagnostic.instances.size()) {
+              state.failure = patched.error.empty() ?
+                  "structural verification failed" : patched.error;
             } else {
-              state.bytecode = std::move(bytes);
-              prepared_shaders.fetch_add(1, std::memory_order_relaxed);
+              auto bytes = std::make_shared<std::vector<std::uint8_t>>();
+              std::string error;
+              DxilAssemblyValidationOutput result;
+              if (!dxc->AssembleAndValidate(patched.llvm_ir, *bytes, error, result)) {
+                state.failure = error;
+              } else {
+                state.bytecode = std::move(bytes);
+                prepared_shaders.fetch_add(1, std::memory_order_relaxed);
+              }
             }
           }
         }
       }
+    } catch (const std::exception& exception) {
+      state.failure = "preparation exception: " + std::string(exception.what());
+    } catch (...) {
+      state.failure = "preparation exception";
     }
-    const auto inserted = prepared.emplace(hash, std::move(state));
-    if (!inserted.first->second.bytecode)
+    if (!state.bytecode)
       replacements_failed.fetch_add(1, std::memory_order_relaxed);
-    return inserted.first->second.bytecode;
+    return state;
+  }
+
+  std::shared_ptr<const std::vector<std::uint8_t>> Prepare(
+      std::uint64_t hash, const shader_desc& original) {
+    const PreparedShader state = prepared.GetOrPrepare(
+        hash,
+        [&] { return PrepareOne(original); },
+        [&] {
+          PreparedShader aborted;
+          aborted.attempted = true;
+          aborted.failure = "preparation aborted";
+          replacements_failed.fetch_add(1, std::memory_order_relaxed);
+          return aborted;
+        });
+    return state.bytecode;
   }
 };
 
@@ -192,8 +223,10 @@ void FadePrimitiveRuntime::OnDestroyDevice(device* owner) {
     owner->destroy_pipeline(*item.replacements.final_antifade);
   }
   if (impl_->device_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-    std::lock_guard lock(impl_->preparation_mutex);
-    impl_->dxc.reset();
+    // Deactivate holds activity exclusively, so all callers that can lease a
+    // DXC context have returned. Drain also protects against future changes
+    // that add a preparation path outside this callback.
+    impl_->dxc_pool.Drain();
   }
 }
 
