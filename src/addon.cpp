@@ -4698,6 +4698,7 @@ void OnBindPublicPipeline(command_list* list, pipeline_stage stages,
 
 void DrawOverlay(effect_runtime*) {
   ImGui::TextUnformatted("WuwaTFR");
+  ImGui::TextDisabled("Build: %s", WUWA_TFR_BUILD_COMMIT);
 #if WUWA_TFR_DEVTOOLS
   ImGui::TextUnformatted("Dev: isolated causal bypass experiments available");
   ImGui::TextDisabled(

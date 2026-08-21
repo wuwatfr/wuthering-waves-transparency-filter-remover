@@ -8,6 +8,25 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Threads REQUIRED)
+
+# Capture source revision at configure time so the add-on can report precisely
+# which commit produced a binary, without requiring Git on an end-user system.
+set(WUWA_TFR_BUILD_COMMIT "unknown")
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RESULT_VARIABLE WUWA_TFR_BUILD_COMMIT_RESULT
+    OUTPUT_VARIABLE WUWA_TFR_BUILD_COMMIT_CANDIDATE
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(WUWA_TFR_BUILD_COMMIT_RESULT EQUAL 0 AND
+      WUWA_TFR_BUILD_COMMIT_CANDIDATE MATCHES "^[0-9A-Fa-f]+$")
+    set(WUWA_TFR_BUILD_COMMIT "${WUWA_TFR_BUILD_COMMIT_CANDIDATE}")
+  endif()
+endif()
+
 add_executable(pipeline_replacement_state_tests tests/test_pipeline_replacement_state.cpp)
 target_include_directories(pipeline_replacement_state_tests PRIVATE src)
 target_link_libraries(pipeline_replacement_state_tests PRIVATE Threads::Threads)
@@ -84,6 +103,7 @@ if(WIN32)
         WIN32_LEAN_AND_MEAN
         NOMINMAX
         WUWA_TFR_DEVTOOLS=${DEVTOOLS_VALUE}
+        WUWA_TFR_BUILD_COMMIT=\"${WUWA_TFR_BUILD_COMMIT}\"
       )
       if(MSVC)
         target_compile_options(${TARGET_NAME} PRIVATE /Gy /Gw)
