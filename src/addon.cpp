@@ -3666,14 +3666,15 @@ bool WriteCurrentInvestigationRange(
 }
 #endif
 
+#if WUWA_TFR_DEVTOOLS
+// Only registered as an event in the Dev build (see DllMain); Production
+// never wires this up, so it must not be compiled into that binary.
 bool OnCreatePipeline(
     device* owner,
     pipeline_layout,
     std::uint32_t subobject_count,
     const pipeline_subobject* subobjects) {
-#if WUWA_TFR_DEVTOOLS
   if (g_target_bypass_internal_create) return false;
-#endif
   // Dev capture observes the original descriptor only; it never mutates it.
   if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
       (!g_diagnostic && !g_dump) || !subobjects)
@@ -3692,6 +3693,7 @@ bool OnCreatePipeline(
   }
   return false;
 }
+#endif
 
 void OnInitDevice(device* owner) {
   if (!g_target_process || !owner || owner->get_api() != device_api::d3d12)
@@ -4000,37 +4002,6 @@ void DrawFadePrimitiveTargetModes() {
   }
   ImGui::EndTable();
 }
-
-#if !WUWA_TFR_DEVTOOLS
-void OnInitPublicDevice(device* owner) {
-  OnInitDevice(owner);
-  if (g_target_process) g_public_antifade_runtime.OnInitDevice(owner);
-}
-
-void OnDestroyPublicDevice(device* owner) {
-  if (g_target_process) g_public_antifade_runtime.OnDestroyDevice(owner);
-  OnDestroyDevice(owner);
-}
-
-void OnInitPublicPipeline(device* owner, pipeline_layout layout,
-    std::uint32_t count, const pipeline_subobject* subobjects,
-    pipeline application_pipeline) {
-  if (g_target_process) g_public_antifade_runtime.OnInitPipeline(
-      owner, layout, count, subobjects, application_pipeline);
-}
-
-void OnDestroyPublicPipeline(device* owner, pipeline application_pipeline) {
-  if (g_target_process)
-    g_public_antifade_runtime.OnDestroyPipeline(owner, application_pipeline);
-}
-
-void OnBindPublicPipeline(command_list* list, pipeline_stage stages,
-    pipeline application_pipeline) {
-  if (g_target_process)
-    g_public_antifade_runtime.OnBindPipeline(list, stages, application_pipeline);
-}
-
-#endif
 
 void DrawTraceOverlay() {
   if (!ImGui::CollapsingHeader(
