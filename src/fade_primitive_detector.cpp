@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <initializer_list>
 #include <limits>
 #include <string_view>
 #include <unordered_map>
@@ -19,12 +20,33 @@ namespace {
 constexpr std::size_t kBackwardSliceLimit = 2048;
 constexpr std::size_t kConsumerTraversalLimit = 4096;
 
+bool ParseUnsigned(std::string_view text, std::size_t& cursor,
+    std::uint32_t& value) noexcept;
+bool IsSsaValue(std::string_view value) noexcept;
+
+struct LoadInputF32Call {
+  std::uint32_t signature = 0;
+  std::uint32_t row = 0;
+  std::uint32_t column = 0;
+};
+
+bool ParseLoadInputF32(
+    std::string_view line, LoadInputF32Call& result) noexcept;
+
 struct Instruction {
-  std::string raw;
+  // Only comment-free LLVM code is used to build the SSA graph or authorize
+  // a replacement. The comment remains diagnostic text only.
+  std::string code;
+  std::string comment;
   std::string lhs;
   std::string rhs;
   std::size_t start = 0;
   std::size_t end = 0;
+};
+
+struct GlobalLine {
+  std::string code;
+  std::string comment;
 };
 
 struct Function {
@@ -38,9 +60,8 @@ struct Function {
 };
 
 struct Module {
-  std::string_view text;
   bool complete = true;
-  std::vector<std::string_view> globals;
+  std::vector<GlobalLine> globals;
   std::vector<Function> functions;
 };
 
@@ -54,6 +75,27 @@ std::string_view Trim(std::string_view text) {
   if (first == std::string_view::npos) return {};
   const std::size_t last = text.find_last_not_of(" \t\r");
   return text.substr(first, last - first + 1);
+}
+
+struct CodeAndComment {
+  std::string_view code;
+  std::string_view comment;
+};
+
+// A semicolon in an LLVM metadata string is not a comment delimiter. Outside
+// a quoted string, retain the comment separately and never tokenize it.
+CodeAndComment SplitCodeAndComment(std::string_view text) noexcept {
+  bool quoted = false;
+  for (std::size_t index = 0; index < text.size(); ++index) {
+    if (quoted && text[index] == '\\' && index + 1 < text.size()) {
+      ++index;
+      continue;
+    }
+    if (text[index] == '"') quoted = !quoted;
+    if (!quoted && text[index] == ';')
+      return {text.substr(0, index), text.substr(index + 1)};
+  }
+  return {text, {}};
 }
 
 std::vector<std::string> SsaValues(std::string_view text) {
@@ -83,44 +125,56 @@ std::string FunctionIdentity(std::string_view header) {
 
 void AddInstruction(Function& function, std::string_view raw,
     std::size_t start, std::size_t end) {
+  const CodeAndComment split = SplitCodeAndComment(raw);
+  const std::string_view code = Trim(split.code);
+  if (code.empty()) return;
   Instruction instruction;
-  instruction.raw = std::string(raw);
+  instruction.code = std::string(code);
+  instruction.comment = std::string(Trim(split.comment));
   instruction.start = start;
   instruction.end = end;
-  const std::string_view trimmed = Trim(raw);
-  const std::size_t equals = trimmed.find(" = ");
+  const std::size_t equals = code.find(" = ");
   if (equals != std::string_view::npos) {
-    const std::string_view lhs = Trim(trimmed.substr(0, equals));
+    const std::string_view lhs = Trim(code.substr(0, equals));
     if (!lhs.empty() && lhs.front() == '%') {
       instruction.lhs = std::string(lhs);
-      instruction.rhs = std::string(trimmed.substr(equals + 3));
+      instruction.rhs = std::string(code.substr(equals + 3));
     }
   }
   const std::size_t index = function.instructions.size();
   if (!instruction.lhs.empty() &&
       !function.definitions.emplace(instruction.lhs, index).second)
     function.complete = false;
-  for (const std::string& value : SsaValues(instruction.raw))
-    function.users[value].push_back(index);
+  // For an SSA definition the LHS names the value being defined; it is not
+  // one of that instruction's operands and must never become a synthetic
+  // self-user. Instructions without an LHS are terminal users, so their full
+  // comment-free code remains the operand source.
+  const std::string_view operands = instruction.lhs.empty()
+      ? std::string_view(instruction.code)
+      : std::string_view(instruction.rhs);
+  std::unordered_set<std::string> unique_operands;
+  for (const std::string& value : SsaValues(operands))
+    if (unique_operands.insert(value).second)
+      function.users[value].push_back(index);
   function.instructions.push_back(std::move(instruction));
 }
 
 Module ParseModule(const std::string& llvm_ir) {
   Module module;
-  module.text = llvm_ir;
   Function* current = nullptr;
   std::unordered_set<std::string> identities;
   for (std::size_t start = 0; start <= llvm_ir.size();) {
     const std::size_t newline = llvm_ir.find('\n', start);
     const std::size_t end = newline == std::string::npos ? llvm_ir.size() : newline;
     const std::string_view line(llvm_ir.data() + start, end - start);
-    const std::string_view trimmed = Trim(line);
+    const CodeAndComment split = SplitCodeAndComment(line);
+    const std::string_view code = Trim(split.code);
     if (!current) {
-      if (trimmed.starts_with("define ")) {
-        const std::size_t brace = trimmed.find('{');
-        const std::string identity = FunctionIdentity(trimmed);
+      if (code.starts_with("define ")) {
+        const std::size_t brace = code.find('{');
+        const std::string identity = FunctionIdentity(code);
         if (brace == std::string_view::npos || identity.empty() ||
-            !Trim(trimmed.substr(brace + 1)).empty() ||
+            !Trim(code.substr(brace + 1)).empty() ||
             !identities.insert(identity).second) {
           module.complete = false;
         } else {
@@ -129,17 +183,17 @@ Module ParseModule(const std::string& llvm_ir) {
           current->identity = identity;
           current->start = start;
         }
-      } else if (trimmed == "}") {
+      } else if (code == "}") {
         module.complete = false;
-      } else {
-        module.globals.push_back(line);
+      } else if (!code.empty()) {
+        module.globals.push_back({std::string(code), std::string(Trim(split.comment))});
       }
-    } else if (trimmed.starts_with("define ") || trimmed == "{") {
+    } else if (code.starts_with("define ") || code == "{") {
       current->complete = false;
-    } else if (trimmed == "}") {
+    } else if (code == "}") {
       current->end = end;
       current = nullptr;
-    } else {
+    } else if (!code.empty()) {
       AddInstruction(*current, line, start, end);
     }
     if (newline == std::string::npos) break;
@@ -184,23 +238,94 @@ Slice BackwardSlice(const Function& function, std::string_view root,
   return slice;
 }
 
-bool SliceContains(const Function& function, const Slice& slice,
-    std::string_view needle) {
+bool IsIrTokenDelimiter(char value) noexcept {
+  return std::isspace(static_cast<unsigned char>(value)) != 0 ||
+      value == ',' || value == '(' || value == ')' || value == '[' ||
+      value == ']' || value == '{' || value == '}' || value == '=' ||
+      value == '*';
+}
+
+std::vector<std::string_view> IrTokens(std::string_view code) {
+  std::vector<std::string_view> tokens;
+  for (std::size_t cursor = 0; cursor < code.size();) {
+    if (std::isspace(static_cast<unsigned char>(code[cursor])) != 0) {
+      ++cursor;
+      continue;
+    }
+    if (std::string_view(",()[]{}=*").find(code[cursor]) !=
+        std::string_view::npos) {
+      tokens.emplace_back(code.substr(cursor++, 1));
+      continue;
+    }
+    const std::size_t start = cursor;
+    while (cursor < code.size() && !IsIrTokenDelimiter(code[cursor])) ++cursor;
+    if (cursor != start) tokens.emplace_back(code.substr(start, cursor - start));
+  }
+  return tokens;
+}
+
+bool HasExactToken(std::string_view code, std::string_view expected) {
+  for (const std::string_view token : IrTokens(code))
+    if (token == expected) return true;
+  return false;
+}
+
+bool HasInstructionOpcode(const Instruction& instruction,
+    std::string_view opcode) {
+  const auto tokens = IrTokens(instruction.rhs);
+  return !tokens.empty() && tokens.front() == opcode;
+}
+
+bool IsDxOpCallWithOpcode(const Instruction& instruction,
+    std::string_view callee, std::uint32_t opcode) {
+  const auto tokens = IrTokens(instruction.rhs);
+  if (tokens.size() < 7 || tokens[0] != "call" || tokens[2] != callee ||
+      tokens[3] != "(" || tokens[4] != "i32")
+    return false;
+  std::uint32_t parsed = 0;
+  std::size_t cursor = 0;
+  return ParseUnsigned(tokens[5], cursor, parsed) &&
+      cursor == tokens[5].size() && parsed == opcode && tokens[6] == ",";
+}
+
+bool SliceHasInstructionOpcode(const Function& function, const Slice& slice,
+    std::string_view opcode) {
   if (!slice.complete) return false;
   for (const std::string& value : slice.values) {
     const Instruction* definition = Definition(function, value);
-    if (definition && definition->rhs.find(needle) != std::string::npos) return true;
+    if (definition && HasInstructionOpcode(*definition, opcode)) return true;
   }
   return false;
 }
 
-std::size_t SliceCount(const Function& function, const Slice& slice,
-    std::string_view needle) {
+std::size_t SliceCountInstructionOpcode(const Function& function,
+    const Slice& slice, std::string_view opcode) {
   if (!slice.complete) return 0;
   std::size_t count = 0;
   for (const std::string& value : slice.values) {
     const Instruction* definition = Definition(function, value);
-    if (definition && definition->rhs.find(needle) != std::string::npos) ++count;
+    if (definition && HasInstructionOpcode(*definition, opcode)) ++count;
+  }
+  return count;
+}
+
+bool SliceHasExactToken(const Function& function, const Slice& slice,
+    std::string_view token) {
+  if (!slice.complete) return false;
+  for (const std::string& value : slice.values) {
+    const Instruction* definition = Definition(function, value);
+    if (definition && HasExactToken(definition->rhs, token)) return true;
+  }
+  return false;
+}
+
+std::size_t SliceCountExactToken(const Function& function, const Slice& slice,
+    std::string_view token) {
+  if (!slice.complete) return 0;
+  std::size_t count = 0;
+  for (const std::string& value : slice.values) {
+    const Instruction* definition = Definition(function, value);
+    if (definition && HasExactToken(definition->rhs, token)) ++count;
   }
   return count;
 }
@@ -274,8 +399,7 @@ bool ParseConditionalBranch(
     std::string_view line,
     std::string_view& condition,
     std::array<std::string_view, 2>& successors) {
-  const std::size_t comment = line.find(';');
-  line = Trim(line.substr(0, comment));
+  line = Trim(line);
   if (!line.starts_with("br i1 ")) return false;
   const std::size_t first_comma = line.find(',', std::string_view("br i1 ").size());
   if (first_comma == std::string_view::npos) return false;
@@ -305,7 +429,7 @@ bool ParseConditionalBranch(
 bool HasCbufferControlledGate(const Function& function,
     std::string_view enabled_predecessor) {
   for (const Instruction& instruction : function.instructions) {
-    const std::string_view line = Trim(instruction.raw);
+    const std::string_view line = instruction.code;
     std::string_view condition;
     std::array<std::string_view, 2> successors;
     if (!ParseConditionalBranch(line, condition, successors) ||
@@ -313,95 +437,158 @@ bool HasCbufferControlledGate(const Function& function,
       continue;
     const Slice gate_slice = BackwardSlice(function, condition);
     if (!gate_slice.complete) return false;
-    if (SliceContains(function, gate_slice, "@dx.op.cbufferLoad") ||
-        SliceContains(function, gate_slice, "@dx.op.cbufferLoadLegacy")) return true;
+    for (const std::string& value : gate_slice.values) {
+      const Instruction* definition = Definition(function, value);
+      if (definition &&
+          (IsDxOpCallWithOpcode(*definition,
+               "@dx.op.cbufferLoadLegacy.f32", 59) ||
+           IsDxOpCallWithOpcode(*definition,
+               "@dx.op.cbufferLoad.f32", 58)))
+        return true;
+    }
   }
   return false;
 }
 
-bool IsNineElementThresholdAccess(const Instruction& instruction) {
-  return instruction.rhs.find("getelementptr") != std::string::npos &&
-      instruction.rhs.find("[9 x float]") != std::string::npos;
+struct ThresholdAccess {
+  std::string global;
+  std::string index;
+};
+
+bool IsGlobalSymbol(std::string_view value) noexcept {
+  if (value.size() < 2 || value.front() != '@') return false;
+  for (std::size_t index = 1; index < value.size(); ++index)
+    if (!IsSsaCharacter(value[index])) return false;
+  return true;
 }
 
-bool ReferencedGlobalSymbol(const Instruction& instruction, std::string& symbol) {
-  for (std::size_t offset = 0; offset < instruction.rhs.size(); ++offset) {
-    if (instruction.rhs[offset] != '@') continue;
-    const std::size_t begin = offset++;
-    while (offset < instruction.rhs.size() && IsSsaCharacter(instruction.rhs[offset])) ++offset;
-    if (offset == begin + 1 || !symbol.empty()) return false;
-    symbol.assign(instruction.rhs.substr(begin, offset - begin));
-    if (offset == instruction.rhs.size()) break;
-    --offset;
-  }
-  return !symbol.empty();
+bool IsNineElementFloatType(const std::vector<std::string_view>& tokens,
+    std::size_t& cursor) {
+  if (cursor + 5 > tokens.size() || tokens[cursor] != "[" ||
+      tokens[cursor + 1] != "9" || tokens[cursor + 2] != "x" ||
+      tokens[cursor + 3] != "float" || tokens[cursor + 4] != "]")
+    return false;
+  cursor += 5;
+  return true;
 }
 
-bool IsNineElementFloatType(std::string_view value_type) {
-  constexpr std::string_view type = "[9 x float]";
-  if (!value_type.starts_with(type)) return false;
-  return value_type.size() == type.size() ||
-      std::isspace(static_cast<unsigned char>(value_type[type.size()])) != 0 ||
-      value_type[type.size()] == ',';
+bool ParseNineElementThresholdAccess(const Instruction& instruction,
+    ThresholdAccess& result) {
+  const auto tokens = IrTokens(instruction.rhs);
+  std::size_t cursor = 0;
+  if (cursor == tokens.size() || tokens[cursor++] != "getelementptr") return false;
+  if (cursor < tokens.size() && tokens[cursor] == "inbounds") ++cursor;
+  if (!IsNineElementFloatType(tokens, cursor) || cursor == tokens.size() ||
+      tokens[cursor++] != "," || !IsNineElementFloatType(tokens, cursor) ||
+      cursor == tokens.size() || tokens[cursor++] != "*" ||
+      cursor == tokens.size() || !IsGlobalSymbol(tokens[cursor]))
+    return false;
+  result.global = std::string(tokens[cursor++]);
+  if (cursor + 6 != tokens.size() || tokens[cursor++] != "," ||
+      tokens[cursor++] != "i32" || tokens[cursor++] != "0" ||
+      tokens[cursor++] != "," || tokens[cursor++] != "i32" ||
+      !IsSsaValue(tokens[cursor]))
+    return false;
+  result.index = std::string(tokens[cursor++]);
+  return cursor == tokens.size();
 }
 
 bool ReferencesNineElementThresholdGlobal(const Module& module,
-    const Instruction& threshold_access) {
-  std::string symbol;
-  if (!ReferencedGlobalSymbol(threshold_access, symbol)) return false;
+    std::string_view symbol) {
   bool found = false;
-  for (std::string_view raw : module.globals) {
-    const std::string_view line = Trim(raw);
-    if (!line.starts_with(symbol)) continue;
-    const std::string_view after = Trim(line.substr(symbol.size()));
-    if (!after.starts_with("=")) continue;
+  for (const GlobalLine& global : module.globals) {
+    const auto tokens = IrTokens(global.code);
+    if (tokens.size() < 3 || tokens[0] != symbol || tokens[1] != "=") continue;
     if (found) return false;
     found = true;
-    const std::string_view declaration = Trim(after.substr(1));
-    const std::size_t constant = declaration.find("constant");
-    const std::size_t global = declaration.find("global");
-    const std::size_t storage = std::min(constant, global);
-    if (storage == std::string_view::npos) return false;
-    const std::string_view keyword = storage == constant ? "constant" : "global";
-    if (!IsNineElementFloatType(Trim(declaration.substr(storage + keyword.size()))))
+    for (std::size_t cursor = 2; cursor < tokens.size(); ++cursor) {
+      if (tokens[cursor] != "constant" && tokens[cursor] != "global") continue;
+      ++cursor;
+      if (!IsNineElementFloatType(tokens, cursor)) return false;
+      break;
+    }
+    if (std::none_of(tokens.begin() + 2, tokens.end(),
+            [](std::string_view token) { return token == "constant" || token == "global"; }))
       return false;
   }
   return found;
 }
 
+std::size_t SliceCountDxOpCall(const Function& function, const Slice& slice,
+    std::string_view callee, std::uint32_t opcode) {
+  if (!slice.complete) return 0;
+  std::size_t count = 0;
+  for (const std::string& value : slice.values) {
+    const Instruction* definition = Definition(function, value);
+    if (definition && IsDxOpCallWithOpcode(*definition, callee, opcode)) ++count;
+  }
+  return count;
+}
+
+bool HasUniqueSignatureSemantic(const Module& module,
+    std::uint32_t signature, std::string_view semantic);
+
 bool IsScreenSpaceThreeByThreeIndex(const Function& function,
-    const Instruction& threshold_access, const Module& module) {
-  const auto values = SsaValues(threshold_access.rhs);
-  if (values.empty()) return false;
-  const Slice index_slice = BackwardSlice(function, values.back());
+    const ThresholdAccess& threshold_access, const Module& module) {
+  const Slice index_slice = BackwardSlice(function, threshold_access.index);
   if (!index_slice.complete) return false;
-  return SliceCount(function, index_slice, "srem i32") >= 2 &&
-      SliceCount(function, index_slice, ", 3") >= 3 &&
-      SliceContains(function, index_slice, "mul ") &&
-      SliceContains(function, index_slice, "add ") &&
-      SliceCount(function, index_slice, "fptosi") +
-          SliceCount(function, index_slice, "fptoui") >= 2 &&
-      SliceCount(function, index_slice, "@dx.op.loadInput.f32") >= 2 &&
-      module.text.find("SV_Position") != std::string_view::npos;
+  std::array<LoadInputF32Call, 2> position_inputs;
+  std::size_t position_input_count = 0;
+  for (const std::string& value : index_slice.values) {
+    const Instruction* definition = Definition(function, value);
+    if (!definition ||
+        !HasExactToken(definition->rhs, "@dx.op.loadInput.f32"))
+      continue;
+    if (position_input_count == position_inputs.size() ||
+        !ParseLoadInputF32(
+            definition->rhs, position_inputs[position_input_count]))
+      return false;
+    ++position_input_count;
+  }
+  if (position_input_count != position_inputs.size() ||
+      position_inputs[0].signature != position_inputs[1].signature ||
+      position_inputs[0].row != 0 || position_inputs[1].row != 0 ||
+      position_inputs[0].column > 1 || position_inputs[1].column > 1 ||
+      position_inputs[0].column == position_inputs[1].column ||
+      !HasUniqueSignatureSemantic(module, position_inputs[0].signature,
+          "SV_Position"))
+    return false;
+
+  return SliceCountInstructionOpcode(function, index_slice, "srem") >= 2 &&
+      SliceCountExactToken(function, index_slice, "3") >= 3 &&
+      SliceHasInstructionOpcode(function, index_slice, "mul") &&
+      SliceHasInstructionOpcode(function, index_slice, "add") &&
+      SliceCountInstructionOpcode(function, index_slice, "fptosi") +
+          SliceCountInstructionOpcode(function, index_slice, "fptoui") >= 2;
 }
 
 bool IsFloatLoadFromPointer(
     const Instruction& instruction, std::string_view expected_pointer) {
-  constexpr std::string_view kLoadPrefix = "load float,";
-  const std::string_view rhs = Trim(instruction.rhs);
-  if (!rhs.starts_with(kLoadPrefix)) return false;
-  const std::string_view operands = Trim(rhs.substr(kLoadPrefix.size()));
-  const std::size_t comma = operands.find(',');
-  const std::string_view pointer_operand = Trim(operands.substr(0, comma));
-  constexpr std::string_view kPointerType = "float*";
-  if (!pointer_operand.starts_with(kPointerType)) return false;
-  const std::string_view pointer_value = Trim(
-      pointer_operand.substr(kPointerType.size()));
-  const auto values = SsaValues(pointer_value);
-  // A load has exactly one pointer operand. Anything else is malformed or
-  // ambiguous evidence and must not authorize a rewrite.
-  return values.size() == 1 && values.front() == expected_pointer &&
-      pointer_value == expected_pointer;
+  const auto tokens = IrTokens(instruction.rhs);
+  if (tokens.size() < 6 || tokens[0] != "load" || tokens[1] != "float" ||
+      tokens[2] != "," || tokens[3] != "float" || tokens[4] != "*" ||
+      tokens[5] != expected_pointer)
+    return false;
+  // The exact pointer token is the sole load operand. Only the standard
+  // alignment suffix may follow; any extra operand is ambiguous evidence.
+  if (tokens.size() == 6) return true;
+  return tokens.size() == 9 && tokens[6] == "," && tokens[7] == "align" &&
+      !tokens[8].empty() &&
+      std::all_of(tokens[8].begin(), tokens[8].end(), [](char value) {
+        return std::isdigit(static_cast<unsigned char>(value)) != 0;
+      });
+}
+
+bool SliceHasDxOpCall(const Function& function, const Slice& slice,
+    std::string_view callee, std::uint32_t opcode) {
+  return SliceCountDxOpCall(function, slice, callee, opcode) != 0;
+}
+
+bool SliceHasExactToken(const Function& function, const Slice& slice,
+    std::initializer_list<std::string_view> tokens) {
+  for (const std::string_view token : tokens)
+    if (SliceHasExactToken(function, slice, token)) return true;
+  return false;
 }
 
 bool IsCoverageExpression(const Function& function, std::string_view enabled_value,
@@ -416,12 +603,14 @@ bool IsCoverageExpression(const Function& function, std::string_view enabled_val
       break;
     }
   }
-  return has_threshold_load && SliceContains(function, coverage_slice, "fsub") &&
-      SliceContains(function, coverage_slice, "fmul") &&
-      SliceContains(function, coverage_slice, "2.000000") &&
-      SliceContains(function, coverage_slice, "FMax(") &&
-      SliceContains(function, coverage_slice, "FMin(") &&
-      SliceContains(function, coverage_slice, "fadd");
+  return has_threshold_load &&
+      SliceHasInstructionOpcode(function, coverage_slice, "fsub") &&
+      SliceHasInstructionOpcode(function, coverage_slice, "fmul") &&
+      SliceHasExactToken(function, coverage_slice,
+          {"2.000000e+00", "2.000000", "2.0"}) &&
+      SliceHasDxOpCall(function, coverage_slice, "@dx.op.binary.f32", 35) &&
+      SliceHasDxOpCall(function, coverage_slice, "@dx.op.binary.f32", 36) &&
+      SliceHasInstructionOpcode(function, coverage_slice, "fadd");
 }
 
 struct ConsumerAnalysis { FadePrimitiveConsumer consumer; bool complete = true; };
@@ -478,9 +667,55 @@ bool ConsumeComma(std::string_view text, std::size_t& cursor) noexcept {
   return true;
 }
 
-bool ParseStoreOutputF32(std::string_view raw, StoreOutputCall& result) {
-  const std::size_t comment = raw.find(';');
-  const std::string_view line = Trim(raw.substr(0, comment));
+bool IsSignedIntegerLiteral(std::string_view value) noexcept {
+  if (value.empty()) return false;
+  std::size_t cursor = value.front() == '-' || value.front() == '+' ? 1 : 0;
+  if (cursor == value.size()) return false;
+  for (; cursor < value.size(); ++cursor)
+    if (std::isdigit(static_cast<unsigned char>(value[cursor])) == 0)
+      return false;
+  return true;
+}
+
+bool ParseLoadInputF32(
+    std::string_view line, LoadInputF32Call& result) noexcept {
+  line = Trim(line);
+  constexpr std::string_view prefix = "call float @dx.op.loadInput.f32(";
+  if (!line.starts_with(prefix)) return false;
+
+  std::size_t cursor = prefix.size();
+  std::uint32_t opcode = 0;
+  if (!ParseTypedUnsigned(line, cursor, "i32", opcode) || opcode != 4 ||
+      !ConsumeComma(line, cursor) ||
+      !ParseTypedUnsigned(line, cursor, "i32", result.signature) ||
+      !ConsumeComma(line, cursor) ||
+      !ParseTypedUnsigned(line, cursor, "i32", result.row) ||
+      !ConsumeComma(line, cursor) ||
+      !ParseTypedUnsigned(line, cursor, "i8", result.column) ||
+      !ConsumeComma(line, cursor))
+    return false;
+
+  SkipWhitespace(line, cursor);
+  if (!Consume(line, cursor, "i32") || cursor == line.size() ||
+      std::isspace(static_cast<unsigned char>(line[cursor])) == 0)
+    return false;
+  SkipWhitespace(line, cursor);
+  const std::size_t value_start = cursor;
+  while (cursor < line.size() && line[cursor] != ')' && line[cursor] != ',' &&
+      std::isspace(static_cast<unsigned char>(line[cursor])) == 0)
+    ++cursor;
+  const std::string_view value = line.substr(value_start, cursor - value_start);
+  if (value != "undef" && value != "poison" && !IsSsaValue(value) &&
+      !IsSignedIntegerLiteral(value))
+    return false;
+  SkipWhitespace(line, cursor);
+  if (cursor == line.size() || line[cursor] != ')') return false;
+  ++cursor;
+  return HasOnlyMetadataAttachments(Trim(line.substr(cursor)));
+}
+
+bool ParseStoreOutputF32(std::string_view line, StoreOutputCall& result) {
+  line = Trim(line);
   constexpr std::string_view prefix =
       "call void @dx.op.storeOutput.f32(";
   if (!line.starts_with(prefix)) return false;
@@ -515,27 +750,281 @@ bool ParseStoreOutputF32(std::string_view raw, StoreOutputCall& result) {
   return HasOnlyMetadataAttachments(Trim(line.substr(cursor)));
 }
 
-bool IsSvTargetSignature(const Module& module, std::uint32_t signature) {
-  const std::string prefix = "!{i32 " + std::to_string(signature) +
-      ", !\"SV_Target\",";
+struct DiscardCall {
+  std::string predicate;
+};
+
+bool ParseDiscardCall(std::string_view line, DiscardCall& result) {
+  line = Trim(line);
+  constexpr std::string_view prefix = "call void @dx.op.discard(";
+  if (!line.starts_with(prefix)) return false;
+  std::size_t cursor = prefix.size();
+  std::uint32_t opcode = 0;
+  if (!ParseTypedUnsigned(line, cursor, "i32", opcode) || opcode != 82 ||
+      !ConsumeComma(line, cursor))
+    return false;
+  SkipWhitespace(line, cursor);
+  if (!Consume(line, cursor, "i1") || cursor == line.size() ||
+      std::isspace(static_cast<unsigned char>(line[cursor])) == 0)
+    return false;
+  SkipWhitespace(line, cursor);
+  const std::size_t predicate_start = cursor;
+  while (cursor < line.size() && line[cursor] != ')' && line[cursor] != ',')
+    ++cursor;
+  const std::string_view predicate = Trim(
+      line.substr(predicate_start, cursor - predicate_start));
+  if (!IsSsaValue(predicate) || cursor == line.size() || line[cursor] != ')')
+    return false;
+  result.predicate = std::string(predicate);
+  ++cursor;
+  return HasOnlyMetadataAttachments(Trim(line.substr(cursor)));
+}
+
+struct MetadataDefinition {
+  std::uint32_t id = 0;
+  std::vector<std::string_view> fields;
+};
+
+enum class MetadataParseResult { NotNumericDefinition, Valid, Malformed };
+
+MetadataParseResult ParseMetadataDefinition(std::string_view line,
+    MetadataDefinition& result) {
+  result = {};
+  line = Trim(line);
+  if (line.size() < 2 || line.front() != '!' ||
+      std::isdigit(static_cast<unsigned char>(line[1])) == 0)
+    return MetadataParseResult::NotNumericDefinition;
+  std::size_t cursor = 1;
+  if (!ParseUnsigned(line, cursor, result.id))
+    return MetadataParseResult::Malformed;
+  SkipWhitespace(line, cursor);
+  if (cursor == line.size() || line[cursor++] != '=')
+    return MetadataParseResult::Malformed;
+  SkipWhitespace(line, cursor);
+  constexpr std::string_view distinct = "distinct";
+  if (line.substr(cursor).starts_with(distinct)) {
+    cursor += distinct.size();
+    if (cursor == line.size() ||
+        std::isspace(static_cast<unsigned char>(line[cursor])) == 0)
+      return MetadataParseResult::Malformed;
+    SkipWhitespace(line, cursor);
+  }
+  if (cursor + 2 > line.size() || line[cursor] != '!' ||
+      line[cursor + 1] != '{')
+    return MetadataParseResult::Malformed;
+  cursor += 2;
+  std::size_t field_cursor = cursor;
+  unsigned depth = 1;
+  bool quoted = false;
+  for (; cursor < line.size(); ++cursor) {
+    const char value = line[cursor];
+    if (quoted && value == '\\' && cursor + 1 < line.size()) {
+      ++cursor;
+      continue;
+    }
+    if (value == '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
+    if (value == '{') {
+      ++depth;
+      continue;
+    }
+    if (value == '}') {
+      if (--depth != 0) continue;
+      const std::string_view field = Trim(line.substr(field_cursor,
+          cursor - field_cursor));
+      if (field.empty()) return MetadataParseResult::Malformed;
+      result.fields.push_back(field);
+      ++cursor;
+      return Trim(line.substr(cursor)).empty() ? MetadataParseResult::Valid :
+          MetadataParseResult::Malformed;
+    }
+    if (value == ',' && depth == 1) {
+      const std::string_view field = Trim(line.substr(field_cursor,
+          cursor - field_cursor));
+      if (field.empty()) return MetadataParseResult::Malformed;
+      result.fields.push_back(field);
+      field_cursor = cursor + 1;
+    }
+  }
+  return MetadataParseResult::Malformed;
+}
+
+bool ParseMetadataSignature(std::string_view field, std::uint32_t& signature) {
+  std::size_t cursor = 0;
+  return ParseTypedUnsigned(field, cursor, "i32", signature) &&
+      Trim(field.substr(cursor)).empty();
+}
+
+bool IsValidMetadataString(std::string_view field) noexcept {
+  field = Trim(field);
+  if (field.size() < 3 || !field.starts_with("!\"")) return false;
+  for (std::size_t cursor = 2; cursor < field.size(); ++cursor) {
+    if (field[cursor] == '"') return cursor + 1 == field.size();
+    if (field[cursor] != '\\') continue;
+    if (cursor + 2 >= field.size() ||
+        std::isxdigit(static_cast<unsigned char>(field[cursor + 1])) == 0 ||
+        std::isxdigit(static_cast<unsigned char>(field[cursor + 2])) == 0)
+      return false;
+    cursor += 2;
+  }
+  return false;
+}
+
+bool IsValidTypedIntegerMetadataValue(std::string_view field) noexcept {
+  field = Trim(field);
+  if (field.size() < 4 || field.front() != 'i') return false;
+  std::size_t cursor = 1;
+  const std::size_t width_start = cursor;
+  while (cursor < field.size() &&
+      std::isdigit(static_cast<unsigned char>(field[cursor])) != 0)
+    ++cursor;
+  if (cursor == width_start || cursor == field.size() ||
+      std::isspace(static_cast<unsigned char>(field[cursor])) == 0)
+    return false;
+  SkipWhitespace(field, cursor);
+  const std::string_view value = field.substr(cursor);
+  return value == "true" || value == "false" ||
+      IsSignedIntegerLiteral(value);
+}
+
+bool ParseMetadataReference(
+    std::string_view field, std::uint32_t& reference) noexcept {
+  field = Trim(field);
+  if (field.size() < 2 || field.front() != '!' ||
+      std::isdigit(static_cast<unsigned char>(field[1])) == 0)
+    return false;
+  std::size_t cursor = 1;
+  return ParseUnsigned(field, cursor, reference) && cursor == field.size();
+}
+
+bool MetadataLineClaimsId(
+    std::string_view line, std::uint32_t expected) noexcept {
+  line = Trim(line);
+  if (line.size() < 2 || line.front() != '!' ||
+      std::isdigit(static_cast<unsigned char>(line[1])) == 0)
+    return false;
+  std::size_t cursor = 1;
+  std::uint32_t parsed = 0;
+  return ParseUnsigned(line, cursor, parsed) && parsed == expected;
+}
+
+bool FindUniqueMetadataDefinition(const Module& module, std::uint32_t id,
+    MetadataDefinition& result) {
   bool found = false;
-  for (const std::string_view raw : module.globals) {
-    const std::string_view line = Trim(raw);
-    if (line.size() < 2 || line.front() != '!' ||
-        std::isdigit(static_cast<unsigned char>(line[1])) == 0)
+  for (const GlobalLine& global : module.globals) {
+    MetadataDefinition definition;
+    const MetadataParseResult parsed =
+        ParseMetadataDefinition(global.code, definition);
+    if (parsed == MetadataParseResult::Malformed) {
+      if (MetadataLineClaimsId(global.code, id)) return false;
       continue;
-    std::size_t definition_end = 2;
-    while (definition_end < line.size() &&
-        std::isdigit(static_cast<unsigned char>(line[definition_end])) != 0)
-      ++definition_end;
-    const std::size_t equals = line.find(" = ");
-    if (equals != definition_end ||
-        !line.substr(equals + 3).starts_with(prefix))
+    }
+    if (parsed != MetadataParseResult::Valid || definition.id != id) continue;
+    if (found) return false;
+    found = true;
+    result = definition;
+  }
+  return found;
+}
+
+bool IsValidMetadataDefinition(const Module& module,
+    const MetadataDefinition& definition,
+    std::unordered_set<std::uint32_t>& resolving,
+    std::unordered_set<std::uint32_t>& validated) {
+  if (validated.contains(definition.id)) return true;
+  if (!resolving.insert(definition.id).second) return false;
+  for (const std::string_view raw_field : definition.fields) {
+    const std::string_view field = Trim(raw_field);
+    if (field == "null" || IsValidMetadataString(field) ||
+        IsValidTypedIntegerMetadataValue(field))
       continue;
+    std::uint32_t reference = 0;
+    MetadataDefinition referenced;
+    if (!ParseMetadataReference(field, reference) ||
+        !FindUniqueMetadataDefinition(module, reference, referenced) ||
+        !IsValidMetadataDefinition(module, referenced, resolving, validated)) {
+      resolving.erase(definition.id);
+      return false;
+    }
+  }
+  resolving.erase(definition.id);
+  validated.insert(definition.id);
+  return true;
+}
+
+bool HasUniqueSignatureSemantic(const Module& module,
+    std::uint32_t signature, std::string_view semantic) {
+  const std::string expected = "!\"" + std::string(semantic) + "\"";
+  std::unordered_set<std::uint32_t> definition_ids;
+  std::unordered_set<std::uint32_t> resolving;
+  std::unordered_set<std::uint32_t> validated;
+  bool found = false;
+  for (const GlobalLine& global : module.globals) {
+    MetadataDefinition definition;
+    const MetadataParseResult parsed =
+        ParseMetadataDefinition(global.code, definition);
+    if (parsed == MetadataParseResult::Malformed) {
+      // An unrelated malformed metadata node is not evidence about this
+      // semantic. A malformed node that claims the semantic is directly
+      // relevant and therefore fails closed.
+      if (global.code.find(expected) != std::string::npos) return false;
+      continue;
+    }
+    if (parsed != MetadataParseResult::Valid) continue;
+    if (!definition_ids.insert(definition.id).second) return false;
+    if (definition.fields.size() < 3 ||
+        Trim(definition.fields[1]) != expected)
+      continue;
+    if (!IsValidMetadataDefinition(
+            module, definition, resolving, validated))
+      return false;
+    std::uint32_t parsed_signature = 0;
+    if (!ParseMetadataSignature(definition.fields[0], parsed_signature))
+      return false;
+    if (parsed_signature != signature) continue;
     if (found) return false;
     found = true;
   }
   return found;
+}
+
+bool IsSvTargetSignature(const Module& module, std::uint32_t signature) {
+  return HasUniqueSignatureSemantic(module, signature, "SV_Target");
+}
+
+bool IsStoreOutputF32Candidate(std::string_view code) noexcept {
+  return Trim(code).starts_with(
+      "call void @dx.op.storeOutput.f32(");
+}
+
+bool IsDiscardCandidate(std::string_view code) noexcept {
+  return Trim(code).starts_with("call void @dx.op.discard(");
+}
+
+bool IsRecognizedPureSsaPropagation(const Instruction& instruction) {
+  if (instruction.lhs.empty()) return false;
+  const auto tokens = IrTokens(instruction.rhs);
+  if (tokens.empty()) return false;
+  constexpr std::array<std::string_view, 30> kPureOpcodes = {
+      "fadd", "fsub", "fmul", "fdiv", "frem",
+      "add", "sub", "mul", "udiv", "sdiv", "urem", "srem",
+      "shl", "lshr", "ashr", "and", "or", "xor",
+      "icmp", "fcmp", "phi", "select", "freeze",
+      "trunc", "zext", "sext", "fptrunc", "fpext", "fptoui",
+      "fptosi"};
+  constexpr std::array<std::string_view, 9> kAdditionalPureOpcodes = {
+      "uitofp", "sitofp", "ptrtoint", "inttoptr", "bitcast",
+      "addrspacecast", "getelementptr", "extractelement", "insertelement"};
+  constexpr std::array<std::string_view, 3> kAggregatePureOpcodes = {
+      "shufflevector", "extractvalue", "insertvalue"};
+  const auto contains = [opcode = tokens.front()](const auto& opcodes) {
+    return std::find(opcodes.begin(), opcodes.end(), opcode) != opcodes.end();
+  };
+  return contains(kPureOpcodes) || contains(kAdditionalPureOpcodes) ||
+      contains(kAggregatePureOpcodes);
 }
 
 ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& module,
@@ -554,17 +1043,33 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
     const auto found = function.users.find(value);
     if (found != function.users.end()) for (const std::size_t index : found->second) {
       const Instruction& user = function.instructions[index];
-      if (user.raw.find("@dx.op.discard(") != std::string::npos) discard = true;
-      if (user.raw.find("@dx.op.storeOutput.f32") != std::string::npos &&
-          classified_outputs.insert(index).second) {
-        if (user.raw.find("i8 3") != std::string::npos &&
-            module.text.find("SV_Target") != std::string_view::npos) target_alpha = true;
-        else {
-          StoreOutputCall output;
-          if (!ParseStoreOutputF32(user.raw, output) || output.value != value ||
-              output.row != 0 || output.column >= 3 ||
-              !IsSvTargetSignature(module, output.signature) ||
-              (has_rgb_signature && output.signature != rgb_signature) ||
+      if (IsDiscardCandidate(user.code)) {
+        DiscardCall discard_call;
+        if (!ParseDiscardCall(user.code, discard_call) ||
+            discard_call.predicate != value) {
+          // A malformed discard-looking use is not silently ignored: it is
+          // ambiguous visibility evidence and therefore cannot authorize a
+          // Production patch.
+          other_output = true;
+        } else {
+          discard = true;
+        }
+        continue;
+      }
+      if (IsStoreOutputF32Candidate(user.code)) {
+        if (!classified_outputs.insert(index).second) continue;
+        StoreOutputCall output;
+        if (!ParseStoreOutputF32(user.code, output) || output.value != value ||
+            output.row != 0 || !IsSvTargetSignature(module, output.signature)) {
+          other_output = true;
+        } else if (output.column == 3) {
+          // The complete alpha use must be unambiguous. A second matching
+          // store (even to the same signature) could represent a distinct
+          // output path, so it is not Production-authorized.
+          if (target_alpha) other_output = true;
+          target_alpha = true;
+        } else if (output.column < 3) {
+          if ((has_rgb_signature && output.signature != rgb_signature) ||
               (rgb_columns & (1u << output.column)) != 0) {
             other_output = true;
           } else {
@@ -572,9 +1077,19 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
             rgb_signature = output.signature;
             rgb_columns |= 1u << output.column;
           }
+        } else {
+          other_output = true;
         }
+        continue;
       }
-      if (!user.lhs.empty()) pending.push_back(user.lhs);
+      if (IsRecognizedPureSsaPropagation(user)) {
+        pending.push_back(user.lhs);
+        continue;
+      }
+      // No reachable use is implicitly harmless. Calls, stores, branches,
+      // side-effecting instructions, unsupported value producers, and every
+      // other terminal use make the Production authorization ambiguous.
+      other_output = true;
     }
     if (visited.size() >= kConsumerTraversalLimit && !pending.empty())
       return {FadePrimitiveConsumer::Unknown, false};
@@ -595,15 +1110,17 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
 
 FadePrimitiveDiagnostic AnalyzeFadePrimitiveV1(const std::string& llvm_ir) {
   FadePrimitiveDiagnostic diagnostic;
-  if (llvm_ir.find("SV_Position") == std::string::npos) return diagnostic;
   const Module module = ParseModule(llvm_ir);
   if (!module.complete) return diagnostic;
   for (const Function& function : module.functions) {
     if (!function.complete) continue;
     for (const Instruction& threshold : function.instructions) {
-      if (!IsNineElementThresholdAccess(threshold) || threshold.lhs.empty() ||
-          !IsScreenSpaceThreeByThreeIndex(function, threshold, module) ||
-          !ReferencesNineElementThresholdGlobal(module, threshold)) continue;
+      ThresholdAccess threshold_access;
+      if (threshold.lhs.empty() ||
+          !ParseNineElementThresholdAccess(threshold, threshold_access) ||
+          !IsScreenSpaceThreeByThreeIndex(function, threshold_access, module) ||
+          !ReferencesNineElementThresholdGlobal(module, threshold_access.global))
+        continue;
       for (const Instruction& phi : function.instructions) {
         if (phi.lhs.empty()) continue;
         PhiArm left, right;
@@ -616,7 +1133,8 @@ FadePrimitiveDiagnostic AnalyzeFadePrimitiveV1(const std::string& llvm_ir) {
             enabled->value.front() != '%') continue;
         const Slice enabled_slice = BackwardSlice(function, enabled->value);
         if (!enabled_slice.complete || !enabled_slice.values.contains(threshold.lhs) ||
-            SliceCount(function, enabled_slice, "getelementptr") != 1 ||
+            SliceCountInstructionOpcode(function, enabled_slice,
+                "getelementptr") != 1 ||
             !IsCoverageExpression(function, enabled->value, threshold.lhs) ||
             !HasCbufferControlledGate(function, enabled->predecessor)) continue;
         const ConsumerAnalysis consumers = ClassifyConsumers(function, module, phi.lhs);
