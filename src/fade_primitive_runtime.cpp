@@ -7,7 +7,7 @@
 #include "device_activity_state.hpp"
 #include "dxc_bridge.hpp"
 #include "fade_primitive_detector.hpp"
-#include "pipeline_replacement_state.hpp"
+#include "pipeline_replacement_coordinator.hpp"
 #include "preparation_context_pool.hpp"
 #include "single_flight_cache.hpp"
 #include "target_dither_bypass.hpp"
@@ -18,6 +18,7 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -124,7 +125,7 @@ struct FadePrimitiveRuntime::Impl {
   PreparationContextPool<DxcBridge> dxc_pool;
   std::atomic<std::uint32_t> device_count{0};
   DeviceActivityState<DeviceId> activity;
-  PipelineReplacementState<DeviceId, pipeline> replacements;
+  PipelineReplacementCoordinator<DeviceId, pipeline> replacements;
   std::atomic<bool> enabled{false};
   // These are cumulative runtime activity counters, not retained-object
   // gauges. Telemetry snapshots only load them and never increment them.
@@ -226,11 +227,10 @@ void FadePrimitiveRuntime::OnDestroyDevice(device* owner) {
   if (!owner || owner->get_api() != device_api::d3d12) return;
   auto teardown = impl_->activity.Deactivate(DeviceKey(owner));
   if (!teardown) return;
-  for (const auto& item : impl_->replacements.DrainOwner(DeviceKey(owner))) {
-    if (!item.replacements.final_antifade) continue;
+  impl_->replacements.OnDestroyOwner(DeviceKey(owner), [owner](pipeline replacement) {
     ScopedFlag internal(g_internal_destroy);
-    owner->destroy_pipeline(*item.replacements.final_antifade);
-  }
+    owner->destroy_pipeline(replacement);
+  });
   if (impl_->device_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
     // Deactivate holds activity exclusively, so all callers that can lease a
     // DXC context have returned. Drain also protects against future changes
@@ -244,51 +244,64 @@ void FadePrimitiveRuntime::OnInitPipeline(device* owner, pipeline_layout layout,
   if (g_internal_create || !owner || application.handle == 0) return;
   auto active = impl_->activity.Acquire(DeviceKey(owner));
   if (!active) return;
+  // D3D12 PSOs are immutable: the live (device, application handle) pair is
+  // the canonical identity of all application pipeline state. A differing
+  // observed shader hash for that same live handle is contradictory evidence,
+  // so the coordinator disables replacement selection rather than replacing
+  // or destroying an object that may still be referenced by command lists.
   const shader_desc* original = nullptr;
   std::uint64_t hash = 0;
-  if (!FindPixelShader(count, subobjects, original, hash)) return;
-  const auto bytecode = impl_->Prepare(hash, *original);
-  if (!bytecode || impl_->replacements.WithSelected(DeviceKey(owner), application.handle,
-          true, true, [](pipeline) {})) return;
-  std::vector<pipeline_subobject> replacement_subobjects(subobjects, subobjects + count);
-  shader_desc replacement_shader = *original;
-  replacement_shader.code = bytecode->data();
-  replacement_shader.code_size = bytecode->size();
-  bool replaced = false;
-  for (auto& subobject : replacement_subobjects) {
-    if (subobject.type == pipeline_subobject_type::pixel_shader &&
-        subobject.data == original) {
-      subobject.data = &replacement_shader;
-      replaced = true;
-    }
-  }
-  if (!replaced) { impl_->replacements_failed.fetch_add(1, std::memory_order_relaxed); return; }
-  pipeline replacement{};
-  {
-    ScopedFlag internal(g_internal_create);
-    if (!owner->create_pipeline(layout, count, replacement_subobjects.data(), &replacement) ||
-        replacement.handle == 0) {
-      impl_->replacements_failed.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
-  }
-  const auto previous = impl_->replacements.PutFinalAntiFade(
-      DeviceKey(owner), application.handle, replacement);
-  if (previous) {
+  const bool has_pixel_shader = FindPixelShader(count, subobjects, original, hash);
+  const auto destroy_replacement = [owner](pipeline replacement) {
     ScopedFlag internal(g_internal_destroy);
-    owner->destroy_pipeline(*previous);
-  }
-  impl_->replacements_created.fetch_add(1, std::memory_order_relaxed);
+    owner->destroy_pipeline(replacement);
+  };
+  const auto init_result = impl_->replacements.OnInit(
+      DeviceKey(owner), application.handle, has_pixel_shader ? hash : 0,
+      [&]() -> std::optional<pipeline> {
+        if (!has_pixel_shader) return std::nullopt;
+        const auto bytecode = impl_->Prepare(hash, *original);
+        if (!bytecode) return std::nullopt;
+        std::vector<pipeline_subobject> replacement_subobjects(
+            subobjects, subobjects + count);
+        shader_desc replacement_shader = *original;
+        replacement_shader.code = bytecode->data();
+        replacement_shader.code_size = bytecode->size();
+        bool replaced = false;
+        for (auto& subobject : replacement_subobjects) {
+          if (subobject.type == pipeline_subobject_type::pixel_shader &&
+              subobject.data == original) {
+            subobject.data = &replacement_shader;
+            replaced = true;
+          }
+        }
+        if (!replaced) {
+          impl_->replacements_failed.fetch_add(1, std::memory_order_relaxed);
+          return std::nullopt;
+        }
+        pipeline replacement{};
+        ScopedFlag internal(g_internal_create);
+        if (!owner->create_pipeline(layout, count, replacement_subobjects.data(),
+                &replacement) || replacement.handle == 0) {
+          impl_->replacements_failed.fetch_add(1, std::memory_order_relaxed);
+          return std::nullopt;
+        }
+        return replacement;
+      }, destroy_replacement);
+  if (init_result == PipelineReplacementCoordinator<DeviceId, pipeline>::
+          InitResult::Published)
+    impl_->replacements_created.fetch_add(1, std::memory_order_relaxed);
 }
 
 void FadePrimitiveRuntime::OnDestroyPipeline(device* owner, pipeline application) {
   if (g_internal_destroy || !owner || application.handle == 0) return;
   auto active = impl_->activity.Acquire(DeviceKey(owner));
   if (!active) return;
-  const auto removed = impl_->replacements.Remove(DeviceKey(owner), application.handle);
-  if (!removed.final_antifade) return;
-  ScopedFlag internal(g_internal_destroy);
-  owner->destroy_pipeline(*removed.final_antifade);
+  impl_->replacements.OnDestroyPipeline(DeviceKey(owner), application.handle,
+      [owner](pipeline replacement) {
+        ScopedFlag internal(g_internal_destroy);
+        owner->destroy_pipeline(replacement);
+      });
 }
 
 void FadePrimitiveRuntime::OnBindPipeline(command_list* list, pipeline_stage stages,
@@ -298,7 +311,7 @@ void FadePrimitiveRuntime::OnBindPipeline(command_list* list, pipeline_stage sta
     return;
   device* owner = list->get_device();
   if (!owner) return;
-  impl_->replacements.WithSelected(DeviceKey(owner), application.handle, true, true,
+  impl_->replacements.OnBind(DeviceKey(owner), application.handle,
       [&](pipeline replacement) {
         ScopedFlag internal(g_internal_bind);
         list->bind_pipeline(stages, replacement);
@@ -317,15 +330,15 @@ void FadePrimitiveRuntime::set_enabled(bool enabled) {
 FadePrimitiveRuntimeTelemetrySnapshot
 FadePrimitiveRuntime::memory_telemetry_snapshot() const {
   // GetSnapshot() releases the single-flight cache lock before this function
-  // separately obtains the replacement-state lock via Sizes(). Do not combine
-  // these two snapshots under nested locks.
+  // separately obtains the replacement-state lock via RetainedSize(). Do not
+  // combine these two snapshots under nested locks.
   const auto cache = impl_->prepared.GetSnapshot();
-  const auto replacement_sizes = impl_->replacements.Sizes();
+  const auto replacement_count = impl_->replacements.RetainedSize();
   return {
       static_cast<std::uint64_t>(cache.completed_entries),
       static_cast<std::uint64_t>(cache.retained_payload_bytes),
       static_cast<std::uint64_t>(cache.in_flight_entries),
-      static_cast<std::uint64_t>(replacement_sizes.second),
+      static_cast<std::uint64_t>(replacement_count),
       impl_->device_count.load(std::memory_order_relaxed),
       impl_->matched_shaders.load(std::memory_order_relaxed),
       impl_->prepared_shaders.load(std::memory_order_relaxed),

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
 
-#include "pipeline_create_init_pairing.hpp"
 #include "pipeline_replacement_state.hpp"
 
 #include <atomic>
@@ -15,43 +14,6 @@
 #include <vector>
 
 using TestReplacementState = wuwa_tfr::PipelineReplacementState<int, int>;
-
-void test_unpaired_init_preserves_existing_replacement() {
-  TestReplacementState state;
-  wuwa_tfr::PipelineCreateInitPairing pairing;
-  const wuwa_tfr::PipelineCreateIdentity expected{1, 3, 0x1234, 256};
-  const wuwa_tfr::PipelineCreateIdentity unrelated{1, 3, 0x5678, 256};
-  const wuwa_tfr::PipelineCreateIdentity other_device{2, 3, 0x1234, 256};
-  CHECK(!state.PutFinalAntiFade(1, 5, 99));
-
-  // Pipeline-library/repeated init: no create callback was observed, so the
-  // existing mapping must remain untouched.
-  if (pairing.ConsumeInit(expected))
-    (void)state.Remove(1, 5);
-  int selected = 0;
-  CHECK(state.WithSelected(1, 5, true, true, [&](int value) { selected = value; }));
-  CHECK(selected == 99);
-
-  // A real paired create/init consumes the marker exactly once and permits the
-  // old generation to be removed before rebuilding it.
-  pairing.MarkCreate(expected);
-  CHECK(pairing.ConsumeInit(expected));
-  CHECK(!pairing.ConsumeInit(expected));
-  const auto removed = state.Remove(1, 5);
-  CHECK(removed.final_antifade && *removed.final_antifade == 99);
-
-  // A failed create emits no init. Its stale marker must not pair with a later
-  // unrelated pipeline-library init, and the mismatch consumes the marker.
-  pairing.MarkCreate(expected);
-  CHECK(!pairing.ConsumeInit(unrelated));
-  CHECK(!pairing.ConsumeInit(expected));
-
-  // Identical layouts and shader bytecode on different devices are distinct
-  // create/init sequences and must never consume each other's pending state.
-  pairing.MarkCreate(expected);
-  CHECK(!pairing.ConsumeInit(other_device));
-  CHECK(!pairing.ConsumeInit(expected));
-}
 
 void test_insert_remove_and_toggle_selection() {
   TestReplacementState state;
@@ -214,7 +176,6 @@ void test_device_drain_waits_for_inflight_bind() {
 }
 
 int main() {
-  test_unpaired_init_preserves_existing_replacement();
   test_insert_remove_and_toggle_selection();
   test_writer_waits_for_inflight_bind_reader();
   test_concurrent_readers_with_recreation();
