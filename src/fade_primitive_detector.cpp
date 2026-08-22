@@ -23,6 +23,13 @@ constexpr std::size_t kConsumerTraversalLimit = 4096;
 bool ParseUnsigned(std::string_view text, std::size_t& cursor,
     std::uint32_t& value) noexcept;
 bool IsSsaValue(std::string_view value) noexcept;
+void SkipWhitespace(std::string_view text, std::size_t& cursor) noexcept;
+bool Consume(std::string_view text, std::size_t& cursor,
+    std::string_view expected) noexcept;
+bool ConsumeComma(std::string_view text, std::size_t& cursor) noexcept;
+bool ParseTypedUnsigned(std::string_view text, std::size_t& cursor,
+    std::string_view type, std::uint32_t& value) noexcept;
+bool HasOnlyMetadataAttachments(std::string_view trailing) noexcept;
 
 struct LoadInputF32Call {
   std::uint32_t signature = 0;
@@ -564,19 +571,43 @@ bool IsScreenSpaceThreeByThreeIndex(const Function& function,
 
 bool IsFloatLoadFromPointer(
     const Instruction& instruction, std::string_view expected_pointer) {
-  const auto tokens = IrTokens(instruction.rhs);
-  if (tokens.size() < 6 || tokens[0] != "load" || tokens[1] != "float" ||
-      tokens[2] != "," || tokens[3] != "float" || tokens[4] != "*" ||
-      tokens[5] != expected_pointer)
+  std::string_view rhs = Trim(instruction.rhs);
+  std::size_t cursor = 0;
+  if (!Consume(rhs, cursor, "load") || cursor == rhs.size() ||
+      std::isspace(static_cast<unsigned char>(rhs[cursor])) == 0)
     return false;
-  // The exact pointer token is the sole load operand. Only the standard
-  // alignment suffix may follow; any extra operand is ambiguous evidence.
-  if (tokens.size() == 6) return true;
-  return tokens.size() == 9 && tokens[6] == "," && tokens[7] == "align" &&
-      !tokens[8].empty() &&
-      std::all_of(tokens[8].begin(), tokens[8].end(), [](char value) {
-        return std::isdigit(static_cast<unsigned char>(value)) != 0;
-      });
+  SkipWhitespace(rhs, cursor);
+  if (!Consume(rhs, cursor, "float") || !ConsumeComma(rhs, cursor))
+    return false;
+  SkipWhitespace(rhs, cursor);
+  if (!Consume(rhs, cursor, "float") || !Consume(rhs, cursor, "*"))
+    return false;
+  SkipWhitespace(rhs, cursor);
+  // The exact pointer token is the sole load operand. An adjacent SSA
+  // character would continue a different, longer name (e.g. %ptr2), and
+  // that ambiguity must not authorize the load.
+  if (!rhs.substr(cursor).starts_with(expected_pointer)) return false;
+  cursor += expected_pointer.size();
+  if (cursor < rhs.size() && IsSsaCharacter(rhs[cursor])) return false;
+
+  // The standard alignment suffix, if present, must come before any DXC
+  // metadata attachments (!tbaa, !noalias, and similar) and is otherwise
+  // treated as absent rather than partially consumed.
+  std::size_t align_cursor = cursor;
+  if (ConsumeComma(rhs, align_cursor)) {
+    std::size_t candidate = align_cursor;
+    SkipWhitespace(rhs, candidate);
+    std::uint32_t alignment = 0;
+    if (Consume(rhs, candidate, "align") && candidate < rhs.size() &&
+        std::isspace(static_cast<unsigned char>(rhs[candidate])) != 0 &&
+        ParseUnsigned(rhs, candidate, alignment))
+      cursor = candidate;
+  }
+  // Only well-formed metadata attachments may follow the pointer operand or
+  // its optional alignment; any other trailing syntax (extra operands,
+  // unmatched suffixes) is ambiguous evidence and must not authorize a
+  // Production rewrite.
+  return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
 }
 
 bool SliceHasDxOpCall(const Function& function, const Slice& slice,
@@ -1004,6 +1035,71 @@ bool IsDiscardCandidate(std::string_view code) noexcept {
   return Trim(code).starts_with("call void @dx.op.discard(");
 }
 
+// A single well-typed float operand: an SSA value or a literal, with no
+// further value hiding behind it. The exact delimiter (',' or ')') that ends
+// it is left in place for the caller to consume.
+bool ParseFloatOperand(std::string_view rhs, std::size_t& cursor) noexcept {
+  SkipWhitespace(rhs, cursor);
+  if (!Consume(rhs, cursor, "float") || cursor == rhs.size() ||
+      std::isspace(static_cast<unsigned char>(rhs[cursor])) == 0)
+    return false;
+  SkipWhitespace(rhs, cursor);
+  const std::size_t value_start = cursor;
+  while (cursor < rhs.size() && rhs[cursor] != ',' && rhs[cursor] != ')')
+    ++cursor;
+  return !Trim(rhs.substr(value_start, cursor - value_start)).empty();
+}
+
+// call float @dx.op.binary.f32(i32 <opcode>, float <a>, float <b>)
+// Exact callee, exact float return type, exact opcode field, exactly two
+// typed float operands, and only valid metadata attachments may follow the
+// closing parenthesis.
+bool ParseDxOpBinaryF32(std::string_view rhs, std::uint32_t& opcode) noexcept {
+  rhs = Trim(rhs);
+  constexpr std::string_view prefix = "call float @dx.op.binary.f32(";
+  if (!rhs.starts_with(prefix)) return false;
+  std::size_t cursor = prefix.size();
+  if (!ParseTypedUnsigned(rhs, cursor, "i32", opcode) ||
+      !ConsumeComma(rhs, cursor) || !ParseFloatOperand(rhs, cursor) ||
+      cursor == rhs.size() || rhs[cursor] != ',')
+    return false;
+  ++cursor;
+  if (!ParseFloatOperand(rhs, cursor) || cursor == rhs.size() ||
+      rhs[cursor] != ')')
+    return false;
+  ++cursor;
+  return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
+}
+
+// call float @dx.op.unary.f32(i32 <opcode>, float <value>)
+// Same exactness requirements as the binary form, with exactly one operand.
+bool ParseDxOpUnaryF32(std::string_view rhs, std::uint32_t& opcode) noexcept {
+  rhs = Trim(rhs);
+  constexpr std::string_view prefix = "call float @dx.op.unary.f32(";
+  if (!rhs.starts_with(prefix)) return false;
+  std::size_t cursor = prefix.size();
+  if (!ParseTypedUnsigned(rhs, cursor, "i32", opcode) ||
+      !ConsumeComma(rhs, cursor) || !ParseFloatOperand(rhs, cursor) ||
+      cursor == rhs.size() || rhs[cursor] != ')')
+    return false;
+  ++cursor;
+  return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
+}
+
+// Exactly two pure, side-effect-free DXIL intrinsics are recognized as
+// primitive propagation beyond plain LLVM arithmetic: FMin (dx.op.binary.f32
+// opcode 36), which the verified coverage expression already requires
+// elsewhere in the fade primitive, and Saturate (dx.op.unary.f32 opcode 7).
+// No other dx.op.binary/unary opcode, and no other call of any kind, is
+// trusted: an unrecognized or malformed call falls through to the caller's
+// fail-closed catch-all instead of silently authorizing propagation.
+bool IsRecognizedPureDxOpCall(std::string_view rhs) noexcept {
+  std::uint32_t opcode = 0;
+  if (ParseDxOpBinaryF32(rhs, opcode)) return opcode == 36;  // FMin(a, b)
+  if (ParseDxOpUnaryF32(rhs, opcode)) return opcode == 7;    // Saturate(value)
+  return false;
+}
+
 bool IsRecognizedPureSsaPropagation(const Instruction& instruction) {
   if (instruction.lhs.empty()) return false;
   const auto tokens = IrTokens(instruction.rhs);
@@ -1023,8 +1119,10 @@ bool IsRecognizedPureSsaPropagation(const Instruction& instruction) {
   const auto contains = [opcode = tokens.front()](const auto& opcodes) {
     return std::find(opcodes.begin(), opcodes.end(), opcode) != opcodes.end();
   };
-  return contains(kPureOpcodes) || contains(kAdditionalPureOpcodes) ||
-      contains(kAggregatePureOpcodes);
+  if (contains(kPureOpcodes) || contains(kAdditionalPureOpcodes) ||
+      contains(kAggregatePureOpcodes))
+    return true;
+  return IsRecognizedPureDxOpCall(instruction.rhs);
 }
 
 ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& module,

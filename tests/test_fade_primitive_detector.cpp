@@ -28,7 +28,7 @@ enabled:
 %row = mul nsw i32 %mx, 3
 %index = add nsw i32 %row, %my
 %ptr = getelementptr inbounds [9 x float], [9 x float]* @thresholds, i32 0, i32 %index
-%threshold = load float, float* %ptr, align 4
+%threshold = load float, float* %ptr, align 4, !tbaa !50, !noalias !54
 %twice = fmul fast float %coverage, 2.000000e+00
 %sub = fsub fast float %twice, %threshold
 %lo = call float @dx.op.binary.f32(i32 35, float %sub, float 0.000000e+00)  ; FMax(a,b)
@@ -139,10 +139,11 @@ int main() {
 
     std::string comment_dependency = positive;
     const std::string expected_load =
-        "%threshold = load float, float* %ptr, align 4";
+        "%threshold = load float, float* %ptr, align 4, !tbaa !50, !noalias !54";
     comment_dependency.replace(comment_dependency.find(expected_load),
         expected_load.size(),
-        "%threshold = load float, float* %ptr2, align 4  ; %ptr");
+        "%threshold = load float, float* %ptr2, align 4, "
+        "!tbaa !50, !noalias !54  ; %ptr");
     expect_no_candidate(comment_dependency);
 
     std::string comment_fmax = positive;
@@ -571,11 +572,12 @@ entry:
     // float threshold-like load reads %ptr2 rather than the verified %ptr.
     // Prefix spelling must not make that a threshold load.
     std::string pointer_prefix = positive;
-    const std::string load = "%threshold = load float, float* %ptr, align 4";
+    const std::string load =
+        "%threshold = load float, float* %ptr, align 4, !tbaa !50, !noalias !54";
     const std::size_t load_offset = pointer_prefix.find(load);
     pointer_prefix.replace(load_offset, load.size(),
         "%ptr2 = bitcast float* %ptr to float*\n"
-        "%threshold = load float, float* %ptr2, align 4");
+        "%threshold = load float, float* %ptr2, align 4, !tbaa !50, !noalias !54");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(pointer_prefix).instances.empty());
     CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
         pointer_prefix).success);
@@ -586,11 +588,12 @@ entry:
     const std::string gep = "%ptr = getelementptr";
     const std::size_t gep_offset = numeric_prefix.find(gep);
     numeric_prefix.replace(gep_offset, gep.size(), "%19 = getelementptr");
-    const std::string load = "%threshold = load float, float* %ptr, align 4";
+    const std::string load =
+        "%threshold = load float, float* %ptr, align 4, !tbaa !50, !noalias !54";
     const std::size_t load_offset = numeric_prefix.find(load);
     numeric_prefix.replace(load_offset, load.size(),
         "%190 = bitcast float* %19 to float*\n"
-        "%threshold = load float, float* %190, align 4");
+        "%threshold = load float, float* %190, align 4, !tbaa !50, !noalias !54");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(numeric_prefix).instances.empty());
     CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
         numeric_prefix).success);
@@ -644,6 +647,134 @@ entry:
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(limited).instances.empty());
     CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
         limited).success);
+  }
+  {
+    // Cause 1: real DXC threshold loads carry TBAA/noalias metadata after the
+    // alignment suffix (or in place of it). That must be accepted; any other
+    // trailing or duplicated operand syntax must remain fail-closed.
+    const std::string load_line =
+        "%threshold = load float, float* %ptr, align 4, !tbaa !50, !noalias !54";
+    CHECK(positive.find(load_line) != std::string::npos);
+
+    std::string no_align = positive;
+    no_align.replace(no_align.find(load_line), load_line.size(),
+        "%threshold = load float, float* %ptr, !tbaa !50, !noalias !54");
+    CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(no_align).instances.size() == 1);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+        no_align).success);
+
+    std::string single_attachment = positive;
+    single_attachment.replace(single_attachment.find(load_line), load_line.size(),
+        "%threshold = load float, float* %ptr, align 4, !tbaa !50");
+    CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(single_attachment).instances.size() == 1);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+        single_attachment).success);
+
+    const auto expect_load_rejected = [&](std::string_view replacement) {
+      std::string ir = positive;
+      ir.replace(ir.find(load_line), load_line.size(), std::string(replacement));
+      CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(ir).instances.empty());
+      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+          ir).success);
+    };
+    // Malformed attachment name: missing the leading '!'.
+    expect_load_rejected(
+        "%threshold = load float, float* %ptr, align 4, tbaa !50");
+    // Malformed attachment reference: missing the '!id'.
+    expect_load_rejected(
+        "%threshold = load float, float* %ptr, align 4, !tbaa");
+    // Arbitrary trailing syntax after an otherwise well-formed attachment.
+    expect_load_rejected(
+        "%threshold = load float, float* %ptr, align 4, !tbaa !50 extra");
+    // An extra value operand disguised as a second pointer clause.
+    expect_load_rejected(
+        "%threshold = load float, float* %ptr, float* %ptr, align 4, !tbaa !50");
+    // The load reads a different pointer entirely; metadata is irrelevant.
+    expect_load_rejected(
+        "%threshold = load float, float* %other, align 4, !tbaa !50, !noalias !54");
+    // An unmatched alignment token must not be silently dropped in favor of
+    // reinterpreting it as a metadata attachment.
+    expect_load_rejected(
+        "%threshold = load float, float* %ptr, align, !tbaa !50");
+  }
+  {
+    // Cause 2: exactly two pure DXIL intrinsics -- FMin (dx.op.binary.f32
+    // opcode 36) and Saturate (dx.op.unary.f32 opcode 7) -- may sit between
+    // the verified fade primitive and its final consumer. Every other
+    // dx.op.binary/unary opcode, wrong callee, wrong return type, wrong
+    // arity, malformed operand, or trailing syntax must remain fail-closed.
+    const std::string discard_via_fmin = Module(PrimitiveFunction(
+        "discard_via_fmin",
+        "%clamped = call float @dx.op.binary.f32(i32 36, float %dither, "
+        "float 1.000000e+00)  ; FMin(a,b)\n"
+        "%score = fsub fast float %clamped, 0.500000e+00\n"
+        "%kill = fcmp fast olt float %score, 0.000000e+00\n"
+        "call void @dx.op.discard(i32 82, i1 %kill)"));
+    const auto fmin_result = wuwa_tfr::AnalyzeFadePrimitiveV1(discard_via_fmin);
+    CHECK(fmin_result.instances.size() == 1);
+    CHECK(fmin_result.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::Discard);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+        discard_via_fmin).success);
+
+    const std::string alpha_via_saturate = Module(PrimitiveFunction(
+        "alpha_via_saturate",
+        "%saturated = call float @dx.op.unary.f32(i32 7, float %dither)  "
+        "; Saturate(value)\n"
+        "%alpha = fmul fast float %saturated, %opacity\n"
+        "call void @dx.op.storeOutput.f32(i32 5, i32 3, i32 0, i8 3, "
+        "float %alpha)")) + SvTargetMetadata();
+    const auto saturate_result =
+        wuwa_tfr::AnalyzeFadePrimitiveV1(alpha_via_saturate);
+    CHECK(saturate_result.instances.size() == 1);
+    CHECK(saturate_result.instances.front().consumer ==
+        wuwa_tfr::FadePrimitiveConsumer::SvTargetAlpha);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+        alpha_via_saturate).success);
+
+    const auto expect_pure_call_rejected = [](std::string_view name,
+                                               std::string_view call_line) {
+      const std::string ir = Module(PrimitiveFunction(name,
+          std::string(call_line) +
+          "\n%score = fsub fast float %clamped, 0.500000e+00\n"
+          "%kill = fcmp fast olt float %score, 0.000000e+00\n"
+          "call void @dx.op.discard(i32 82, i1 %kill)"));
+      const auto diagnostic = wuwa_tfr::AnalyzeFadePrimitiveV1(ir);
+      CHECK(diagnostic.instances.size() == 1);
+      CHECK(diagnostic.instances.front().consumer ==
+          wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
+      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+          ir).success);
+    };
+    // Wrong opcode: FMax (35) instead of FMin (36).
+    expect_pure_call_rejected("wrong_binary_opcode",
+        "%clamped = call float @dx.op.binary.f32(i32 35, float %dither, "
+        "float 1.000000e+00)");
+    // Wrong opcode: Sqrt (24) instead of Saturate (7).
+    expect_pure_call_rejected("wrong_unary_opcode",
+        "%clamped = call float @dx.op.unary.f32(i32 24, float %dither)");
+    // Wrong callee.
+    expect_pure_call_rejected("wrong_callee",
+        "%clamped = call float @dx.op.not_binary.f32(i32 36, float %dither, "
+        "float 1.000000e+00)");
+    // Wrong return type.
+    expect_pure_call_rejected("wrong_return_type",
+        "%clamped = call double @dx.op.binary.f32(i32 36, float %dither, "
+        "float 1.000000e+00)");
+    // Wrong arity: the second binary operand is missing entirely.
+    expect_pure_call_rejected("wrong_arity",
+        "%clamped = call float @dx.op.binary.f32(i32 36, float %dither)");
+    // Malformed typed operand: the 'float' type tag is missing.
+    expect_pure_call_rejected("malformed_operand_type",
+        "%clamped = call float @dx.op.binary.f32(i32 36, %dither, "
+        "float 1.000000e+00)");
+    // Trailing junk after an otherwise well-formed call.
+    expect_pure_call_rejected("trailing_junk",
+        "%clamped = call float @dx.op.unary.f32(i32 7, float %dither) garbage");
+    // An unrelated float-returning call is not a generic "all calls are
+    // pure" pass; it remains ambiguous, side-effect-unknown evidence.
+    expect_pure_call_rejected("unrelated_call",
+        "%clamped = call float @sink(float %dither)");
   }
   return 0;
 }

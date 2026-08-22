@@ -18,6 +18,7 @@ float4 main(PixelInput input) : SV_Target {
     float threshold = thresholds[x * 3 + y];
     dither = min(max(coverage * 2.0 - threshold, 0.0), 1.0) + 0.333;
   }
-  clip(dither - 0.5);
-  return float4(1.0, 1.0, 1.0, dither);
+  float visible = min(saturate(dither), 1.0);
+  clip(visible - 0.5);
+  return float4(1.0, 1.0, 1.0, visible);
 }

@@ -2,6 +2,11 @@
 ; dxc 1.9.2602.24 (the version pinned by build_windows.ps1):
 ;   dxc -T ps_6_0 -E main -Od -Fo fixture.dxil fade_primitive_validation.hlsl
 ;   dxc -dumpbin -Fc fixture.ll fixture.dxil
+; The disassembly header comments were trimmed. The threshold load's
+; !tbaa/!noalias attachment (metadata !50-!56) was added by hand in the same
+; shape DXC emits for the real captured shaders this detector targets; every
+; other line, including the FMin/Saturate consumer chain, is unmodified real
+; dxc output for the saturate()/min() calls in the HLSL source.
 target datalayout = "e-m:e-p:32:32-i1:32-i8:32-i16:32-i32:32-i64:64-f16:32-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-ms-dx"
 
@@ -34,7 +39,7 @@ define void @main() {
   %17 = mul nsw i32 %12, 3
   %18 = add nsw i32 %17, %15
   %19 = getelementptr inbounds [9 x float], [9 x float]* @thresholds, i32 0, i32 %18
-  %20 = load float, float* %19, align 4
+  %20 = load float, float* %19, align 4, !tbaa !50, !noalias !54
   %21 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
   %22 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %1, i32 0)
   %23 = extractvalue %dx.types.CBufRet.f32 %22, 1
@@ -48,20 +53,24 @@ define void @main() {
 
 ; <label>:30
   %31 = phi float [ %28, %10 ], [ 1.000000e+00, %0 ]
-  %32 = fsub fast float %31, 5.000000e-01
-  %33 = fcmp fast olt float %32, 0.000000e+00
-  call void @dx.op.discard(i32 82, i1 %33)
+  %32 = call float @dx.op.unary.f32(i32 7, float %31)  ; Saturate(value)
+  %33 = call float @dx.op.binary.f32(i32 36, float %32, float 1.000000e+00)  ; FMin(a,b)
   %34 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
+  %35 = fsub fast float %33, 5.000000e-01
+  %36 = fcmp fast olt float %35, 0.000000e+00
+  call void @dx.op.discard(i32 82, i1 %36)
+  %37 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 0, float 1.000000e+00)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 1, float 1.000000e+00)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 2, float 1.000000e+00)
-  call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %31)
+  call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %33)
   ret void
 }
 
 declare float @dx.op.loadInput.f32(i32, i32, i32, i8, i32) #0
 declare void @dx.op.storeOutput.f32(i32, i32, i32, i8, float) #1
 declare float @dx.op.binary.f32(i32, float, float) #0
+declare float @dx.op.unary.f32(i32, float) #0
 declare void @dx.op.discard(i32, i1) #1
 declare %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32, %dx.types.Handle, i32) #2
 declare %dx.types.Handle @dx.op.createHandle(i32, i8, i32, i32, i1) #2
@@ -96,3 +105,10 @@ attributes #2 = { nounwind readonly }
 !16 = !{i32 3, i32 15}
 !17 = !{i32 0, i64 1}
 !18 = distinct !{!18, !"dx.controlflow.hints", i32 1}
+!50 = !{!51, !51, i64 0}
+!51 = !{!"float", !52, i64 0}
+!52 = !{!"omnipotent char", !53, i64 0}
+!53 = !{!"Simple C++ TBAA"}
+!54 = !{!55}
+!55 = distinct !{!55, !56}
+!56 = distinct !{!56, !"wuwatfr.noalias"}

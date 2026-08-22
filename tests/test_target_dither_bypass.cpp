@@ -157,7 +157,7 @@ br i1 %c0, label %on0, label %merge0
 %row0 = mul nsw i32 %mx0, 3
 %index0 = add nsw i32 %row0, %my0
 %ptr0 = getelementptr inbounds [9 x float], [9 x float]* @thresholds, i32 0, i32 %index0
-%threshold0 = load float, float* %ptr0, align 4
+%threshold0 = load float, float* %ptr0, align 4, !tbaa !50, !noalias !54
 %twice0 = fmul fast float %coverage0, 2.000000e+00
 %sub0 = fsub fast float %twice0, %threshold0
 %lo0 = call float @dx.op.binary.f32(i32 35, float %sub0, float 0.000000e+00)  ; FMax(a,b)
@@ -178,7 +178,7 @@ br i1 %c1, label %on1, label %merge1
 %row1 = mul nsw i32 %mx1, 3
 %index1 = add nsw i32 %row1, %my1
 %ptr1 = getelementptr inbounds [9 x float], [9 x float]* @thresholds, i32 0, i32 %index1
-%threshold1 = load float, float* %ptr1, align 4
+%threshold1 = load float, float* %ptr1, align 4, !tbaa !50, !noalias !54
 %twice1 = fmul fast float %coverage1, 2.000000e+00
 %sub1 = fsub fast float %twice1, %threshold1
 %lo1 = call float @dx.op.binary.f32(i32 35, float %sub1, float 0.000000e+00)  ; FMax(a,b)
@@ -187,9 +187,11 @@ br i1 %c1, label %on1, label %merge1
 br label %merge1
 ; <label>:merge1
 %d1 = phi float [ %computed1, %on1 ], [ 1.000000e+00, %entry1 ]
-%alpha = fmul fast float %d0, %opacity
+%d0_sat = call float @dx.op.unary.f32(i32 7, float %d0)  ; Saturate(value)
+%alpha = fmul fast float %d0_sat, %opacity
 call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %alpha)
-%kill = fcmp fast olt float %d1, 0.000000e+00
+%d1_clamped = call float @dx.op.binary.f32(i32 36, float %d1, float 1.000000e+00)  ; FMin(a,b)
+%kill = fcmp fast olt float %d1_clamped, 0.000000e+00
 call void @dx.op.discard(i32 82, i1 %kill)
 }
 !900 = !{i32 0, !"SV_Target", i8 9}
@@ -252,7 +254,8 @@ call void @dx.op.discard(i32 82, i1 %kill)
   // and leave the character's outer surface faded.
   std::string rgb_and_discard = all_instances_ir;
   const std::string alpha_output =
-      "%alpha = fmul fast float %d0, %opacity\n"
+      "%d0_sat = call float @dx.op.unary.f32(i32 7, float %d0)  ; Saturate(value)\n"
+      "%alpha = fmul fast float %d0_sat, %opacity\n"
       "call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %alpha)";
   const std::string rgb_output =
       "%red = fmul fast float %d0, %color0\n"
