@@ -106,6 +106,16 @@ if(WIN32)
       if(DEVTOOLS_VALUE)
         list(APPEND addon_sources
           src/dxil_dither_diagnostic.cpp
+          src/dev/diagnostics/dev_diagnostics.cpp
+          src/dev/experiments/experiments_common.cpp
+          src/dev/experiments/experiments_fade_primitive.cpp
+          src/dev/experiments/experiments_legacy_bypass.cpp
+          src/dev/experiments/experiments_recipe.cpp
+          src/dev/trace/trace_events.cpp
+          src/dev/trace/trace_report.cpp
+          src/dev/trace/trace_state.cpp
+          src/dev/dev_events.cpp
+          src/dev/dev_overlay.cpp
           )
       else()
         list(APPEND addon_sources
