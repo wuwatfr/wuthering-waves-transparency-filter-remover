@@ -94,12 +94,7 @@ retention values remain flat is evidence against those caches and replacement
 pipelines being responsible. It does not prove that the add-on contributes no
 memory elsewhere.
 
-## Release Status
-
-**v1.0.0-rc.1** is the first public release candidate. It has been tested
-across multiple playable characters, alternate forms, skills, and animation
-states. Broader environmental and special-material compatibility testing
-continues during the RC period.
+## Reporting Visual Regressions
 
 When reporting a visual regression, compare the same scene with **Remove
 Transparency Filter** enabled and disabled.
