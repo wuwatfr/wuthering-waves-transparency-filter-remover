@@ -4,6 +4,7 @@
 /out/
 /dist/
 /_deps/
+/review-patches/
 
 *.addon64
 *.dll

@@ -147,7 +147,7 @@ $testTargets = @(
     'complete_dxil_validation_tests'
 )
 
-Write-Host 'Compiling test targets...'
+Write-Host 'Compiling Release test targets...'
 & $cmake.Source --build $build --config Release --target $testTargets
 if ($LASTEXITCODE -ne 0) { Fail 'Test compilation failed. See the compiler errors above.' }
 
@@ -156,9 +156,17 @@ if (-not (Test-Path -LiteralPath $ctest -PathType Leaf)) {
     Fail 'ctest.exe was not found alongside cmake.exe.'
 }
 
-Write-Host 'Running all CTest tests...'
+Write-Host 'Running all Release CTest tests...'
 & $ctest --test-dir $build --build-config Release --output-on-failure
 if ($LASTEXITCODE -ne 0) { Fail 'Tests failed; build verification did not succeed.' }
+
+Write-Host 'Compiling Debug test targets...'
+& $cmake.Source --build $build --config Debug --target $testTargets
+if ($LASTEXITCODE -ne 0) { Fail 'Debug test compilation failed. See the compiler errors above.' }
+
+Write-Host 'Running all Debug CTest tests...'
+& $ctest --test-dir $build --build-config Debug --output-on-failure
+if ($LASTEXITCODE -ne 0) { Fail 'Debug tests failed; build verification did not succeed.' }
 
 Write-Host 'Compiling production add-on...'
 & $cmake.Source --build $build --config Release --target WuwaTFR
