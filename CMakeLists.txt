@@ -82,7 +82,7 @@ add_test(NAME target_dither_bypass_tests COMMAND target_dither_bypass_tests)
 add_test(NAME trace_submission_identity_tests COMMAND trace_submission_identity_tests)
 add_test(NAME single_flight_cache_tests COMMAND single_flight_cache_tests)
 add_test(NAME memory_telemetry_tests COMMAND memory_telemetry_tests
-  "${CMAKE_SOURCE_DIR}/src/addon.cpp" "${CMAKE_SOURCE_DIR}/WuwaTFR.ini")
+  "${CMAKE_SOURCE_DIR}/src/production/production_module.cpp" "${CMAKE_SOURCE_DIR}/WuwaTFR.ini")
 
 if(WIN32)
   set(RESHADE_INCLUDE_DIR "" CACHE PATH "Directory containing reshade.hpp")
@@ -107,12 +107,15 @@ if(WIN32)
           src/dev/trace/trace_report.cpp
           src/dev/trace/trace_state.cpp
           src/dev/dev_events.cpp
+          src/dev/dev_inspection.cpp
+          src/dev/dev_module.cpp
           src/dev/dev_overlay.cpp
           src/dev/dev_runtime.cpp
           )
       else()
         list(APPEND addon_sources
-          src/fade_primitive_runtime.cpp)
+          src/fade_primitive_runtime.cpp
+          src/production/production_module.cpp)
       endif()
       add_library(${TARGET_NAME} MODULE ${addon_sources})
       target_include_directories(${TARGET_NAME} PRIVATE

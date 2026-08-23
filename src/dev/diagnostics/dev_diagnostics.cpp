@@ -4,9 +4,12 @@
 #include "dev/diagnostics/dev_diagnostics.hpp"
 
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
+#include <system_error>
 #include <vector>
 
-#include "production/addon_shared.hpp"
+#include "dev/dev_inspection.hpp"
 
 using namespace reshade::api;
 
@@ -17,6 +20,7 @@ std::atomic<std::uint64_t> g_strict_spatial_dither_count{0};
 std::atomic<std::uint64_t> g_ambiguous_spatial_dither_count{0};
 std::atomic<std::uint64_t> g_fade_primitive_shader_count{0};
 std::atomic<std::uint64_t> g_fade_primitive_instance_count{0};
+std::filesystem::path g_dump_path;
 
 bool FindDxilPixelShader(
     std::uint32_t subobject_count,
@@ -58,6 +62,22 @@ std::string FadePrimitiveConsumers(
     result += name;
   }
   return result.empty() ? "unknown" : result;
+}
+
+std::filesystem::path DumpDir() {
+  if (g_dump_path.empty()) return {};
+  std::error_code error;
+  std::filesystem::create_directories(g_dump_path, error);
+  if (error || !std::filesystem::is_directory(g_dump_path, error) || error)
+    return {};
+  return g_dump_path;
+}
+
+std::string Hex64(std::uint64_t value) {
+  std::ostringstream stream;
+  stream << std::hex << std::uppercase << std::setw(16)
+         << std::setfill('0') << value;
+  return stream.str();
 }
 
 }  // namespace wuwa_tfr::dev

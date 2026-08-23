@@ -10,6 +10,7 @@
 
 #include <Windows.h>
 
+#include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/trace/trace_events.hpp"
 
 using namespace reshade::api;

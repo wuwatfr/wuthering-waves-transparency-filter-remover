@@ -136,16 +136,17 @@ void FormattingIsStableAndMachineParseable() {
 
 void TelemetryControlIsNotPersisted(int argc, char** argv) {
   CHECK(argc == 3);
+  // argv[1] is production_module.cpp: the Production variant module that
+  // owns this checkbox. Unlike the old combined addon.cpp, there is no
+  // #if/#endif to bound the scan, so this checks everything from the
+  // checkbox's own line to the end of the (short, single-purpose) file.
   std::ifstream addon_input(argv[1], std::ios::binary);
   const std::string addon(std::istreambuf_iterator<char>(addon_input), {});
   std::ifstream ini_input(argv[2], std::ios::binary);
   const std::string ini(std::istreambuf_iterator<char>(ini_input), {});
   const std::size_t control = addon.find("Log memory telemetry (10 s)");
   CHECK(control != std::string::npos);
-  const std::size_t end = addon.find("#endif", control);
-  CHECK(end != std::string::npos);
-  const std::string_view overlay =
-      std::string_view(addon).substr(control, end - control);
+  const std::string_view overlay = std::string_view(addon).substr(control);
   CHECK(overlay.find("SaveConfigFlag") == std::string_view::npos);
   CHECK(overlay.find("ConfigFlag") == std::string_view::npos);
   CHECK(ini.find("Telemetry") == std::string::npos);

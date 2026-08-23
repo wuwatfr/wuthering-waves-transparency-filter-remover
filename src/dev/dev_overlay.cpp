@@ -11,12 +11,12 @@
 
 #include <imgui.h>
 
+#include "dev/dev_inspection.hpp"
 #include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/trace/trace_events.hpp"
 #include "dev/trace/trace_report.hpp"
 #include "dev/trace/trace_state.hpp"
-#include "production/addon_shared.hpp"
 
 using namespace reshade::api;
 

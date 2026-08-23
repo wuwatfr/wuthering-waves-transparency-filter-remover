@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "dev/diagnostics/dev_diagnostics.hpp"
+
 using namespace reshade::api;
 
 namespace wuwa_tfr::dev {

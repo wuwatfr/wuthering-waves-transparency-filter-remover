@@ -26,7 +26,8 @@ void OnDestroyDeviceHook(device* owner) {
 }
 
 void RegisterDevEvents() {
-  InitializeDevRuntime();
+  reshade::register_event<reshade::addon_event::destroy_device>(
+      OnDestroyDeviceHook);
 
   reshade::register_event<reshade::addon_event::init_resource>(
       OnInitTraceResource);

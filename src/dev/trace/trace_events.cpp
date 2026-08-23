@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "dev/dev_inspection.hpp"
 #include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/trace/trace_report.hpp"

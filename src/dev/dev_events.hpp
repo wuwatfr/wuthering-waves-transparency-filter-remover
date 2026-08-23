@@ -12,8 +12,9 @@
 
 namespace wuwa_tfr::dev {
 
-// Registers every Dev-only reshade::register_event<...> handler. Called from
-// DllMain only when WUWA_TFR_DEVTOOLS is set.
+// Registers every Dev-only reshade::register_event<...> handler except
+// create_pipeline (registered directly by dev/dev_module.cpp's
+// RegisterVariantEvents(), which calls this).
 void RegisterDevEvents();
 
 // The Dev-only tail of OnDestroyDevice: tears down this device's trace
