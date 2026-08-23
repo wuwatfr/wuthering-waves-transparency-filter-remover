@@ -39,6 +39,31 @@ constexpr std::uint8_t kFadeControlReasonOutOfRange = 1u << 1;
 constexpr std::uint8_t kFadeControlReasonBindingUnresolved = 1u << 2;
 constexpr std::uint8_t kFadeControlReasonSourceUnresolved = 1u << 3;
 constexpr std::uint8_t kFadeControlReasonUnsupportedBindingRoute = 1u << 4;
+// The descriptor-table-backed route was statically resolved, but the
+// bind_descriptor_tables call establishing it carried a nonzero
+// dynamic_offset_count -- see descriptor_table_state.hpp's
+// DescriptorTableBindingHasExactDynamicOffsets. Never observed on the
+// D3D12 backend today; kept explicit rather than assumed.
+constexpr std::uint8_t kFadeControlReasonDynamicOffsetUnresolved = 1u << 5;
+// The descriptor-table slot's cached resource incarnation no longer
+// matches the resource's current one: it was written once (typically at
+// resource-allocation time) and the underlying resource has since been
+// destroyed and its handle reused, without an intervening
+// update_descriptor_tables/copy_descriptor_tables call re-establishing this
+// slot. Rejected rather than trusted -- see
+// descriptor_table_state.hpp's DescriptorSlotContentIsCurrent.
+constexpr std::uint8_t kFadeControlReasonStaleDescriptorBinding = 1u << 6;
+
+// Which binding mechanism resolved this record's live CBV, independent of
+// whether the byte value itself was ultimately readable. Distinct from
+// "unavailable_reason": a record can be RootPushDescriptors or
+// DescriptorTable and still report not_mapped/out_of_range for a given
+// observation.
+enum class FadeControlBindingRoute : std::uint8_t {
+  Unresolved,
+  RootPushDescriptors,
+  DescriptorTable,
+};
 
 constexpr std::size_t kMaxFadeControlDistinctValues = 32;
 constexpr std::size_t kMaxFadeControlRecords = 4096;
@@ -116,6 +141,14 @@ struct FadeControlRecordKey {
   std::uint32_t component = 0;
   std::uint64_t runtime_resource_incarnation = 0;
   std::uint64_t runtime_range_offset = 0;
+  // Which binding mechanism produced runtime_resource_incarnation above --
+  // load-bearing for identity because RootPushDescriptors and
+  // DescriptorTable resolutions are resolved through two independent
+  // incarnation counters (dev/trace/trace_state.hpp's resource-incarnation
+  // index for the former, fade_control_runtime.cpp's own for the latter),
+  // whose numeric values are not mutually comparable and could otherwise
+  // coincidentally collide.
+  FadeControlBindingRoute binding_route = FadeControlBindingRoute::Unresolved;
 
   friend bool operator==(
       const FadeControlRecordKey&, const FadeControlRecordKey&) = default;
@@ -132,6 +165,8 @@ struct FadeControlRecordKeyHash {
     wuwa_tfr::TraceHashCombine(hash, key.component);
     wuwa_tfr::TraceHashCombine(hash, key.runtime_resource_incarnation);
     wuwa_tfr::TraceHashCombine(hash, key.runtime_range_offset);
+    wuwa_tfr::TraceHashCombine(
+        hash, static_cast<std::uint64_t>(key.binding_route));
     return hash;
   }
 };

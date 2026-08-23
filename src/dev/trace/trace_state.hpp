@@ -248,6 +248,44 @@ struct RootCbvBinding {
   std::uint64_t size = 0;
 };
 
+// Same key shape as RootCbvKey, minus the sub-array binding dimension: one
+// entry per (layout, root parameter), the root parameter itself only ever
+// bound to a single descriptor table at a time. Used only by the Dev-only
+// Fade control-value tracer to resolve a *live* descriptor-table-backed CBV
+// for a structurally proven cbuffer register -- unrelated to
+// descriptor_table_fingerprint's accumulated binding-event-fingerprint
+// semantics below, which remain untouched.
+struct BoundDescriptorTableKey {
+  std::uint64_t layout = 0;
+  std::uint32_t parameter = 0;
+
+  friend bool operator==(
+      const BoundDescriptorTableKey&, const BoundDescriptorTableKey&) =
+      default;
+};
+
+struct BoundDescriptorTableKeyHash {
+  std::size_t operator()(const BoundDescriptorTableKey& key) const noexcept {
+    std::size_t hash = std::hash<std::uint64_t>{}(key.layout);
+    wuwa_tfr::TraceHashCombine(hash, key.parameter);
+    return hash;
+  }
+};
+
+// Current (not accumulated-history) descriptor-table binding for one root
+// parameter slot: overwritten on rebind, never appended.
+struct BoundDescriptorTable {
+  std::uint64_t table_handle = 0;
+  // True when the bind_descriptor_tables call that established this binding
+  // carried a nonzero dynamic_offset_count. The D3D12 backend always passes
+  // 0 (there is no native D3D12 equivalent of a Vulkan dynamic-offset
+  // descriptor) -- see descriptor_table_state.hpp's
+  // DescriptorTableBindingHasExactDynamicOffsets. A nonzero count means the
+  // exact offset correspondence for this binding cannot be proven, and the
+  // Fade control tracer must report it unresolved rather than assume zero.
+  bool dynamic_offsets_present = false;
+};
+
 struct RecordedTraceDrawKey {
   wuwa_tfr::TraceConcreteDrawKey concrete;
   std::uint64_t root_constants = 0;
@@ -298,6 +336,8 @@ struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
       root_constants;
   std::unordered_map<RootCbvKey, RootCbvBinding, RootCbvKeyHash>
       root_cbv_bindings;
+  std::unordered_map<BoundDescriptorTableKey, BoundDescriptorTable,
+      BoundDescriptorTableKeyHash> bound_descriptor_tables;
   std::unordered_map<RecordedTraceDrawKey, RecordedTraceDraw,
       RecordedTraceDrawKeyHash> recorded_draws;
   bool recorded_draw_capacity_exceeded = false;
@@ -320,6 +360,7 @@ struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
     observed_bindings = 0;
     root_constants.clear();
     root_cbv_bindings.clear();
+    bound_descriptor_tables.clear();
     recorded_draws.clear();
     recorded_draw_capacity_exceeded = false;
   }

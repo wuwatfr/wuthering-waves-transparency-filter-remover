@@ -472,6 +472,22 @@ void OnBindTraceDescriptorTables(
         static_cast<std::size_t>(dynamic_offset_count) *
             sizeof(std::uint32_t));
   trace->observed_bindings |= 0x4;
+
+  // Current-state binding for the Dev-only Fade control-value tracer
+  // (dev/capture/fade_control_runtime.*): overwritten on rebind, unlike the
+  // accumulated fingerprint above. No lock needed: this only mutates the
+  // command-list-private trace object, exactly like the fingerprint update
+  // right above it.
+  const bool dynamic_offsets_present = dynamic_offset_count != 0;
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const BoundDescriptorTableKey key{layout.handle, first + i};
+    if (tables[i].handle == 0) {
+      trace->bound_descriptor_tables.erase(key);
+      continue;
+    }
+    trace->bound_descriptor_tables[key] =
+        BoundDescriptorTable{tables[i].handle, dynamic_offsets_present};
+  }
 }
 
 bool RecordOrSuppressTraceDraw(command_list* cmd_list,

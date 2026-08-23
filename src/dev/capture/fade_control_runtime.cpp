@@ -10,7 +10,9 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
+#include "dev/capture/descriptor_table_state.hpp"
 #include "dev/capture/manual_capture_state.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
@@ -50,6 +52,50 @@ std::unordered_map<wuwa_tfr::TraceLiveHandleKey,
     wuwa_tfr::TraceLiveHandleKeyHash>
     g_layout_root_cbv_params;
 
+// A pipeline layout's declared CBV ranges among its descriptor_table/
+// descriptor_table_with_flags parameters, for exact (space, register) ->
+// (param, table-relative slot) resolution -- see
+// dev/capture/descriptor_table_state.hpp. `ranges_truncated` means this
+// layout declared more CBV ranges than kMaxDescriptorRangesPerLayout: since
+// ambiguity can only be ruled out by seeing *every* range, a truncated
+// layout's descriptor-table CBVs are always reported unresolved rather than
+// risking a false "exact" match against an incomplete range list.
+struct LayoutDescriptorTableInfo {
+  std::vector<DescriptorCbvRangeInfo> ranges;
+  bool ranges_truncated = false;
+};
+
+constexpr std::size_t kMaxDescriptorRangesPerLayout = 256;
+std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutDescriptorTableInfo,
+    wuwa_tfr::TraceLiveHandleKeyHash>
+    g_layout_descriptor_cbv_ranges;
+
+// Current content of individual descriptor-table slots, as last written by
+// update_descriptor_tables or propagated by copy_descriptor_tables. Device-
+// level state (these events carry no command_list), so it is not scoped to
+// any CommandListTrace.
+DescriptorSlotTable g_descriptor_table_slots;
+
+// This module's own resource-incarnation tracking, deliberately a separate
+// instance from dev/trace/trace_state.hpp's g_trace_resource_incarnations
+// (which is g_trace_mutex-protected): dev/capture/manual_capture.cpp's
+// StartManualCapture() already establishes g_trace_mutex (outer) ->
+// g_fade_control_mutex (inner) as this codebase's lock order, so the
+// Draw-time sampling path below -- which runs under g_fade_control_mutex --
+// must never acquire g_trace_mutex itself (that would invert the order and
+// risk deadlock). Reusing the SAME TraceIncarnationIndex class (not the
+// same object) still gets the identical handle-reuse safety guarantee
+// dev-wide incarnation tracking is built on, entirely within this module's
+// own lock.
+wuwa_tfr::TraceIncarnationIndex<int> g_fade_control_resource_incarnations;
+
+std::uint64_t CurrentFadeControlResourceIncarnationLocked(
+    wuwa_tfr::DeviceIdentity device, std::uint64_t resource_handle) {
+  const auto* record = g_fade_control_resource_incarnations.FindActive(
+      {device, resource_handle});
+  return record ? record->id : 0;
+}
+
 struct MappedBufferInfo {
   std::byte* base = nullptr;
   std::uint64_t offset = 0;
@@ -64,6 +110,34 @@ bool IsCbvDescriptorType(descriptor_type type) noexcept {
       type == descriptor_type::constant_buffer_with_dynamic_offset;
 }
 
+void OnInitFadeControlResource(device* owner, const resource_desc&,
+    const subresource_data*, resource_usage, resource handle) {
+  if (!g_target_process || !owner || handle.handle == 0) return;
+  std::lock_guard lock(g_fade_control_mutex);
+  g_fade_control_resource_incarnations.Activate(
+      {DeviceKey(owner), handle.handle}, 0);
+}
+
+// Records one descriptor_table/descriptor_table_with_flags range as a CBV
+// candidate for exact resolution, or silently drops it (never guessed at)
+// when its shape can't be resolved unambiguously later: a zero or unbounded
+// (UINT32_MAX) count, or (defensively) an array_size other than 1 -- D3D
+// requires array_size == 1 per range (see reshade_api_pipeline.hpp), so this
+// only ever fires for a form this backend cannot actually produce today.
+void AppendDescriptorCbvRange(std::uint32_t param_index,
+    const descriptor_range& range,
+    std::vector<DescriptorCbvRangeInfo>& ranges, bool& truncated) {
+  if (!IsCbvDescriptorType(range.type)) return;
+  if (range.count == 0 || range.count == UINT32_MAX) return;
+  if (range.array_size != 1) return;
+  if (ranges.size() >= kMaxDescriptorRangesPerLayout) {
+    truncated = true;
+    return;
+  }
+  ranges.push_back(DescriptorCbvRangeInfo{param_index, range.binding,
+      range.dx_register_space, range.dx_register_index, range.count});
+}
+
 void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
     const pipeline_layout_param* params, pipeline_layout layout) {
   if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
@@ -72,36 +146,66 @@ void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
   auto active = g_device_activity.Acquire(DeviceKey(owner));
   if (!active) return;
 
-  // Only the plain push_descriptors form (a single CBV bound directly as a
-  // root parameter) is recognized: this is the form the project's own
-  // OnPushTraceDescriptors already observes actual buffer_range values for.
-  // Descriptor-table-backed CBVs (descriptor_table, descriptor_table_with_
-  // flags, push_descriptors_with_ranges*) are deliberately left unresolved
-  // rather than guessed at.
+  // Two independent binding mechanisms are recognized:
+  //  - push_descriptors: a single CBV bound directly as a root parameter,
+  //    the form dev/trace/trace_events.cpp's OnPushTraceDescriptors already
+  //    observes live buffer_range values for.
+  //  - descriptor_table / descriptor_table_with_flags: CBVs living in an
+  //    allocated descriptor table, resolved via g_descriptor_table_slots
+  //    (populated by OnUpdateFadeControlDescriptorTables/
+  //    OnCopyFadeControlDescriptorTables below) plus the currently bound
+  //    table for this layout's parameter (CommandListTrace::
+  //    bound_descriptor_tables).
+  // push_descriptors_with_ranges(_and_flags) remains unrecognized by either
+  // path, as before this project phase -- out of this task's disclosed
+  // scope, not a regression.
   std::unordered_map<std::uint32_t, LayoutRootCbvInfo> root_cbvs;
+  std::vector<DescriptorCbvRangeInfo> descriptor_ranges;
+  bool ranges_truncated = false;
   for (std::uint32_t i = 0; i < param_count; ++i) {
     const auto& param = params[i];
-    if (param.type != pipeline_layout_param_type::push_descriptors) continue;
-    if (!IsCbvDescriptorType(param.push_descriptors.type)) continue;
-    root_cbvs[i] = LayoutRootCbvInfo{
-        param.push_descriptors.dx_register_space,
-        param.push_descriptors.dx_register_index};
+    if (param.type == pipeline_layout_param_type::push_descriptors) {
+      if (!IsCbvDescriptorType(param.push_descriptors.type)) continue;
+      root_cbvs[i] = LayoutRootCbvInfo{
+          param.push_descriptors.dx_register_space,
+          param.push_descriptors.dx_register_index};
+    } else if (param.type == pipeline_layout_param_type::descriptor_table) {
+      for (std::uint32_t r = 0; r < param.descriptor_table.count; ++r)
+        AppendDescriptorCbvRange(i, param.descriptor_table.ranges[r],
+            descriptor_ranges, ranges_truncated);
+    } else if (param.type ==
+        pipeline_layout_param_type::descriptor_table_with_flags) {
+      for (std::uint32_t r = 0; r < param.descriptor_table_with_flags.count;
+           ++r)
+        AppendDescriptorCbvRange(i,
+            param.descriptor_table_with_flags.ranges[r], descriptor_ranges,
+            ranges_truncated);
+    }
   }
-  if (root_cbvs.empty()) return;
+  if (root_cbvs.empty() && descriptor_ranges.empty() && !ranges_truncated)
+    return;
 
   const wuwa_tfr::TraceLiveHandleKey key{DeviceKey(owner), layout.handle};
   std::lock_guard lock(g_fade_control_mutex);
-  if (g_layout_root_cbv_params.size() >= kMaxTrackedFadeControlLayouts &&
-      !g_layout_root_cbv_params.contains(key))
-    return;
-  g_layout_root_cbv_params[key] = std::move(root_cbvs);
+  if (!root_cbvs.empty() &&
+      (g_layout_root_cbv_params.size() < kMaxTrackedFadeControlLayouts ||
+          g_layout_root_cbv_params.contains(key))) {
+    g_layout_root_cbv_params[key] = std::move(root_cbvs);
+  }
+  if ((!descriptor_ranges.empty() || ranges_truncated) &&
+      (g_layout_descriptor_cbv_ranges.size() < kMaxTrackedFadeControlLayouts ||
+          g_layout_descriptor_cbv_ranges.contains(key))) {
+    g_layout_descriptor_cbv_ranges[key] = LayoutDescriptorTableInfo{
+        std::move(descriptor_ranges), ranges_truncated};
+  }
 }
 
 void OnDestroyFadeControlPipelineLayout(device* owner, pipeline_layout layout) {
   if (!owner || layout.handle == 0) return;
+  const wuwa_tfr::TraceLiveHandleKey key{DeviceKey(owner), layout.handle};
   std::lock_guard lock(g_fade_control_mutex);
-  g_layout_root_cbv_params.erase(
-      wuwa_tfr::TraceLiveHandleKey{DeviceKey(owner), layout.handle});
+  g_layout_root_cbv_params.erase(key);
+  g_layout_descriptor_cbv_ranges.erase(key);
 }
 
 void OnMapFadeControlBuffer(device* owner, resource resource_handle,
@@ -139,83 +243,102 @@ void OnUnmapFadeControlBuffer(device*, resource resource_handle) {
   g_mapped_buffers.erase(resource_handle.handle);
 }
 
-void OnDestroyFadeControlResource(device*, resource resource_handle) {
+void OnDestroyFadeControlResource(device* owner, resource resource_handle) {
   if (resource_handle.handle == 0) return;
   std::lock_guard lock(g_fade_control_mutex);
   g_mapped_buffers.erase(resource_handle.handle);
+  if (owner) {
+    g_fade_control_resource_incarnations.Destroy(
+        {DeviceKey(owner), resource_handle.handle});
+  }
+  // Scrubs every descriptor-table slot that cached this handle, so a later,
+  // unrelated resource that happens to reuse the same handle value can
+  // never be misattributed to a slot recorded before this destroy -- see
+  // descriptor_table_state.hpp's InvalidateDescriptorTableSlotsForResource.
+  InvalidateDescriptorTableSlotsForResource(
+      g_descriptor_table_slots, resource_handle.handle);
+}
+
+bool OnUpdateFadeControlDescriptorTables(device* owner, std::uint32_t count,
+    const descriptor_table_update* updates) {
+  if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
+      !updates)
+    return false;
+  auto active = g_device_activity.Acquire(DeviceKey(owner));
+  if (!active) return false;
+
+  std::lock_guard lock(g_fade_control_mutex);
+  for (std::uint32_t u = 0; u < count; ++u) {
+    const auto& update = updates[u];
+    if (update.table.handle == 0 || update.count == 0 || !update.descriptors)
+      continue;
+    if (update.type != descriptor_type::constant_buffer &&
+        update.type != descriptor_type::constant_buffer_with_dynamic_offset)
+      continue;
+    const auto* ranges = static_cast<const buffer_range*>(update.descriptors);
+    for (std::uint32_t i = 0; i < update.count; ++i) {
+      const DescriptorSlotKey key{
+          update.table.handle, update.binding + update.array_offset + i};
+      if (ranges[i].buffer.handle == 0) {
+        SetDescriptorTableSlot(g_descriptor_table_slots, key, std::nullopt);
+        continue;
+      }
+      const auto incarnation = CurrentFadeControlResourceIncarnationLocked(
+          DeviceKey(owner), ranges[i].buffer.handle);
+      SetDescriptorTableSlot(g_descriptor_table_slots, key,
+          DescriptorSlotContent{ranges[i].buffer.handle, incarnation,
+              ranges[i].offset, ranges[i].size});
+    }
+  }
+  return false;
+}
+
+bool OnCopyFadeControlDescriptorTables(
+    device* owner, std::uint32_t count, const descriptor_table_copy* copies) {
+  if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
+      !copies)
+    return false;
+  auto active = g_device_activity.Acquire(DeviceKey(owner));
+  if (!active) return false;
+
+  std::lock_guard lock(g_fade_control_mutex);
+  for (std::uint32_t c = 0; c < count; ++c) {
+    const auto& copy = copies[c];
+    if (copy.source_table.handle == 0 || copy.dest_table.handle == 0 ||
+        copy.count == 0)
+      continue;
+    for (std::uint32_t i = 0; i < copy.count; ++i) {
+      const DescriptorSlotKey source{copy.source_table.handle,
+          copy.source_binding + copy.source_array_offset + i};
+      const DescriptorSlotKey dest{copy.dest_table.handle,
+          copy.dest_binding + copy.dest_array_offset + i};
+      CopyDescriptorTableSlot(g_descriptor_table_slots, source, dest);
+    }
+  }
+  return false;
 }
 
 FadeControlValueSample Unavailable(std::uint8_t reason) noexcept {
   return FadeControlValueSample{false, 0, reason};
 }
 
-// Resolves and samples one control role for one Draw, then folds the
-// result into the bounded aggregate. Holds g_fade_control_mutex for the
-// whole binding-resolution + sample + Observe sequence -- it is the only
-// lock touched here (g_inspection_mutex was already released by the caller
-// before this runs; see SampleFadeControlValuesOnDraw).
-void SampleOneRole(const CommandListTrace& trace,
-    const wuwa_tfr::TraceConcreteDrawKey& route,
+// Shared tail of both binding routes below: given a resolved live resource
+// handle + range offset, looks up the currently mapped region (if any),
+// bounds-checks the target 4 bytes, and folds the sample into the bounded
+// aggregate. Must be called while g_fade_control_mutex is already held.
+void ObserveMappedCbvValue(const FadeControlRecordKey& key,
     const FadeControlPipelineIdentity& pipeline_identity,
-    std::uint32_t primitive_index, FadeControlRole role,
-    const FadeControlSource& source) {
-  FadeControlRecordKey key;
-  key.route = route;
-  key.primitive_index = primitive_index;
-  key.role = role;
-
-  FadeControlValueSample sample;
-  std::lock_guard lock(g_fade_control_mutex);
-  if (!source.resolved) {
-    sample = Unavailable(kFadeControlReasonSourceUnresolved);
-    g_fade_control_accumulator.Observe(key, pipeline_identity, sample);
-    return;
-  }
-
-  key.cbuffer_space = source.cbuffer_space;
-  key.cbuffer_register = source.cbuffer_register;
-  key.vector_index = source.vector_index;
-  key.component = source.component;
-
-  const auto layout_it = g_layout_root_cbv_params.find(
-      wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
-  std::optional<std::uint32_t> matched_param;
-  if (layout_it != g_layout_root_cbv_params.end()) {
-    for (const auto& [param_index, info] : layout_it->second) {
-      if (info.space == source.cbuffer_space &&
-          info.register_index == source.cbuffer_register) {
-        matched_param = param_index;
-        break;
-      }
-    }
-  }
-  if (!matched_param) {
-    g_fade_control_accumulator.Observe(key, pipeline_identity,
-        Unavailable(kFadeControlReasonUnsupportedBindingRoute));
-    return;
-  }
-
-  const RootCbvKey binding_key{trace.bound_layout, *matched_param, 0};
-  const auto binding_it = trace.root_cbv_bindings.find(binding_key);
-  if (binding_it == trace.root_cbv_bindings.end()) {
-    g_fade_control_accumulator.Observe(key, pipeline_identity,
-        Unavailable(kFadeControlReasonBindingUnresolved));
-    return;
-  }
-
-  const auto& binding = binding_it->second;
-  key.runtime_resource_incarnation = binding.resource_incarnation;
-  key.runtime_range_offset = binding.offset;
-
-  const auto mapped_it = g_mapped_buffers.find(binding.resource_handle);
+    std::uint64_t resource_handle, std::uint64_t range_offset,
+    std::uint32_t vector_index, std::uint32_t component) {
+  const auto mapped_it = g_mapped_buffers.find(resource_handle);
   if (mapped_it == g_mapped_buffers.end()) {
     g_fade_control_accumulator.Observe(
         key, pipeline_identity, Unavailable(kFadeControlReasonNotMapped));
     return;
   }
 
-  const std::uint64_t byte_offset = ResolveFadeControlByteOffset(
-      binding.offset, source.vector_index, source.component);
+  const std::uint64_t byte_offset =
+      ResolveFadeControlByteOffset(range_offset, vector_index, component);
   if (!FadeControlByteOffsetInMappedRegion(
           byte_offset, mapped_it->second.offset, mapped_it->second.size)) {
     g_fade_control_accumulator.Observe(
@@ -231,6 +354,141 @@ void SampleOneRole(const CommandListTrace& trace,
       key, pipeline_identity, FadeControlValueSample{true, bits, 0});
 }
 
+// Attempts the root/pushed-CBV route: is `source`'s register a
+// push_descriptors-typed root parameter on this layout, and if so, is it
+// currently pushed? Returns true (and has already recorded an observation,
+// available or not) once this route claims the register -- callers must
+// not also attempt the descriptor-table route in that case, even if the
+// live binding itself turned out unresolved/unmapped.
+bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
+    FadeControlRecordKey key, const FadeControlPipelineIdentity& pipeline_identity,
+    const FadeControlSource& source) {
+  const auto layout_it = g_layout_root_cbv_params.find(
+      wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
+  std::optional<std::uint32_t> matched_param;
+  if (layout_it != g_layout_root_cbv_params.end()) {
+    for (const auto& [param_index, info] : layout_it->second) {
+      if (info.space == source.cbuffer_space &&
+          info.register_index == source.cbuffer_register) {
+        matched_param = param_index;
+        break;
+      }
+    }
+  }
+  if (!matched_param) return false;
+
+  key.binding_route = FadeControlBindingRoute::RootPushDescriptors;
+  const RootCbvKey binding_key{trace.bound_layout, *matched_param, 0};
+  const auto binding_it = trace.root_cbv_bindings.find(binding_key);
+  if (binding_it == trace.root_cbv_bindings.end()) {
+    g_fade_control_accumulator.Observe(key, pipeline_identity,
+        Unavailable(kFadeControlReasonBindingUnresolved));
+    return true;
+  }
+
+  const auto& binding = binding_it->second;
+  key.runtime_resource_incarnation = binding.resource_incarnation;
+  key.runtime_range_offset = binding.offset;
+  ObserveMappedCbvValue(key, pipeline_identity, binding.resource_handle,
+      binding.offset, source.vector_index, source.component);
+  return true;
+}
+
+// Attempts the descriptor-table route: is `source`'s register declared in
+// one of this layout's descriptor_table/descriptor_table_with_flags CBV
+// ranges (unambiguously), is that parameter's table currently bound without
+// unresolved dynamic offsets, does that table+slot have known content, and
+// is that content's cached resource incarnation still current? Each "no"
+// reports a distinct, honest unavailable reason rather than guessing.
+void SampleDescriptorTableRoute(const CommandListTrace& trace,
+    FadeControlRecordKey key, const FadeControlPipelineIdentity& pipeline_identity,
+    const FadeControlSource& source) {
+  const auto layout_it = g_layout_descriptor_cbv_ranges.find(
+      wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
+  if (layout_it == g_layout_descriptor_cbv_ranges.end() ||
+      layout_it->second.ranges_truncated) {
+    g_fade_control_accumulator.Observe(key, pipeline_identity,
+        Unavailable(kFadeControlReasonUnsupportedBindingRoute));
+    return;
+  }
+  const auto slot = ResolveDescriptorTableCbvSlot(
+      layout_it->second.ranges, source.cbuffer_space, source.cbuffer_register);
+  if (!slot) {
+    g_fade_control_accumulator.Observe(key, pipeline_identity,
+        Unavailable(kFadeControlReasonUnsupportedBindingRoute));
+    return;
+  }
+
+  key.binding_route = FadeControlBindingRoute::DescriptorTable;
+  const auto table_it = trace.bound_descriptor_tables.find(
+      BoundDescriptorTableKey{trace.bound_layout, slot->param_index});
+  if (table_it == trace.bound_descriptor_tables.end()) {
+    g_fade_control_accumulator.Observe(key, pipeline_identity,
+        Unavailable(kFadeControlReasonBindingUnresolved));
+    return;
+  }
+  if (table_it->second.dynamic_offsets_present) {
+    g_fade_control_accumulator.Observe(key, pipeline_identity,
+        Unavailable(kFadeControlReasonDynamicOffsetUnresolved));
+    return;
+  }
+
+  const DescriptorSlotKey descriptor_key{
+      table_it->second.table_handle, slot->slot};
+  const auto content =
+      FindDescriptorTableSlot(g_descriptor_table_slots, descriptor_key);
+  if (!content) {
+    g_fade_control_accumulator.Observe(key, pipeline_identity,
+        Unavailable(kFadeControlReasonBindingUnresolved));
+    return;
+  }
+  const auto current_incarnation = CurrentFadeControlResourceIncarnationLocked(
+      trace.device, content->resource_handle);
+  if (!DescriptorSlotContentIsCurrent(*content, current_incarnation)) {
+    g_fade_control_accumulator.Observe(key, pipeline_identity,
+        Unavailable(kFadeControlReasonStaleDescriptorBinding));
+    return;
+  }
+
+  key.runtime_resource_incarnation = content->resource_incarnation;
+  key.runtime_range_offset = content->offset;
+  ObserveMappedCbvValue(key, pipeline_identity, content->resource_handle,
+      content->offset, source.vector_index, source.component);
+}
+
+// Resolves and samples one control role for one Draw, then folds the
+// result into the bounded aggregate. Holds g_fade_control_mutex for the
+// whole binding-resolution + sample + Observe sequence -- it is the only
+// lock touched here (g_inspection_mutex was already released by the caller
+// before this runs; see SampleFadeControlValuesOnDraw). Never acquires
+// g_trace_mutex: see g_fade_control_resource_incarnations' comment for why.
+void SampleOneRole(const CommandListTrace& trace,
+    const wuwa_tfr::TraceConcreteDrawKey& route,
+    const FadeControlPipelineIdentity& pipeline_identity,
+    std::uint32_t primitive_index, FadeControlRole role,
+    const FadeControlSource& source) {
+  FadeControlRecordKey key;
+  key.route = route;
+  key.primitive_index = primitive_index;
+  key.role = role;
+
+  std::lock_guard lock(g_fade_control_mutex);
+  if (!source.resolved) {
+    g_fade_control_accumulator.Observe(
+        key, pipeline_identity, Unavailable(kFadeControlReasonSourceUnresolved));
+    return;
+  }
+
+  key.cbuffer_space = source.cbuffer_space;
+  key.cbuffer_register = source.cbuffer_register;
+  key.vector_index = source.vector_index;
+  key.component = source.component;
+
+  if (TrySampleRootPushDescriptorsRoute(trace, key, pipeline_identity, source))
+    return;
+  SampleDescriptorTableRoute(trace, key, pipeline_identity, source);
+}
+
 std::string SampleFilenameStem(const std::string& timestamp) {
   return "manual-fade-controls-" + timestamp;
 }
@@ -242,12 +500,18 @@ void RegisterFadeControlRuntimeEvents() {
       OnInitFadeControlPipelineLayout);
   reshade::register_event<reshade::addon_event::destroy_pipeline_layout>(
       OnDestroyFadeControlPipelineLayout);
+  reshade::register_event<reshade::addon_event::init_resource>(
+      OnInitFadeControlResource);
   reshade::register_event<reshade::addon_event::map_buffer_region>(
       OnMapFadeControlBuffer);
   reshade::register_event<reshade::addon_event::unmap_buffer_region>(
       OnUnmapFadeControlBuffer);
   reshade::register_event<reshade::addon_event::destroy_resource>(
       OnDestroyFadeControlResource);
+  reshade::register_event<reshade::addon_event::update_descriptor_tables>(
+      OnUpdateFadeControlDescriptorTables);
+  reshade::register_event<reshade::addon_event::copy_descriptor_tables>(
+      OnCopyFadeControlDescriptorTables);
 }
 
 bool FadeControlCapturePending() { return g_fade_control_pending_enabled; }
@@ -334,11 +598,21 @@ bool WriteFadeControlExport(
       "the_non_identity_fade_value_itself_both_structurally_proven_from_"
       "dxil_or_absent\n";
   report << "resolved_binding_scope\t"
-      "root_pushed_cbv_parameters_only_descriptor_table_backed_cbvs_are_"
-      "always_unavailable_binding_unresolved_in_this_version\n";
+      "root_pushed_cbv_parameters_and_descriptor_table_backed_cbvs_both_"
+      "resolved_push_descriptors_with_ranges_variants_remain_unresolved_"
+      "see_binding_route_column_for_which_mechanism_a_given_row_used\n";
   report << "unavailable_reason_bits\t"
       "1_not_mapped_2_out_of_range_4_binding_unresolved_8_source_"
-      "unresolved_16_unsupported_binding_route\n";
+      "unresolved_16_unsupported_binding_route_32_dynamic_offset_"
+      "unresolved_64_stale_descriptor_binding\n";
+  report << "dynamic_offset_policy\t"
+      "the_d3d12_addon_backend_always_passes_dynamic_offset_count_zero_to_"
+      "bind_descriptor_tables_a_nonzero_count_is_still_treated_as_"
+      "unresolved_rather_than_assumed_zero_see_reason_bit_32\n";
+  report << "descriptor_table_staleness_policy\t"
+      "descriptor_table_slot_content_is_cached_at_update_or_copy_"
+      "descriptor_tables_time_and_rejected_at_sample_time_if_the_resource_"
+      "was_destroyed_and_its_handle_reused_since_see_reason_bit_64\n";
 
   report << "device\tapplication_pso\tpso_incarnation\tpso_context_hash"
       "\tpixel_shader_hash"
@@ -353,13 +627,16 @@ bool WriteFadeControlExport(
       "\tunavailable_reason_mask\n";
 
   for (const auto& [key, record] : snapshot.records) {
-    // Coarse classification only: exactly which route was tried and why it
-    // was or wasn't usable is already carried precisely, per observation,
-    // by unavailable_reason_mask -- this column does not attempt to
-    // re-derive that detail after the fact.
-    const char* binding_route = key.runtime_resource_incarnation != 0
+    // The binding mechanism itself, recorded directly at resolution time
+    // (see FadeControlBindingRoute) -- exactly why a given observation was
+    // or wasn't readable is separately carried, per observation, by
+    // unavailable_reason_mask.
+    const char* binding_route =
+        key.binding_route == FadeControlBindingRoute::RootPushDescriptors
         ? "root_push_descriptors"
-        : "unresolved";
+        : key.binding_route == FadeControlBindingRoute::DescriptorTable
+            ? "descriptor_table"
+            : "unresolved";
 
     report << Hex64(record.pipeline.device) << '\t'
            << Hex64(record.pipeline.application_pso) << '\t'

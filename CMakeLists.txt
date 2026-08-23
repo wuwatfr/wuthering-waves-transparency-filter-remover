@@ -71,6 +71,11 @@ add_executable(fade_control_state_tests
   src/dev/capture/fade_control_state.cpp)
 target_include_directories(fade_control_state_tests PRIVATE src)
 
+add_executable(descriptor_table_state_tests
+  tests/test_descriptor_table_state.cpp
+  src/dev/capture/descriptor_table_state.cpp)
+target_include_directories(descriptor_table_state_tests PRIVATE src)
+
 add_executable(trace_submission_identity_tests
   tests/test_trace_submission_identity.cpp)
 target_include_directories(trace_submission_identity_tests PRIVATE src)
@@ -97,6 +102,7 @@ add_test(NAME fade_primitive_detector_tests COMMAND fade_primitive_detector_test
 add_test(NAME target_dither_bypass_tests COMMAND target_dither_bypass_tests)
 add_test(NAME fade_control_analysis_tests COMMAND fade_control_analysis_tests)
 add_test(NAME fade_control_state_tests COMMAND fade_control_state_tests)
+add_test(NAME descriptor_table_state_tests COMMAND descriptor_table_state_tests)
 add_test(NAME trace_submission_identity_tests COMMAND trace_submission_identity_tests)
 add_test(NAME manual_capture_state_tests COMMAND manual_capture_state_tests)
 add_test(NAME single_flight_cache_tests COMMAND single_flight_cache_tests)
@@ -121,6 +127,7 @@ if(WIN32)
         list(APPEND addon_sources
           src/fade_primitive_runtime.cpp
           src/dxil_dither_diagnostic.cpp
+          src/dev/capture/descriptor_table_state.cpp
           src/dev/capture/fade_control_analysis.cpp
           src/dev/capture/fade_control_runtime.cpp
           src/dev/capture/fade_control_state.cpp
