@@ -96,6 +96,21 @@ void RegisterDevEvents() {
       OnDestroyDevRuntimePipeline);
   reshade::register_event<reshade::addon_event::bind_pipeline>(
       OnBindDevRuntimePipeline);
+
+  // g_dev_prefade_hypothesis_runtime's lifecycle -- a second, independent
+  // FadePrimitiveRuntime instance running the experimental pre-Fade FMin
+  // operand-1 hypothesis patch instead of the identity-phi one. See
+  // dev/dev_runtime.hpp.
+  reshade::register_event<reshade::addon_event::init_device>(
+      OnInitPreFadeHypothesisDevice);
+  reshade::register_event<reshade::addon_event::destroy_device>(
+      OnDestroyPreFadeHypothesisDevice);
+  reshade::register_event<reshade::addon_event::init_pipeline>(
+      OnInitPreFadeHypothesisPipeline);
+  reshade::register_event<reshade::addon_event::destroy_pipeline>(
+      OnDestroyPreFadeHypothesisPipeline);
+  reshade::register_event<reshade::addon_event::bind_pipeline>(
+      OnBindPreFadeHypothesisPipeline);
 }
 
 }  // namespace wuwa_tfr::dev

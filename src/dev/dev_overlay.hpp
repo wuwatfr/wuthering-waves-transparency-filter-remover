@@ -9,7 +9,9 @@
 namespace wuwa_tfr::dev {
 
 // Panel for g_dev_antifade_runtime (dev/dev_runtime.hpp): its enable toggle,
-// telemetry snapshot, and read-only Fade Primitive v1 diagnostics.
+// telemetry snapshot, and read-only Fade Primitive v1 diagnostics. Also
+// draws g_dev_prefade_hypothesis_runtime's own enable toggle and diagnostics
+// immediately below; the two toggles are mutually exclusive.
 void DrawFadePrimitiveTargetModes();
 
 // Panel for the runtime differential trace, manual/shader-family SKIP, and

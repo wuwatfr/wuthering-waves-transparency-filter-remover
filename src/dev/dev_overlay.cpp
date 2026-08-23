@@ -12,6 +12,7 @@
 #include <imgui.h>
 
 #include "dev/dev_inspection.hpp"
+#include "dev/dev_prefade_fmin_hypothesis.hpp"
 #include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/trace/trace_events.hpp"
@@ -32,8 +33,12 @@ void DrawFadePrimitiveTargetModes() {
   // FadePrimitiveRuntime class Production uses. It has no per-hash selection
   // concept -- when enabled, it evaluates every observed DXIL pixel shader.
   bool enabled = g_dev_antifade_runtime.enabled();
-  if (ImGui::Checkbox("Remove Transparency Filter", &enabled))
+  if (ImGui::Checkbox("Remove Transparency Filter", &enabled)) {
     g_dev_antifade_runtime.set_enabled(enabled);
+    // Mutually exclusive with the hypothesis probe below: both independently
+    // match/prepare regardless, but only one may ever be bound.
+    if (enabled) g_dev_prefade_hypothesis_runtime.set_enabled(false);
+  }
   ImGui::TextDisabled(
       "Replacement is owned entirely by the shared FadePrimitiveRuntime: every "
       "fully verified Fade Primitive v1 shader is matched and prepared; there "
@@ -54,6 +59,45 @@ void DrawFadePrimitiveTargetModes() {
       static_cast<unsigned long long>(telemetry.replacements_created_total),
       static_cast<unsigned long long>(telemetry.replacements_failed_total),
       static_cast<unsigned long long>(telemetry.replacement_binds_total));
+
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f),
+      "EXPERIMENTAL: pre-Fade FMin operand-1 hypothesis (investigation only)");
+  ImGui::TextWrapped(
+      "For every already-verified Fade Primitive instance, zeroes only operand "
+      "1 of its unique same-CBV pre-Fade FMin to 1.0 and leaves everything "
+      "else -- operand 2, the phi, gate, dither and discard/output -- "
+      "unchanged. Does NOT apply the normal identity-phi removal. Use this to "
+      "visually test which operand carries the camera-distance signal.");
+  bool hypothesis_enabled = g_dev_prefade_hypothesis_runtime.enabled();
+  if (ImGui::Checkbox("Enable operand-1 hypothesis probe", &hypothesis_enabled)) {
+    g_dev_prefade_hypothesis_runtime.set_enabled(hypothesis_enabled);
+    if (hypothesis_enabled) g_dev_antifade_runtime.set_enabled(false);
+  }
+  ImGui::TextDisabled(
+      "Mutually exclusive with \"Remove Transparency Filter\" above: enabling "
+      "one turns the other off, so only one replacement is ever bound.");
+  const auto hypothesis_telemetry =
+      g_dev_prefade_hypothesis_runtime.memory_telemetry_snapshot();
+  ImGui::Text(
+      "Shader cache: entries=%llu | replacement PSOs live=%llu | active devices=%llu | replacement binds=%llu",
+      static_cast<unsigned long long>(hypothesis_telemetry.shader_cache_entries),
+      static_cast<unsigned long long>(hypothesis_telemetry.live_replacement_pipelines),
+      static_cast<unsigned long long>(hypothesis_telemetry.active_devices),
+      static_cast<unsigned long long>(hypothesis_telemetry.replacement_binds_total));
+  const auto hypothesis_diagnostics =
+      wuwa_tfr::dev::PreFadeFMinHypothesisDiagnosticsSnapshot();
+  ImGui::Text(
+      "Shaders evaluated=%llu | verified Fade Primitive instances=%llu | qualifying pre-Fade FMin=%llu | patched=%llu | fail-closed=%llu",
+      static_cast<unsigned long long>(hypothesis_diagnostics.shaders_evaluated_total),
+      static_cast<unsigned long long>(hypothesis_diagnostics.verified_instances_total),
+      static_cast<unsigned long long>(hypothesis_diagnostics.qualifying_instances_total),
+      static_cast<unsigned long long>(hypothesis_diagnostics.patched_instances_total),
+      static_cast<unsigned long long>(hypothesis_diagnostics.shaders_failed_total));
+  const std::string last_failure =
+      wuwa_tfr::dev::LastPreFadeFMinHypothesisFailureReason();
+  if (!last_failure.empty())
+    ImGui::TextDisabled("Last fail-closed reason: %s", last_failure.c_str());
 
   ImGui::Separator();
 

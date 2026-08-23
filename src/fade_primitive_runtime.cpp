@@ -123,6 +123,8 @@ struct FadePrimitiveRuntime::Impl {
       PreparedShaderPayloadBytes> prepared;
   std::filesystem::path dxc_runtime_directory;
   PreparationContextPool<DxcBridge> dxc_pool;
+  std::function<TargetDitherBypassResult(const std::string&)> patch_function =
+      PatchAllVerifiedFadePrimitiveInstancesToIdentity;
   std::atomic<std::uint32_t> device_count{0};
   DeviceActivityState<DeviceId> activity;
   PipelineReplacementCoordinator<DeviceId, pipeline> replacements;
@@ -162,8 +164,7 @@ struct FadePrimitiveRuntime::Impl {
             state.failure = "no fully verified transparency-filter primitive";
           } else {
             matched_shaders.fetch_add(1, std::memory_order_relaxed);
-            const auto patched = PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-                inspected.original_ir);
+            const auto patched = patch_function(inspected.original_ir);
             if (!patched.success ||
                 patched.verified_instance_count != diagnostic.instances.size() ||
                 patched.patched_instance_count != diagnostic.instances.size()) {
@@ -215,6 +216,11 @@ FadePrimitiveRuntime::~FadePrimitiveRuntime() { delete impl_; }
 void FadePrimitiveRuntime::set_dxc_runtime_directory(
     std::filesystem::path addon_directory) {
   impl_->dxc_runtime_directory = std::move(addon_directory);
+}
+
+void FadePrimitiveRuntime::set_patch_function(
+    std::function<TargetDitherBypassResult(const std::string&)> patch_function) {
+  impl_->patch_function = std::move(patch_function);
 }
 
 void FadePrimitiveRuntime::OnInitDevice(device* owner) {

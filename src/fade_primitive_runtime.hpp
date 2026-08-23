@@ -8,6 +8,10 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <string>
+
+#include "target_dither_bypass.hpp"
 
 namespace wuwa_tfr {
 
@@ -53,6 +57,15 @@ class FadePrimitiveRuntime {
       reshade::api::pipeline_stage stages, reshade::api::pipeline pipeline);
   // Set during add-on initialization, before ReShade registers callbacks.
   void set_dxc_runtime_directory(std::filesystem::path addon_directory);
+  // Overrides which structural patch PrepareOne() applies to a matched,
+  // fully verified shader. Defaults to
+  // PatchAllVerifiedFadePrimitiveInstancesToIdentity (Production's identity-
+  // phi patch); Production never calls this setter, so its behavior is
+  // unaffected. Only Dev-only code substitutes an alternative structural
+  // experiment here. Must be set before any device activates, matching
+  // set_dxc_runtime_directory's contract.
+  void set_patch_function(
+      std::function<TargetDitherBypassResult(const std::string&)> patch_function);
   bool enabled() const;
   void set_enabled(bool enabled);
   FadePrimitiveRuntimeTelemetrySnapshot memory_telemetry_snapshot() const;
