@@ -13,6 +13,7 @@
 #include <string>
 
 #include "addon_shared.hpp"
+#include "dev/capture/fade_control_runtime.hpp"
 #include "dev/capture/manual_capture.hpp"
 #include "dev/dev_events.hpp"
 #include "dev/dev_inspection.hpp"
@@ -38,6 +39,7 @@ void RegisterVariantEvents() {
       dev::OnCreatePipeline);
   dev::RegisterDevEvents();
   dev::RegisterManualCaptureEvents();
+  dev::RegisterFadeControlRuntimeEvents();
 }
 
 void DrawVariantOverlay() {

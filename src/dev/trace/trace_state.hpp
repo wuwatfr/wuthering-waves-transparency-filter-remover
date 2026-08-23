@@ -214,6 +214,40 @@ struct RootConstantKeyHash {
   }
 };
 
+// Same key shape as RootConstantKey, minus the per-4-byte-word dimension:
+// one entry per (layout, root parameter, array slot). Used only by the
+// Dev-only Fade control-value tracer (dev/capture/fade_control_runtime.*)
+// to resolve a *live* CBV binding for a structurally proven cbuffer
+// register -- unrelated to pushed_cbv_fingerprint's accumulated
+// binding-event-fingerprint semantics below, which remain untouched.
+struct RootCbvKey {
+  std::uint64_t layout = 0;
+  std::uint32_t parameter = 0;
+  std::uint32_t binding = 0;
+
+  friend bool operator==(const RootCbvKey&, const RootCbvKey&) = default;
+};
+
+struct RootCbvKeyHash {
+  std::size_t operator()(const RootCbvKey& key) const noexcept {
+    std::size_t hash = std::hash<std::uint64_t>{}(key.layout);
+    wuwa_tfr::TraceHashCombine(hash, key.parameter);
+    wuwa_tfr::TraceHashCombine(hash, key.binding);
+    return hash;
+  }
+};
+
+// Current (not accumulated-history) pushed-CBV binding for one root
+// parameter slot: overwritten on rebind, never appended. resource_handle is
+// the raw handle (for mapped-memory lookup); resource_incarnation is the
+// same lifecycle-safe identity the rest of this trace uses.
+struct RootCbvBinding {
+  std::uint64_t resource_handle = 0;
+  std::uint64_t resource_incarnation = 0;
+  std::uint64_t offset = 0;
+  std::uint64_t size = 0;
+};
+
 struct RecordedTraceDrawKey {
   wuwa_tfr::TraceConcreteDrawKey concrete;
   std::uint64_t root_constants = 0;
@@ -262,6 +296,8 @@ struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
   std::uint8_t observed_bindings = 0;
   std::unordered_map<RootConstantKey, std::uint32_t, RootConstantKeyHash>
       root_constants;
+  std::unordered_map<RootCbvKey, RootCbvBinding, RootCbvKeyHash>
+      root_cbv_bindings;
   std::unordered_map<RecordedTraceDrawKey, RecordedTraceDraw,
       RecordedTraceDrawKeyHash> recorded_draws;
   bool recorded_draw_capacity_exceeded = false;
@@ -283,6 +319,7 @@ struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
     descriptor_table_fingerprint = kTraceFnvOffset;
     observed_bindings = 0;
     root_constants.clear();
+    root_cbv_bindings.clear();
     recorded_draws.clear();
     recorded_draw_capacity_exceeded = false;
   }

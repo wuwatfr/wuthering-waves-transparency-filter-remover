@@ -15,6 +15,7 @@
 
 #include <imgui.h>
 
+#include "dev/capture/fade_control_runtime.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/trace/trace_report.hpp"
@@ -314,6 +315,8 @@ void StartManualCapture() {
       ? ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly
       : ManualCaptureShaderFilter::AllObservedPixelShaders;
 
+  const bool fade_control_enabled = FadeControlCapturePending();
+
   std::lock_guard lock(g_trace_mutex);
   ++g_manual_capture_generation;
   g_manual_capture_frame_counter = 0;
@@ -321,6 +324,10 @@ void StartManualCapture() {
   g_manual_capture.Start(g_manual_capture_generation, 0, filter_mode);
   g_manual_capture_active.store(true, std::memory_order_release);
   g_manual_capture_status = "capturing";
+  // Independent lifecycle/mutex from the route accumulation above (see
+  // fade_control_runtime.hpp); tied to the same session id purely for
+  // human correlation across the two exported TSVs.
+  StartFadeControlCapture(g_manual_capture_generation, fade_control_enabled);
 }
 
 bool StopAndExportManualCapture() {
@@ -332,14 +339,27 @@ bool StopAndExportManualCapture() {
     snapshot = g_manual_capture.Stop(g_manual_capture_frame_counter);
     g_manual_capture_active.store(false, std::memory_order_release);
   }
+  const bool fade_control_was_enabled = StopFadeControlCapture();
 
-  // File I/O deliberately happens after the lock above is released.
+  // File I/O deliberately happens after the locks above are released.
   const std::string timestamp = LocalExportTimestamp();
   std::filesystem::path export_path;
   const bool exported =
       WriteManualCaptureExport(snapshot, timestamp, export_path);
-  g_manual_capture_status = exported ? "exported manual capture"
-                                      : "export failed: check DumpPath";
+  bool fade_control_exported = false;
+  if (fade_control_was_enabled) {
+    std::filesystem::path fade_control_path;
+    fade_control_exported =
+        WriteFadeControlExport(timestamp, fade_control_path);
+  }
+  g_manual_capture_status = exported
+      ? (fade_control_was_enabled
+                ? (fade_control_exported
+                          ? "exported manual capture + fade control values"
+                          : "exported manual capture; fade control export "
+                            "failed: check DumpPath")
+                : "exported manual capture")
+      : "export failed: check DumpPath";
   if (exported) g_manual_capture_last_export = export_path.filename().string();
   return exported;
 }
@@ -378,6 +398,17 @@ void DrawManualCaptureOverlay() {
       "successful inspection with a fully verified Fade Primitive v1 "
       "instance; the matcher is not re-run here.");
 
+  bool fade_control_pending = FadeControlCapturePending();
+  ImGui::BeginDisabled(is_capturing);
+  if (ImGui::Checkbox("Capture Fade control values", &fade_control_pending))
+    SetFadeControlCapturePending(fade_control_pending);
+  ImGui::EndDisabled();
+  ImGui::TextDisabled(
+      "Snapshotted at Start capture. Only meaningful for verified Fade "
+      "Primitive Draws -- CPU command-recording-time observation of mapped "
+      "constant-buffer memory, never GPU completion evidence. See "
+      "manual-fade-controls-*.tsv for the full disclosure.");
+
   ImGui::BeginDisabled(is_capturing);
   if (ImGui::Button("Start capture")) StartManualCapture();
   ImGui::EndDisabled();
@@ -414,6 +445,21 @@ void DrawManualCaptureOverlay() {
   if (summary.capacity_exceeded) {
     ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
         "Unique-record capacity reached; this capture is incomplete.");
+  }
+
+  const auto fade_control = GetFadeControlDiagnosticCounters();
+  if (fade_control.enabled) {
+    ImGui::Separator();
+    ImGui::Text(
+        "Fade control values: sources=%zu | resolved bindings=%zu | "
+        "sampled=%llu | unavailable=%llu",
+        fade_control.control_sources, fade_control.resolved_bindings,
+        static_cast<unsigned long long>(fade_control.sampled_values),
+        static_cast<unsigned long long>(fade_control.unavailable_values));
+    if (fade_control.capacity_exceeded) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
+          "Fade control value capacity reached; this trace is incomplete.");
+    }
   }
 }
 

@@ -14,9 +14,11 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <reshade.hpp>
 
+#include "dev/capture/fade_control_analysis.hpp"
 #include "dxc_bridge.hpp"
 #include "dxil_dither_diagnostic.hpp"
 #include "fade_primitive_detector.hpp"
@@ -30,6 +32,10 @@ struct InspectionRecord {
   std::size_t bytecode_size = 0;
   wuwa_tfr::SpatialDitherDiagnostic dither;
   wuwa_tfr::FadePrimitiveDiagnostic fade_primitive;
+  // Diagnostic-only static control-source analysis (dev/capture/
+  // fade_control_analysis.hpp), same order as fade_primitive.instances.
+  // Never affects AnalyzeFadePrimitiveV1() or patch eligibility.
+  std::vector<FadeControlInstanceSources> fade_control;
   std::string error;
 };
 

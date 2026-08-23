@@ -100,6 +100,7 @@ void EnsureTraceLayout(
   trace.descriptor_table_fingerprint = kTraceFnvOffset;
   trace.observed_bindings = 0;
   trace.root_constants.clear();
+  trace.root_cbv_bindings.clear();
 }
 
 bool HasPixelStage(shader_stage stages) noexcept {

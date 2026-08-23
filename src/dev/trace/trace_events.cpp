@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "dev/capture/fade_control_runtime.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
@@ -415,6 +416,7 @@ void OnPushTraceDescriptors(
   auto* trace = cmd_list->get_private_data<CommandListTrace>();
   if (!trace) return;
 
+  std::lock_guard lock(g_trace_mutex);
   EnsureTraceLayout(*trace, layout.handle);
   TraceHashValue(trace->pushed_cbv_fingerprint, layout.handle);
   TraceHashValue(trace->pushed_cbv_fingerprint, layout_param);
@@ -427,6 +429,20 @@ void OnPushTraceDescriptors(
     TraceHashValue(trace->pushed_cbv_fingerprint, ranges[i].buffer.handle);
     TraceHashValue(trace->pushed_cbv_fingerprint, ranges[i].offset);
     TraceHashValue(trace->pushed_cbv_fingerprint, ranges[i].size);
+    // Current-state binding for the Dev-only Fade control-value tracer
+    // (dev/capture/fade_control_runtime.*): overwritten on rebind, unlike
+    // the accumulated event fingerprint above.
+    const RootCbvKey binding_key{
+        layout.handle, layout_param, update.binding + i};
+    if (ranges[i].buffer.handle == 0) {
+      trace->root_cbv_bindings.erase(binding_key);
+    } else {
+      trace->root_cbv_bindings[binding_key] = RootCbvBinding{
+          ranges[i].buffer.handle,
+          ActiveResourceIncarnationLocked(trace->device, ranges[i].buffer)
+              .incarnation,
+          ranges[i].offset, ranges[i].size};
+    }
   }
   trace->observed_bindings |= 0x2;
 }
@@ -495,6 +511,14 @@ bool RecordOrSuppressTraceDraw(command_list* cmd_list,
     draw->second.pipeline = *trace->bound_pipeline;
   }
   ++draw->second.commands;
+
+  // Optional Dev-only value-tracing hook: reuses this exact Draw/PSO/pass
+  // provenance instead of a second Draw instrumentation chain. Gated by a
+  // single atomic load so it costs nothing when no manual capture is
+  // sampling control values (see fade_control_runtime.hpp's module
+  // comment).
+  SampleFadeControlValuesOnDraw(*trace, concrete, draw->second.pipeline);
+
   return false;
 }
 

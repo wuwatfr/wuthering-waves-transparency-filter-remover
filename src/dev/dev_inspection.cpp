@@ -173,6 +173,10 @@ void InspectPixelShader(const reshade::api::shader_desc& descriptor) {
     g_disassembly_successes.fetch_add(1, std::memory_order_relaxed);
     record.dither = AnalyzeSpatialDitherDiagnostic(inspection.original_ir);
     record.fade_primitive = AnalyzeFadePrimitiveV1(inspection.original_ir);
+    // Diagnostic-only; never influences record.fade_primitive or patch
+    // eligibility above.
+    record.fade_control = AnalyzeFadeControlSources(
+        inspection.original_ir, record.fade_primitive);
     if (record.dither.discard_calls != 0)
       g_discard_shader_count.fetch_add(1, std::memory_order_relaxed);
     if (record.dither.classification ==
