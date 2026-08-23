@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/experiments/experiments_common.hpp"
 #include "dev/experiments/experiments_fade_primitive.hpp"
@@ -305,7 +306,13 @@ void OnBindTracePipeline(
 
   if (!IsFadePrimitiveExecutionActive(shader_hash)) return;
 
-  if (!g_target_bypass_enabled.load(std::memory_order_relaxed)) {
+  // g_dev_antifade_runtime (dev/dev_runtime.hpp) is Dev's other, independent
+  // replacement path for the same primitive. If it is enabled it is
+  // authoritative for the bind decision, so this legacy experiment path must
+  // not also publish a competing replacement bind for the same application
+  // pipeline.
+  if (!g_target_bypass_enabled.load(std::memory_order_relaxed) ||
+      g_dev_antifade_runtime.enabled()) {
     g_fade_primitive_execution_original_bind_hits.fetch_add(1,
         std::memory_order_relaxed);
     std::lock_guard lock(g_fade_primitive_execution_mutex);

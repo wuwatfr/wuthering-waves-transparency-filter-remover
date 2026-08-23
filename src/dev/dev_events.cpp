@@ -3,6 +3,7 @@
 
 #include "dev/dev_events.hpp"
 
+#include "dev/dev_runtime.hpp"
 #include "dev/experiments/experiments_common.hpp"
 #include "dev/experiments/experiments_fade_primitive.hpp"
 #include "dev/experiments/experiments_legacy_bypass.hpp"
@@ -84,6 +85,8 @@ void OnDestroyDeviceHook(device* owner) {
 }
 
 void RegisterDevEvents() {
+  InitializeDevRuntime();
+
   reshade::register_event<reshade::addon_event::init_resource>(
       OnInitTraceResource);
   reshade::register_event<reshade::addon_event::destroy_resource>(
@@ -136,6 +139,21 @@ void RegisterDevEvents() {
   reshade::register_event<reshade::addon_event::execute_command_list>(
       OnExecuteTrace);
   reshade::register_event<reshade::addon_event::present>(OnTracePresent);
+
+  // The shared FadePrimitiveRuntime's own lifecycle, registered as additional
+  // handlers alongside the trace/experiment ones above. It is a second,
+  // independent object of the same class Production uses -- see
+  // dev/dev_runtime.hpp.
+  reshade::register_event<reshade::addon_event::init_device>(
+      OnInitDevRuntimeDevice);
+  reshade::register_event<reshade::addon_event::destroy_device>(
+      OnDestroyDevRuntimeDevice);
+  reshade::register_event<reshade::addon_event::init_pipeline>(
+      OnInitDevRuntimePipeline);
+  reshade::register_event<reshade::addon_event::destroy_pipeline>(
+      OnDestroyDevRuntimePipeline);
+  reshade::register_event<reshade::addon_event::bind_pipeline>(
+      OnBindDevRuntimePipeline);
 }
 
 }  // namespace wuwa_tfr::dev

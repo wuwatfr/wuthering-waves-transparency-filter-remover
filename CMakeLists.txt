@@ -105,6 +105,7 @@ if(WIN32)
         src/target_dither_bypass.cpp)
       if(DEVTOOLS_VALUE)
         list(APPEND addon_sources
+          src/fade_primitive_runtime.cpp
           src/dxil_dither_diagnostic.cpp
           src/dev/diagnostics/dev_diagnostics.cpp
           src/dev/experiments/experiments_common.cpp
@@ -116,6 +117,7 @@ if(WIN32)
           src/dev/trace/trace_state.cpp
           src/dev/dev_events.cpp
           src/dev/dev_overlay.cpp
+          src/dev/dev_runtime.cpp
           )
       else()
         list(APPEND addon_sources
