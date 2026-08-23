@@ -1,6 +1,7 @@
 cbuffer FadeConstants : register(b0) {
   float enabled;
-  float coverage;
+  float coverageA;
+  float coverageB;
 };
 
 struct PixelInput { float4 position : SV_Position; };
@@ -16,6 +17,7 @@ float4 main(PixelInput input) : SV_Target {
     int x = ((int)input.position.x) % 3;
     int y = ((int)input.position.y) % 3;
     float threshold = thresholds[x * 3 + y];
+    float coverage = min(coverageA, coverageB);
     dither = min(max(coverage * 2.0 - threshold, 0.0), 1.0) + 0.333;
   }
   float visible = min(saturate(dither), 1.0);

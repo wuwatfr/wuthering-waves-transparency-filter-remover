@@ -22,6 +22,7 @@
 #include "dxc_bridge.hpp"
 #include "dxil_dither_diagnostic.hpp"
 #include "fade_primitive_detector.hpp"
+#include "pre_fade_fmin_analysis.hpp"
 
 namespace wuwa_tfr::dev {
 
@@ -36,6 +37,11 @@ struct InspectionRecord {
   // fade_control_analysis.hpp), same order as fade_primitive.instances.
   // Never affects AnalyzeFadePrimitiveV1() or patch eligibility.
   std::vector<FadeControlInstanceSources> fade_control;
+  // The canonical pre-Fade FMin analysis (pre_fade_fmin_analysis.hpp) that
+  // Production's patch (target_dither_bypass.cpp) itself relies on, same
+  // order as fade_primitive.instances. Cached here purely for read-only Dev
+  // reporting; Dev never re-derives this with a separate parser.
+  std::vector<wuwa_tfr::PreFadeFMinAnalysis> pre_fade_fmin;
   std::string error;
 };
 

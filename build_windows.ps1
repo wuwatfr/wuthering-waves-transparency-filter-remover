@@ -140,7 +140,6 @@ $testTargets = @(
     'dxil_dither_diagnostic_tests',
     'fade_primitive_detector_tests',
     'target_dither_bypass_tests',
-    'dev_prefade_fmin_hypothesis_tests',
     'fade_control_analysis_tests',
     'fade_control_state_tests',
     'descriptor_table_state_tests',

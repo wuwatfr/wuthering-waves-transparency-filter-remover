@@ -177,6 +177,10 @@ void InspectPixelShader(const reshade::api::shader_desc& descriptor) {
     // eligibility above.
     record.fade_control = AnalyzeFadeControlSources(
         inspection.original_ir, record.fade_primitive);
+    record.pre_fade_fmin.reserve(record.fade_primitive.instances.size());
+    for (const auto& instance : record.fade_primitive.instances)
+      record.pre_fade_fmin.push_back(
+          wuwa_tfr::AnalyzePreFadeFMinForInstance(inspection.original_ir, instance));
     if (record.dither.discard_calls != 0)
       g_discard_shader_count.fetch_add(1, std::memory_order_relaxed);
     if (record.dither.classification ==

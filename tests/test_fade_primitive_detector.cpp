@@ -10,6 +10,28 @@
 
 namespace {
 
+// Inserts a same-row adjacent, direct-scalar pre-Fade FMin defining
+// %coverage, right before its first use -- the canonical shape
+// target_dither_bypass.cpp's Production patch requires. Applied only to the
+// specific fixtures that call PatchAllVerifiedFadePrimitiveInstancesPreFade-
+// Operand() and expect success; every detector-only test in this file (and
+// every test whose fixture PatchAllVerified... is expected to reject for an
+// unrelated reason) is untouched, since inserting this earlier in the
+// shared PrimitiveFunction() template collides with other tests' find/rfind
+// searches for "@dx.op.binary.f32" (the FMax/FMin comment_fmax/comment_fmin
+// coverage-expression rejection tests).
+std::string WithQualifyingPreFadeFMin(std::string ir) {
+  const std::string marker = "%twice = fmul fast float %coverage, 2.000000e+00";
+  const std::size_t at = ir.find(marker);
+  if (at == std::string::npos) return ir;
+  ir.insert(at,
+      "%cv_pf = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+      "%cv_a = extractvalue %dx.types.CBufRet.f32 %cv_pf, 2\n"
+      "%cv_b = extractvalue %dx.types.CBufRet.f32 %cv_pf, 3\n"
+      "%coverage = call float @dx.op.binary.f32(i32 36, float %cv_a, float %cv_b)  ; FMin(a,b)\n");
+  return ir;
+}
+
 std::string PrimitiveFunction(std::string_view name, std::string_view consumer,
     std::string_view prefix = {}, std::string_view suffix = {}) {
   return "define void @" + std::string(name) + "() {\nentry:\n" +
@@ -97,12 +119,12 @@ int main() {
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::SvTargetAlpha);
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::SvTargetRgb);
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::DiscardAndSvTargetAlpha);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         llvm_ir).success);
   };
   const auto expect_no_candidate = [](const std::string& llvm_ir) {
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(llvm_ir).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         llvm_ir).success);
   };
   {
@@ -116,7 +138,7 @@ int main() {
     CHECK(comment_diagnostic.instances.size() == 1);
     CHECK(comment_diagnostic.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::Unknown);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         comment_discard).success);
 
     std::string wrong_opcode = Module(PrimitiveFunction(
@@ -164,7 +186,7 @@ int main() {
     CHECK(output_diagnostic.instances.size() == 1);
     CHECK(output_diagnostic.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::Unknown);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         comment_output).success);
 
     const std::string comment_position =
@@ -239,8 +261,8 @@ int main() {
         "i32 undef), !dbg !42");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(
         with_load_metadata).instances.size() == 1);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        with_load_metadata).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(with_load_metadata)).success);
 
     std::string malformed_load_metadata = positive;
     const std::size_t load_end = malformed_load_metadata.find("i32 undef)");
@@ -282,8 +304,8 @@ int main() {
         branch + ", !dx.controlflow.hints !42, !prof !43  ; hinted gate");
     const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(with_branch_metadata);
     CHECK(result.instances.size() == 1);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        with_branch_metadata).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(with_branch_metadata)).success);
   }
   {
     // Extra operands and malformed metadata remain fail-closed.
@@ -298,7 +320,7 @@ int main() {
       CHECK(branch_offset != std::string::npos);
       malformed.replace(branch_offset, branch.size(), branch + std::string(suffix));
       CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(malformed).instances.empty());
-      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
           malformed).success);
     }
   }
@@ -310,7 +332,7 @@ int main() {
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::SvTargetAlpha);
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::SvTargetRgb);
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::DiscardAndSvTargetAlpha);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         llvm_ir).success);
   };
   {
@@ -319,7 +341,8 @@ int main() {
     const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(alpha);
     CHECK(result.instances.size() == 1);
     CHECK(result.instances.front().consumer == wuwa_tfr::FadePrimitiveConsumer::SvTargetAlpha);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(alpha).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(alpha)).success);
   }
   {
     const std::string both = Module(PrimitiveFunction("both",
@@ -328,7 +351,8 @@ int main() {
     const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(both);
     CHECK(result.instances.size() == 1);
     CHECK(result.instances.front().consumer == wuwa_tfr::FadePrimitiveConsumer::DiscardAndSvTargetAlpha);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(both).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(both)).success);
   }
   {
     // Authorized output/discard evidence never hides an additional reachable
@@ -414,7 +438,7 @@ int main() {
     CHECK(cross_diagnostic.instances.size() == 1);
     CHECK(cross_diagnostic.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::Unknown);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         cross_function).success);
   }
   {
@@ -425,7 +449,8 @@ int main() {
     CHECK(result.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::SvTargetRgb);
     const auto patched =
-        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(rgb);
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+            WithQualifyingPreFadeFMin(rgb));
     CHECK(patched.success);
     CHECK(patched.verified_instance_count == 1);
     CHECK(patched.patched_instance_count == 1);
@@ -441,7 +466,7 @@ int main() {
     CHECK(missing_blue_diagnostic.instances.size() == 1);
     CHECK(missing_blue_diagnostic.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         missing_blue).success);
 
     std::string duplicate_column = rgb;
@@ -558,7 +583,7 @@ entry:
         "%plain = icmp eq i32 0, 0\n"
         "br i1 %plain, label %enabled, label %merge");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(prefix_successor).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         prefix_successor).success);
   }
   {
@@ -579,7 +604,7 @@ entry:
         "%ptr2 = bitcast float* %ptr to float*\n"
         "%threshold = load float, float* %ptr2, align 4, !tbaa !50, !noalias !54");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(pointer_prefix).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         pointer_prefix).success);
   }
   {
@@ -595,7 +620,7 @@ entry:
         "%190 = bitcast float* %19 to float*\n"
         "%threshold = load float, float* %190, align 4, !tbaa !50, !noalias !54");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(numeric_prefix).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         numeric_prefix).success);
   }
   {
@@ -645,7 +670,7 @@ entry:
         "call void @dx.op.discard(i32 82, i1 %kill)\n";
     limited.insert(limited.rfind("\n}\n"), chain);
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(limited).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         limited).success);
   }
   {
@@ -660,21 +685,21 @@ entry:
     no_align.replace(no_align.find(load_line), load_line.size(),
         "%threshold = load float, float* %ptr, !tbaa !50, !noalias !54");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(no_align).instances.size() == 1);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        no_align).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(no_align)).success);
 
     std::string single_attachment = positive;
     single_attachment.replace(single_attachment.find(load_line), load_line.size(),
         "%threshold = load float, float* %ptr, align 4, !tbaa !50");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(single_attachment).instances.size() == 1);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        single_attachment).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(single_attachment)).success);
 
     const auto expect_load_rejected = [&](std::string_view replacement) {
       std::string ir = positive;
       ir.replace(ir.find(load_line), load_line.size(), std::string(replacement));
       CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(ir).instances.empty());
-      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
           ir).success);
     };
     // Malformed attachment name: missing the leading '!'.
@@ -714,8 +739,8 @@ entry:
     CHECK(fmin_result.instances.size() == 1);
     CHECK(fmin_result.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::Discard);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        discard_via_fmin).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(discard_via_fmin)).success);
 
     const std::string alpha_via_saturate = Module(PrimitiveFunction(
         "alpha_via_saturate",
@@ -729,8 +754,8 @@ entry:
     CHECK(saturate_result.instances.size() == 1);
     CHECK(saturate_result.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::SvTargetAlpha);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        alpha_via_saturate).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(alpha_via_saturate)).success);
 
     const auto expect_pure_call_rejected = [](std::string_view name,
                                                std::string_view call_line) {
@@ -743,7 +768,7 @@ entry:
       CHECK(diagnostic.instances.size() == 1);
       CHECK(diagnostic.instances.front().consumer ==
           wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
-      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
           ir).success);
     };
     // Wrong opcode: FMax (35) instead of FMin (36).

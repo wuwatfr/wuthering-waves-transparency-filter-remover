@@ -20,20 +20,6 @@ namespace wuwa_tfr::dev {
 
 extern wuwa_tfr::FadePrimitiveRuntime g_dev_antifade_runtime;
 
-// A second, independent instance of the exact same FadePrimitiveRuntime
-// class, with PatchAllVerifiedFadePrimitiveInstancesToIdentity replaced by
-// PatchPreFadeFMinOperandOneHypothesis (dev/dev_prefade_fmin_hypothesis.hpp)
-// -- an experimental, investigation-only structural probe, never the
-// Production identity-phi collapse. Its own shader cache, DXC pool, and
-// replacement-pipeline state are entirely separate from
-// g_dev_antifade_runtime's. Enabling it is mutually exclusive with
-// g_dev_antifade_runtime at the overlay level (dev/dev_overlay.cpp): both
-// independently match and prepare every observed shader regardless of
-// enabled(), but only one may ever be enabled() -- and therefore bound -- at
-// a time, or the two would race to bind competing replacements for the same
-// application pipeline.
-extern wuwa_tfr::FadePrimitiveRuntime g_dev_prefade_hypothesis_runtime;
-
 // True for the duration of OnDestroyDevRuntimeDevice/OnInitDevRuntimePipeline/
 // OnDestroyDevRuntimePipeline/OnBindDevRuntimePipeline's calls into
 // g_dev_antifade_runtime, including any ReShade event nested inside them (the
@@ -65,19 +51,6 @@ void OnInitDevRuntimePipeline(reshade::api::device* owner,
 void OnDestroyDevRuntimePipeline(
     reshade::api::device* owner, reshade::api::pipeline application_pipeline);
 void OnBindDevRuntimePipeline(reshade::api::command_list* command_list,
-    reshade::api::pipeline_stage stages,
-    reshade::api::pipeline application_pipeline);
-
-// The same five forwarders as above, for g_dev_prefade_hypothesis_runtime.
-void OnInitPreFadeHypothesisDevice(reshade::api::device* owner);
-void OnDestroyPreFadeHypothesisDevice(reshade::api::device* owner);
-void OnInitPreFadeHypothesisPipeline(reshade::api::device* owner,
-    reshade::api::pipeline_layout layout, std::uint32_t subobject_count,
-    const reshade::api::pipeline_subobject* subobjects,
-    reshade::api::pipeline application_pipeline);
-void OnDestroyPreFadeHypothesisPipeline(
-    reshade::api::device* owner, reshade::api::pipeline application_pipeline);
-void OnBindPreFadeHypothesisPipeline(reshade::api::command_list* command_list,
     reshade::api::pipeline_stage stages,
     reshade::api::pipeline application_pipeline);
 

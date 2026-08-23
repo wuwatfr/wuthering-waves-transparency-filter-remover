@@ -9,7 +9,22 @@
 #include <string>
 #include <string_view>
 
+namespace {
+
+std::string LongChain(int length) {
+  std::string chain = "%chain0 = fadd fast float 0.000000e+00, 1.000000e+00\n";
+  for (int i = 1; i <= length; ++i)
+    chain += "%chain" + std::to_string(i) + " = fadd fast float %chain" +
+        std::to_string(i - 1) + ", 1.000000e+00\n";
+  return chain;
+}
+
+}  // namespace
+
 int main() {
+  // A same-row adjacent, single-instance fixture: %coverage0's pre-Fade FMin
+  // combines two adjacent scalars (z, w) from one cbufferLoadLegacy row --
+  // the canonical qualifying shape.
   const std::string all_instances_ir = R"(
 !899 = !{i32 0, !"SV_Position", i8 9}
 @thresholds = internal constant [9 x float] zeroinitializer
@@ -22,6 +37,10 @@ entry:
 %c0 = fcmp fast ogt float %g0, 0.000000e+00
 br i1 %c0, label %on0, label %merge0
 ; <label>:on0
+%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)
+%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2
+%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3
+%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)
 %xi0 = fptosi float %x to i32
 %yi0 = fptosi float %y to i32
 %mx0 = srem i32 %xi0, 3
@@ -43,6 +62,10 @@ br label %merge0
 %c1 = fcmp fast ogt float %g1, 0.000000e+00
 br i1 %c1, label %on1, label %merge1
 ; <label>:on1
+%pf1 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb3, i32 55)
+%opA1 = extractvalue %dx.types.CBufRet.f32 %pf1, 1
+%opB1 = extractvalue %dx.types.CBufRet.f32 %pf1, 2
+%coverage1 = call float @dx.op.binary.f32(i32 36, float %opA1, float %opB1)  ; FMin(a,b)
 %xi1 = fptosi float %x to i32
 %yi1 = fptosi float %y to i32
 %mx1 = srem i32 %xi1, 3
@@ -68,20 +91,43 @@ call void @dx.op.discard(i32 82, i1 %kill)
 }
 !900 = !{i32 0, !"SV_Target", i8 9}
 )";
+
+  // ---- successful shapes ----
+
+  // Multiple verified instances in one shader, both same-row adjacent.
   const auto all_instances =
-      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
           all_instances_ir);
   CHECK(all_instances.success);
   CHECK(all_instances.structural_verification_succeeded);
   CHECK(all_instances.ir_patch_succeeded);
   CHECK(all_instances.verified_instance_count == 2);
+  CHECK(all_instances.qualifying_instance_count == 2);
   CHECK(all_instances.patched_instance_count == 2);
+  // Only operand 1 of each qualifying FMin changes.
   CHECK(all_instances.llvm_ir.find(
-      "%d0 = phi float [ 1.000000e+00, %on0 ], [ 1.000000e+00, %entry0 ]") !=
+      "call float @dx.op.binary.f32(i32 36, float 1.000000e+00, float %opB0)") !=
       std::string::npos);
   CHECK(all_instances.llvm_ir.find(
-      "%d1 = phi float [ 1.000000e+00, %on1 ], [ 1.000000e+00, %entry1 ]") !=
+      "call float @dx.op.binary.f32(i32 36, float 1.000000e+00, float %opB1)") !=
       std::string::npos);
+  // Operand 2 and every downstream instruction remain byte-for-byte
+  // unchanged: the phi, gate, coverage/dither expression, saturate, alpha
+  // output, and discard predicate are all still present verbatim.
+  for (std::string_view unchanged : {
+           std::string_view("%d0 = phi float [ %computed0, %on0 ], [ 1.000000e+00, %entry0 ]"),
+           std::string_view("%d1 = phi float [ %computed1, %on1 ], [ 1.000000e+00, %entry1 ]"),
+           std::string_view("%c0 = fcmp fast ogt float %g0, 0.000000e+00"),
+           std::string_view("br i1 %c0, label %on0, label %merge0"),
+           std::string_view("%hi0 = call float @dx.op.binary.f32(i32 36, float %lo0, float 1.000000e+00)  ; FMin(a,b)"),
+           std::string_view("%d0_sat = call float @dx.op.unary.f32(i32 7, float %d0)  ; Saturate(value)"),
+           std::string_view("call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %alpha)"),
+           std::string_view("call void @dx.op.discard(i32 82, i1 %kill)")}) {
+    CHECK(all_instances_ir.find(unchanged) != std::string::npos);
+    CHECK(all_instances.llvm_ir.find(unchanged) != std::string::npos);
+  }
+  CHECK(all_instances.llvm_ir.find("float %opA0") == std::string::npos);
+  CHECK(all_instances.llvm_ir.find("float %opA1") == std::string::npos);
 
   // Production cannot authorize screen-space indexing from an unrelated
   // TEXCOORD signature merely because SV_Position metadata exists elsewhere.
@@ -99,7 +145,7 @@ call void @dx.op.discard(i32 82, i1 %kill)
         offset, position_call.size(), texcoord_call);
   CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(
       texcoord_position_inputs).instances.empty());
-  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
       texcoord_position_inputs).success);
 
   // A balanced signature tuple with an arbitrary metadata field is not a
@@ -117,13 +163,11 @@ call void @dx.op.discard(i32 82, i1 %kill)
   CHECK(invalid_target_diagnostic.instances.size() == 2);
   CHECK(invalid_target_diagnostic.instances.front().consumer ==
       wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
-  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
       invalid_target_metadata).success);
 
   // A second real shader shape sends one verified primitive to all three RGB
   // components of an SV_Target while another primitive controls discard.
-  // Rejecting the first as a generic output used to reject the whole shader
-  // and leave the character's outer surface faded.
   std::string rgb_and_discard = all_instances_ir;
   const std::string alpha_output =
       "%d0_sat = call float @dx.op.unary.f32(i32 7, float %d0)  ; Saturate(value)\n"
@@ -148,21 +192,21 @@ call void @dx.op.discard(i32 82, i1 %kill)
   CHECK(rgb_diagnostic.instances[1].consumer ==
       wuwa_tfr::FadePrimitiveConsumer::Discard);
   const auto rgb_patched =
-      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
           rgb_and_discard);
   CHECK(rgb_patched.success);
   CHECK(rgb_patched.verified_instance_count == 2);
   CHECK(rgb_patched.patched_instance_count == 2);
   CHECK(rgb_patched.llvm_ir.find(
-      "%d0 = phi float [ 1.000000e+00, %on0 ], [ 1.000000e+00, %entry0 ]") !=
+      "call float @dx.op.binary.f32(i32 36, float 1.000000e+00, float %opB0)") !=
       std::string::npos);
   CHECK(rgb_patched.llvm_ir.find(
-      "%d1 = phi float [ 1.000000e+00, %on1 ], [ 1.000000e+00, %entry1 ]") !=
+      "call float @dx.op.binary.f32(i32 36, float 1.000000e+00, float %opB1)") !=
       std::string::npos);
 
   // Function/source identity, rather than local SSA spelling, selects each
-  // independently verified phi. Both functions intentionally reuse every SSA
-  // name in this fixture.
+  // independently verified instance. Both functions intentionally reuse
+  // every SSA name in this fixture.
   const std::size_t body_start = all_instances_ir.find("entry:\n");
   const std::size_t body_end = all_instances_ir.rfind("\n}");
   CHECK(body_start != std::string::npos && body_end != std::string::npos);
@@ -176,13 +220,14 @@ call void @dx.op.discard(i32 82, i1 %kill)
       "define void @second() {\nentry:\n" + body + "\n}\n" +
       "!900 = !{i32 0, !\"SV_Target\", i8 9}\n";
   const auto independently_patched =
-      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(two_functions);
+      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(two_functions);
   CHECK(independently_patched.success);
   CHECK(independently_patched.verified_instance_count == 4);
   CHECK(independently_patched.patched_instance_count == 4);
 
   // An unrelated same-named phi in function A is never located in place of
-  // the verified target in function B.
+  // the verified target in function B -- malformed/ambiguous source identity
+  // must not silently patch the wrong site.
   const std::string unrelated = globals + R"(define void @unrelated() {
 entry:
 %d0 = phi float [ %unrelated_a, %left ], [ 1.000000e+00, %right ]
@@ -191,14 +236,14 @@ entry:
   const std::string unrelated_with_metadata = unrelated +
       "!900 = !{i32 0, !\"SV_Target\", i8 9}\n";
   const auto exact_target =
-      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
           unrelated_with_metadata);
   CHECK(exact_target.success);
   CHECK(exact_target.llvm_ir.find(
       "%d0 = phi float [ %unrelated_a, %left ], [ 1.000000e+00, %right ]") !=
       std::string::npos);
   CHECK(exact_target.llvm_ir.find(
-      "%d0 = phi float [ 1.000000e+00, %on0 ], [ 1.000000e+00, %entry0 ]") !=
+      "call float @dx.op.binary.f32(i32 36, float 1.000000e+00, float %opB0)") !=
       std::string::npos);
 
   // Diagnostic classifications are useful, but Production accepts only the
@@ -211,7 +256,7 @@ entry:
   CHECK(!unknown_diagnostic.instances.empty());
   CHECK(unknown_diagnostic.instances.front().consumer ==
       wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
-  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
       unknown_consumer).success);
   auto other_consumer = all_instances_ir;
   const std::size_t component = other_consumer.find("i8 3, float %alpha");
@@ -220,7 +265,161 @@ entry:
   CHECK(!other_diagnostic.instances.empty());
   CHECK(other_diagnostic.instances.front().consumer ==
       wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
-  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+  CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
       other_consumer).success);
+
+  // ---- pre-Fade FMin structural shapes: cross-row adjacent ----
+  {
+    std::string cross_row = all_instances_ir;
+    const std::string same_row_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::string cross_row_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%pf0b = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 41)\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0b, 0\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::size_t at = cross_row.find(same_row_prefix);
+    CHECK(at != std::string::npos);
+    cross_row.replace(at, same_row_prefix.size(), cross_row_prefix);
+    const auto result =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(cross_row);
+    CHECK(result.success);
+    CHECK(result.llvm_ir.find(
+        "call float @dx.op.binary.f32(i32 36, float 1.000000e+00, float %opB0)") !=
+        std::string::npos);
+  }
+
+  // ---- pre-Fade FMin structural shapes: known non-adjacent census variant ----
+  {
+    std::string non_adjacent = all_instances_ir;
+    const std::string same_row_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::string non_adjacent_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 0\n"
+        "%pf0b = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 55)\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0b, 2\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::size_t at = non_adjacent.find(same_row_prefix);
+    CHECK(at != std::string::npos);
+    non_adjacent.replace(at, same_row_prefix.size(), non_adjacent_prefix);
+    const auto result =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(non_adjacent);
+    CHECK(result.success);
+    CHECK(result.llvm_ir.find(
+        "call float @dx.op.binary.f32(i32 36, float 1.000000e+00, float %opB0)") !=
+        std::string::npos);
+  }
+
+  // ---- fail-closed: no qualifying FMin (operand traces to a spatial input) ----
+  {
+    std::string absent = all_instances_ir;
+    const std::string same_row_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::string spatial_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = call float @dx.op.loadInput.f32(i32 4, i32 2, i32 0, i8 0, i32 undef)\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::size_t at = absent.find(same_row_prefix);
+    CHECK(at != std::string::npos);
+    absent.replace(at, same_row_prefix.size(), spatial_prefix);
+    const auto result =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(absent);
+    CHECK(!result.success);
+    CHECK(result.patched_instance_count == 0);
+    CHECK(result.llvm_ir.empty());
+    CHECK(result.error.find("no qualifying pre-Fade FMin") != std::string::npos);
+  }
+
+  // ---- fail-closed: operands from different CBV handles ----
+  {
+    std::string different_handles = all_instances_ir;
+    const std::string same_row_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::string different_handle_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%pf0c = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cbOther, i32 40)\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0c, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::size_t at = different_handles.find(same_row_prefix);
+    CHECK(at != std::string::npos);
+    different_handles.replace(at, same_row_prefix.size(), different_handle_prefix);
+    const auto result =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(different_handles);
+    CHECK(!result.success);
+    CHECK(result.patched_instance_count == 0);
+    CHECK(result.error.find("no qualifying pre-Fade FMin") != std::string::npos);
+  }
+
+  // ---- fail-closed: multiple qualifying FMin candidates (ambiguous) ----
+  {
+    std::string ambiguous = all_instances_ir;
+    const std::string same_row_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::string ambiguous_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%fmin1_0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)\n"
+        "%pf0c = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 90)\n"
+        "%opC0 = extractvalue %dx.types.CBufRet.f32 %pf0c, 0\n"
+        "%opD0 = extractvalue %dx.types.CBufRet.f32 %pf0c, 1\n"
+        "%fmin2_0 = call float @dx.op.binary.f32(i32 36, float %opC0, float %opD0)  ; FMin(a,b)\n"
+        "%coverage0 = fadd fast float %fmin1_0, %fmin2_0";
+    const std::size_t at = ambiguous.find(same_row_prefix);
+    CHECK(at != std::string::npos);
+    ambiguous.replace(at, same_row_prefix.size(), ambiguous_prefix);
+    const auto result =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ambiguous);
+    CHECK(!result.success);
+    CHECK(result.patched_instance_count == 0);
+    CHECK(result.llvm_ir.empty());
+    CHECK(result.error.find("ambiguous") != std::string::npos);
+  }
+
+  // ---- fail-closed: incomplete backward slice ----
+  {
+    std::string incomplete = all_instances_ir;
+    const std::string same_row_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)";
+    const std::string long_chain_prefix =
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%fmin_ok0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)  ; FMin(a,b)\n" +
+        LongChain(1100) +
+        "%coverage0 = fadd fast float %fmin_ok0, %chain1100";
+    const std::size_t at = incomplete.find(same_row_prefix);
+    CHECK(at != std::string::npos);
+    incomplete.replace(at, same_row_prefix.size(), long_chain_prefix);
+    const auto result =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(incomplete);
+    CHECK(!result.success);
+    CHECK(result.patched_instance_count == 0);
+    CHECK(result.llvm_ir.empty());
+    CHECK(result.error.find("incomplete") != std::string::npos);
+  }
+
   return 0;
 }
