@@ -13,6 +13,7 @@
 #include <string>
 
 #include "addon_shared.hpp"
+#include "dev/capture/manual_capture.hpp"
 #include "dev/dev_events.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/dev_overlay.hpp"
@@ -36,6 +37,7 @@ void RegisterVariantEvents() {
   reshade::register_event<reshade::addon_event::create_pipeline>(
       dev::OnCreatePipeline);
   dev::RegisterDevEvents();
+  dev::RegisterManualCaptureEvents();
 }
 
 void DrawVariantOverlay() {
@@ -64,6 +66,8 @@ void DrawVariantOverlay() {
   dev::DrawFadePrimitiveTargetModes();
   ImGui::Separator();
   dev::DrawTraceOverlay();
+  ImGui::Separator();
+  dev::DrawManualCaptureOverlay();
 }
 
 void LogVariantStartup() {

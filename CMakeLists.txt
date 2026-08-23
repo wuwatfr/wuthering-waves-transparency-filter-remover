@@ -64,6 +64,11 @@ add_executable(trace_submission_identity_tests
   tests/test_trace_submission_identity.cpp)
 target_include_directories(trace_submission_identity_tests PRIVATE src)
 
+add_executable(manual_capture_state_tests
+  tests/test_manual_capture_state.cpp
+  src/dev/capture/manual_capture_state.cpp)
+target_include_directories(manual_capture_state_tests PRIVATE src)
+
 add_executable(single_flight_cache_tests tests/test_single_flight_cache.cpp)
 target_include_directories(single_flight_cache_tests PRIVATE src)
 target_link_libraries(single_flight_cache_tests PRIVATE Threads::Threads)
@@ -80,6 +85,7 @@ add_test(NAME dxil_dither_diagnostic_tests COMMAND dxil_dither_diagnostic_tests)
 add_test(NAME fade_primitive_detector_tests COMMAND fade_primitive_detector_tests)
 add_test(NAME target_dither_bypass_tests COMMAND target_dither_bypass_tests)
 add_test(NAME trace_submission_identity_tests COMMAND trace_submission_identity_tests)
+add_test(NAME manual_capture_state_tests COMMAND manual_capture_state_tests)
 add_test(NAME single_flight_cache_tests COMMAND single_flight_cache_tests)
 add_test(NAME memory_telemetry_tests COMMAND memory_telemetry_tests
   "${CMAKE_SOURCE_DIR}/src/production/production_module.cpp" "${CMAKE_SOURCE_DIR}/WuwaTFR.ini")
@@ -102,6 +108,8 @@ if(WIN32)
         list(APPEND addon_sources
           src/fade_primitive_runtime.cpp
           src/dxil_dither_diagnostic.cpp
+          src/dev/capture/manual_capture.cpp
+          src/dev/capture/manual_capture_state.cpp
           src/dev/diagnostics/dev_diagnostics.cpp
           src/dev/trace/trace_events.cpp
           src/dev/trace/trace_report.cpp
