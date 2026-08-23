@@ -8,11 +8,12 @@
 
 namespace wuwa_tfr::dev {
 
-// Panel for the live Fade Primitive execution-set experiment (subsystem 5).
+// Panel for g_dev_antifade_runtime (dev/dev_runtime.hpp): its enable toggle,
+// telemetry snapshot, and read-only Fade Primitive v1 diagnostics.
 void DrawFadePrimitiveTargetModes();
 
 // Panel for the runtime differential trace, manual/shader-family SKIP, and
-// TSV report export (subsystems 2/3/6/7).
+// TSV report export.
 void DrawTraceOverlay();
 
 }  // namespace wuwa_tfr::dev

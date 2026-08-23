@@ -3,6 +3,9 @@
 
 #include "dev/diagnostics/dev_diagnostics.hpp"
 
+#include <algorithm>
+#include <vector>
+
 #include "production/addon_shared.hpp"
 
 using namespace reshade::api;
@@ -39,6 +42,22 @@ bool FindDxilPixelShader(
     shader_hash = candidate_hash;
   }
   return descriptor != nullptr;
+}
+
+std::string FadePrimitiveConsumers(
+    const wuwa_tfr::FadePrimitiveDiagnostic& diagnostic) {
+  std::vector<const char*> names;
+  for (const auto& instance : diagnostic.instances) {
+    const char* name = wuwa_tfr::FadePrimitiveConsumerName(instance.consumer);
+    if (std::find(names.begin(), names.end(), name) == names.end())
+      names.push_back(name);
+  }
+  std::string result;
+  for (const char* name : names) {
+    if (!result.empty()) result += ", ";
+    result += name;
+  }
+  return result.empty() ? "unknown" : result;
 }
 
 }  // namespace wuwa_tfr::dev

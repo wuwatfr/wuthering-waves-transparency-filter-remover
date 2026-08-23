@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
 //
-// Dev-only shader-inspection counters and the DXIL-pixel-shader lookup used
-// while walking a pipeline's creation subobjects. This is the Dev-only slice
-// of the shader inspection subsystem; the always-compiled parts (the
-// inspection cache itself, InspectPixelShader, WriteCapture, ...) remain in
-// addon.cpp and are shared via production/addon_shared.hpp, because
-// Production also needs them.
+// Dev-only shader-inspection counters, the DXIL-pixel-shader lookup used
+// while walking a pipeline's creation subobjects, and read-only Fade
+// Primitive v1 diagnostic display helpers. This is the Dev-only slice of the
+// shader inspection subsystem; the always-compiled parts (the inspection
+// cache itself, InspectPixelShader, WriteCapture, ...) remain in addon.cpp
+// and are shared via production/addon_shared.hpp, because Production also
+// needs them.
+//
+// This module owns no replacement state: the sole fade-primitive replacement
+// owner is wuwa_tfr::FadePrimitiveRuntime (see dev/dev_runtime.hpp).
 
 #pragma once
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 #include <reshade.hpp>
+
+#include "fade_primitive_detector.hpp"
 
 namespace wuwa_tfr::dev {
 
@@ -33,5 +40,10 @@ bool FindDxilPixelShader(
     const reshade::api::pipeline_subobject* subobjects,
     const reshade::api::shader_desc*& descriptor,
     std::uint64_t& shader_hash);
+
+// Comma-separated, de-duplicated list of a verified Fade Primitive v1
+// diagnostic's consumer kinds, for display only.
+std::string FadePrimitiveConsumers(
+    const wuwa_tfr::FadePrimitiveDiagnostic& diagnostic);
 
 }  // namespace wuwa_tfr::dev

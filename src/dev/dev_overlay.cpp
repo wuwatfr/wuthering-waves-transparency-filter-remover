@@ -13,7 +13,6 @@
 
 #include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
-#include "dev/diagnostics/fade_primitive_diagnostics.hpp"
 #include "dev/trace/trace_events.hpp"
 #include "dev/trace/trace_report.hpp"
 #include "dev/trace/trace_state.hpp"
@@ -57,17 +56,9 @@ void DrawFadePrimitiveTargetModes() {
       static_cast<unsigned long long>(telemetry.replacement_binds_total));
 
   ImGui::Separator();
-  if (ImGui::Button("Import current captured PSOs as highlights"))
-    ImportCurrentCapturedPsosIntoHighlights();
-  ImGui::SameLine();
-  if (ImGui::Button("Clear highlights")) ClearFadePrimitiveHighlights();
-  ImGui::TextDisabled(
-      "Highlighting below is a diagnostic filter only; it never affects "
-      "which shaders are matched or replaced.");
 
   struct DisplayRow {
     std::uint64_t shader_hash = 0;
-    bool highlighted = false;
     std::size_t live_application_psos = 0;
     std::uint32_t instances = 0;
     std::string consumers;
@@ -77,11 +68,6 @@ void DrawFadePrimitiveTargetModes() {
     std::lock_guard lock(g_trace_mutex);
     for (const auto& [key, pipeline] : g_trace_pipelines)
       ++live_pso_counts[pipeline.shader_hash];
-  }
-  std::unordered_map<std::uint64_t, bool> highlighted_hashes;
-  {
-    std::lock_guard lock(g_fade_primitive_diagnostics_mutex);
-    highlighted_hashes = g_fade_primitive_highlighted_hashes;
   }
 
   std::vector<DisplayRow> rows;
@@ -93,8 +79,6 @@ void DrawFadePrimitiveTargetModes() {
         continue;
       DisplayRow row;
       row.shader_hash = shader_hash;
-      row.highlighted = highlighted_hashes.contains(shader_hash) &&
-          highlighted_hashes[shader_hash];
       if (const auto live = live_pso_counts.find(shader_hash);
           live != live_pso_counts.end())
         row.live_application_psos = live->second;
@@ -112,12 +96,11 @@ void DrawFadePrimitiveTargetModes() {
   ImGui::Text("Fully verified Fade Primitive v1 shaders observed: %zu",
       rows.size());
 
-  if (!ImGui::BeginTable("fade_primitive_diagnostics", 5,
+  if (!ImGui::BeginTable("fade_primitive_diagnostics", 4,
           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
           ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
           ImVec2(0.0f, 420.0f)))
     return;
-  ImGui::TableSetupColumn("Highlighted");
   ImGui::TableSetupColumn("Pixel shader hash");
   ImGui::TableSetupColumn("Live application PSOs");
   ImGui::TableSetupColumn("Instances");
@@ -128,16 +111,12 @@ void DrawFadePrimitiveTargetModes() {
     ImGui::PushID(hash.c_str());
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
-    bool selected = row.highlighted;
-    if (ImGui::Checkbox("##highlighted", &selected))
-      SetFadePrimitiveHighlighted(row.shader_hash, selected);
-    ImGui::TableSetColumnIndex(1);
     ImGui::TextUnformatted(hash.c_str());
-    ImGui::TableSetColumnIndex(2);
+    ImGui::TableSetColumnIndex(1);
     ImGui::Text("%zu", row.live_application_psos);
-    ImGui::TableSetColumnIndex(3);
+    ImGui::TableSetColumnIndex(2);
     ImGui::Text("%u", row.instances);
-    ImGui::TableSetColumnIndex(4);
+    ImGui::TableSetColumnIndex(3);
     ImGui::TextUnformatted(row.consumers.c_str());
     ImGui::PopID();
   }

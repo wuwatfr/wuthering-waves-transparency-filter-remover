@@ -21,7 +21,7 @@ bool IsNormalOnlyRimSkipRow(const ConcreteTraceRow& row) noexcept {
       wuwa_tfr::TraceNormalOnlySubmissionCandidate(row.windows);
 }
 
-// --- Pipeline lifecycle (straddles trace + recipe cache + execution-set) ---
+// --- Pipeline lifecycle (trace observation only) ---
 
 void OnInitTracePipeline(
     device* owner,

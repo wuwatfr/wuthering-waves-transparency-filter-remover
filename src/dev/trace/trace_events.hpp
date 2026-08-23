@@ -6,10 +6,10 @@
 // tracking), plus the window-management and snapshot/list-generation
 // functions the overlay (dev/dev_overlay.*) drives.
 //
-// OnInitTracePipeline/OnDestroyTracePipeline straddle the trace subsystem and
-// the recipe-cache/fade-primitive-execution-set experiments: they are kept
-// as single functions that call into those other modules' entry points,
-// rather than being split themselves, exactly as they were in addon.cpp.
+// This is observation only: it never creates, patches, or binds a
+// replacement pipeline. Fade-primitive replacement is owned entirely by
+// g_dev_antifade_runtime (dev/dev_runtime.hpp), a separate, independent
+// instance of the same runtime class Production uses.
 
 #pragma once
 

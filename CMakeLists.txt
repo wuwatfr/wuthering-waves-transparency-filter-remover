@@ -27,10 +27,6 @@ if(GIT_FOUND)
   endif()
 endif()
 
-add_executable(pipeline_replacement_state_tests tests/test_pipeline_replacement_state.cpp)
-target_include_directories(pipeline_replacement_state_tests PRIVATE src)
-target_link_libraries(pipeline_replacement_state_tests PRIVATE Threads::Threads)
-
 add_executable(pipeline_generation_state_tests tests/test_pipeline_generation_state.cpp)
 target_include_directories(pipeline_generation_state_tests PRIVATE src)
 target_link_libraries(pipeline_generation_state_tests PRIVATE Threads::Threads)
@@ -77,7 +73,6 @@ target_include_directories(memory_telemetry_tests PRIVATE src)
 target_link_libraries(memory_telemetry_tests PRIVATE Threads::Threads)
 
 enable_testing()
-add_test(NAME pipeline_replacement_state_tests COMMAND pipeline_replacement_state_tests)
 add_test(NAME pipeline_generation_state_tests COMMAND pipeline_generation_state_tests)
 add_test(NAME dxc_validation_policy_tests COMMAND dxc_validation_policy_tests)
 add_test(NAME device_activity_state_tests COMMAND device_activity_state_tests)
@@ -108,7 +103,6 @@ if(WIN32)
           src/fade_primitive_runtime.cpp
           src/dxil_dither_diagnostic.cpp
           src/dev/diagnostics/dev_diagnostics.cpp
-          src/dev/diagnostics/fade_primitive_diagnostics.cpp
           src/dev/trace/trace_events.cpp
           src/dev/trace/trace_report.cpp
           src/dev/trace/trace_state.cpp

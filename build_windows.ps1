@@ -134,7 +134,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $testTargets = @(
-    'pipeline_replacement_state_tests',
     'pipeline_generation_state_tests',
     'dxc_validation_policy_tests',
     'device_activity_state_tests',

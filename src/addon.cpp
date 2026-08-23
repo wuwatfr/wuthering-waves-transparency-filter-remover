@@ -485,9 +485,10 @@ void DrawOverlay(effect_runtime*) {
   ImGui::TextUnformatted("WuwaTFR");
   ImGui::TextDisabled("Build: %s", WUWA_TFR_BUILD_COMMIT);
 #if WUWA_TFR_DEVTOOLS
-  ImGui::TextUnformatted("Dev: isolated causal bypass experiments available");
+  ImGui::TextUnformatted("Dev: FadePrimitiveRuntime + diagnostics/trace tools");
   ImGui::TextDisabled(
-      "Dev tools are isolated from the Production automatic Transparency Filter runtime.");
+      "Dev runs its own instance of the same replacement runtime as Production, "
+      "plus read-only diagnostics and trace/capture tools.");
 #else
   ImGui::TextUnformatted("Automatic verified transparency-filter matching");
   bool antifade_enabled = g_public_antifade_runtime.enabled();
@@ -519,12 +520,10 @@ void DrawOverlay(effect_runtime*) {
       static_cast<unsigned long long>(
           g_dumped_shaders.load(std::memory_order_relaxed)));
 
-#if WUWA_TFR_DEVTOOLS
   ImGui::Separator();
   wuwa_tfr::dev::DrawFadePrimitiveTargetModes();
   ImGui::Separator();
   wuwa_tfr::dev::DrawTraceOverlay();
-#endif
 #endif
 }
 
@@ -650,9 +649,10 @@ void InspectPixelShader(const reshade::api::shader_desc& descriptor) {
 
 #if WUWA_TFR_DEVTOOLS
 extern "C" __declspec(dllexport) const char* NAME =
-    "WuwaTFR Dev (isolated bypass experiments)";
+    "WuwaTFR Dev (diagnostics build)";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Dev-only isolated dither-stage bypass experiments; no Production matcher.";
+    "Developer diagnostics build: runs the same replacement runtime as "
+    "Production plus read-only trace/capture tools.";
 #else
 extern "C" __declspec(dllexport) const char* NAME =
     "WuwaTFR";
