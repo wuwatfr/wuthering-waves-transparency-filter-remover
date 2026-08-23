@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
 //
-// Entry points addon.cpp calls into for the handful of genuinely-shared
-// functions (OnInitDevice, OnDestroyDevice, DllMain) that must stay in
-// addon.cpp because they also run always-compiled, Production-relevant code,
-// but that also need to run a Dev-only step.
+// Dev's ReShade event registration, called from dev/dev_module.cpp's
+// RegisterVariantEvents(); addon.cpp itself never references this file.
 
 #pragma once
 

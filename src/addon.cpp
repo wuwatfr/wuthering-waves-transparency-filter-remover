@@ -22,7 +22,7 @@
 // logging) shared between this file and both variant modules
 // (production/production_module.cpp, dev/dev_module.cpp). Neither variant's
 // replacement logic depends on this -- it is bootstrap-only.
-#include "production/addon_shared.hpp"
+#include "addon_shared.hpp"
 
 using namespace reshade::api;
 
@@ -61,7 +61,7 @@ void DrawOverlay(effect_runtime*) {
 } // namespace
 
 // Out-of-line definitions for the shared, externally-linked bridge declared
-// in production/addon_shared.hpp.
+// in addon_shared.hpp.
 namespace wuwa_tfr {
 
 DeviceActivityState<DeviceIdentity> g_device_activity;
@@ -147,18 +147,9 @@ void OnDestroyDevice(device* owner) {
 
 }  // namespace wuwa_tfr
 
-#if WUWA_TFR_DEVTOOLS
-extern "C" __declspec(dllexport) const char* NAME =
-    "WuwaTFR Dev (diagnostics build)";
-extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Developer diagnostics build: runs the same replacement runtime as "
-    "Production plus read-only trace/capture tools.";
-#else
-extern "C" __declspec(dllexport) const char* NAME =
-    "WuwaTFR";
-extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Automatic verified camera-proximity transparency removal for Wuthering Waves DX12.";
-#endif
+// NAME and DESCRIPTION are exported by whichever variant module is linked
+// into this target (production/production_module.cpp or
+// dev/dev_module.cpp); addon.cpp itself makes no Production/Dev distinction.
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
   switch (reason) {

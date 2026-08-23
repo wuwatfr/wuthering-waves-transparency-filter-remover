@@ -21,7 +21,7 @@
 
 #include <reshade.hpp>
 
-#include "production/addon_shared.hpp"
+#include "addon_shared.hpp"
 #include "trace_submission_identity.hpp"
 
 namespace wuwa_tfr::dev {

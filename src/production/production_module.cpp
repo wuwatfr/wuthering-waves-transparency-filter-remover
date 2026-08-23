@@ -17,11 +17,16 @@
 #include <string>
 #include <string_view>
 
+#include "addon_shared.hpp"
 #include "fade_primitive_runtime.hpp"
 #include "memory_telemetry.hpp"
-#include "production/addon_shared.hpp"
 
 using namespace reshade::api;
+
+extern "C" __declspec(dllexport) const char* NAME =
+    "WuwaTFR";
+extern "C" __declspec(dllexport) const char* DESCRIPTION =
+    "Automatic verified camera-proximity transparency removal for Wuthering Waves DX12.";
 
 namespace wuwa_tfr::variant {
 

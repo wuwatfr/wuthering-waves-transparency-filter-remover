@@ -12,12 +12,18 @@
 
 #include <string>
 
+#include "addon_shared.hpp"
 #include "dev/dev_events.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/dev_overlay.hpp"
 #include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
-#include "production/addon_shared.hpp"
+
+extern "C" __declspec(dllexport) const char* NAME =
+    "WuwaTFR Dev (diagnostics build)";
+extern "C" __declspec(dllexport) const char* DESCRIPTION =
+    "Developer diagnostics build: runs the same replacement runtime as "
+    "Production plus read-only trace/capture tools.";
 
 namespace wuwa_tfr::variant {
 

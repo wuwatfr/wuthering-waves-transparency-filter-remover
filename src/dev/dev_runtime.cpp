@@ -3,7 +3,7 @@
 
 #include "dev/dev_runtime.hpp"
 
-#include "production/addon_shared.hpp"
+#include "addon_shared.hpp"
 
 using namespace reshade::api;
 

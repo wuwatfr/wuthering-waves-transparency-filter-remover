@@ -127,7 +127,6 @@ if(WIN32)
       target_compile_definitions(${TARGET_NAME} PRIVATE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
-        WUWA_TFR_DEVTOOLS=${DEVTOOLS_VALUE}
         WUWA_TFR_BUILD_COMMIT=\"${WUWA_TFR_BUILD_COMMIT}\"
       )
       if(MSVC)
