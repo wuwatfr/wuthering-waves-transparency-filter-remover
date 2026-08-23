@@ -34,17 +34,20 @@ enum class FadeControlRole : std::uint8_t {
 // Bit flags: a single value observation can only be unavailable for one
 // reason, but a record's *aggregated* mask can carry several across its
 // lifetime (e.g. mapped early, unmapped later in the same session).
-constexpr std::uint8_t kFadeControlReasonNotMapped = 1u << 0;
-constexpr std::uint8_t kFadeControlReasonOutOfRange = 1u << 1;
-constexpr std::uint8_t kFadeControlReasonBindingUnresolved = 1u << 2;
-constexpr std::uint8_t kFadeControlReasonSourceUnresolved = 1u << 3;
-constexpr std::uint8_t kFadeControlReasonUnsupportedBindingRoute = 1u << 4;
+// uint16_t (not uint8_t): eight reasons already exist and D3D12's binding
+// forms are not yet exhaustively covered, so headroom is kept deliberately
+// rather than economizing bits.
+constexpr std::uint16_t kFadeControlReasonNotMapped = 1u << 0;
+constexpr std::uint16_t kFadeControlReasonOutOfRange = 1u << 1;
+constexpr std::uint16_t kFadeControlReasonBindingUnresolved = 1u << 2;
+constexpr std::uint16_t kFadeControlReasonSourceUnresolved = 1u << 3;
+constexpr std::uint16_t kFadeControlReasonUnsupportedBindingRoute = 1u << 4;
 // The descriptor-table-backed route was statically resolved, but the
 // bind_descriptor_tables call establishing it carried a nonzero
 // dynamic_offset_count -- see descriptor_table_state.hpp's
 // DescriptorTableBindingHasExactDynamicOffsets. Never observed on the
 // D3D12 backend today; kept explicit rather than assumed.
-constexpr std::uint8_t kFadeControlReasonDynamicOffsetUnresolved = 1u << 5;
+constexpr std::uint16_t kFadeControlReasonDynamicOffsetUnresolved = 1u << 5;
 // The descriptor-table slot's cached resource incarnation no longer
 // matches the resource's current one: it was written once (typically at
 // resource-allocation time) and the underlying resource has since been
@@ -52,7 +55,22 @@ constexpr std::uint8_t kFadeControlReasonDynamicOffsetUnresolved = 1u << 5;
 // update_descriptor_tables/copy_descriptor_tables call re-establishing this
 // slot. Rejected rather than trusted -- see
 // descriptor_table_state.hpp's DescriptorSlotContentIsCurrent.
-constexpr std::uint8_t kFadeControlReasonStaleDescriptorBinding = 1u << 6;
+constexpr std::uint16_t kFadeControlReasonStaleDescriptorBinding = 1u << 6;
+// The register resolves to a currently-bound descriptor table (the root
+// parameter itself IS bound), but this exact table-relative slot has never
+// been observed via update_descriptor_tables/copy_descriptor_tables --
+// distinct from BindingUnresolved, which means no table at all is
+// currently bound to that root parameter.
+constexpr std::uint16_t kFadeControlReasonDescriptorUnknown = 1u << 7;
+// The register is declared as a pipeline_layout_param_type::push_constants
+// range (root constants), not any CBV descriptor form -- diagnostic only.
+// Root constants are a fundamentally different D3D12 binding mechanism
+// (32-bit values embedded directly in the command list, not a Constant
+// Buffer View), so this tracer -- scoped to CBVs -- does not attempt to
+// sample them; this reason exists purely so a real capture can prove or
+// rule out this exact cause when a predicate/coverage source is otherwise
+// unresolved.
+constexpr std::uint16_t kFadeControlReasonPushConstantBacked = 1u << 8;
 
 // Which binding mechanism resolved this record's live CBV, independent of
 // whether the byte value itself was ultimately readable. Distinct from
@@ -94,7 +112,7 @@ constexpr bool FadeControlByteOffsetInMappedRegion(std::uint64_t byte_offset,
 struct FadeControlValueSample {
   bool available = false;
   std::uint32_t raw_bits = 0;
-  std::uint8_t unavailable_reason = 0;
+  std::uint16_t unavailable_reason = 0;
 };
 
 struct FadeControlDistinctValue {
@@ -120,7 +138,7 @@ struct FadeControlValueStats {
       distinct_values{};
   std::size_t distinct_value_count = 0;
   bool distinct_overflow = false;
-  std::uint8_t unavailable_reason_mask = 0;
+  std::uint16_t unavailable_reason_mask = 0;
 
   void Observe(const FadeControlValueSample& sample);
 };

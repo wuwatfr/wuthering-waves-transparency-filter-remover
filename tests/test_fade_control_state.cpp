@@ -65,7 +65,7 @@ FadeControlValueSample Available(float value) {
   return FadeControlValueSample{true, bits, 0};
 }
 
-FadeControlValueSample Unavailable(std::uint8_t reason) {
+FadeControlValueSample Unavailable(std::uint16_t reason) {
   return FadeControlValueSample{false, 0, reason};
 }
 
