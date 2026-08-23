@@ -68,7 +68,15 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
     const std::string& timestamp, std::filesystem::path& out_path) {
   const auto directory = DumpDir();
   if (directory.empty()) return false;
-  out_path = directory / ("manual-capture-" + timestamp + ".tsv");
+  // LocalExportTimestamp() only has second precision, so two captures
+  // stopped within the same second need a numbered suffix to avoid
+  // silently overwriting each other via std::ios::trunc below.
+  const std::string filename = AllocateExportFilename(
+      "manual-capture-" + timestamp, ".tsv",
+      [&directory](const std::string& candidate) {
+        return std::filesystem::exists(directory / candidate);
+      });
+  out_path = directory / filename;
 
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;

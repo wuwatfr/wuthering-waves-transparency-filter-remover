@@ -83,4 +83,16 @@ ManualCaptureSummary ManualCaptureAccumulator::Summary() const noexcept {
   };
 }
 
+std::string AllocateExportFilename(const std::string& stem,
+    const std::string& extension,
+    const std::function<bool(const std::string&)>& exists) {
+  std::string candidate = stem + extension;
+  if (!exists(candidate)) return candidate;
+  for (int suffix = 1; suffix <= kMaxExportFilenameAttempts; ++suffix) {
+    candidate = stem + "-" + std::to_string(suffix) + extension;
+    if (!exists(candidate)) return candidate;
+  }
+  return candidate;
+}
+
 }  // namespace wuwa_tfr::dev

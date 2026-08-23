@@ -3,14 +3,18 @@
 
 #include "dev/capture/manual_capture_state.hpp"
 
+#include <unordered_set>
+
 #include "test_check.hpp"
 
 namespace {
 
+using wuwa_tfr::dev::AllocateExportFilename;
 using wuwa_tfr::dev::ManualCaptureAccumulator;
 using wuwa_tfr::dev::ManualCapturePipelineInfo;
 using wuwa_tfr::dev::ManualCaptureRecordKey;
 using wuwa_tfr::dev::ManualCaptureState;
+using wuwa_tfr::dev::kMaxExportFilenameAttempts;
 using wuwa_tfr::dev::kMaxManualCaptureRecords;
 
 wuwa_tfr::TraceGeometryKey Geometry(std::uint64_t vertex_resource) {
@@ -150,6 +154,45 @@ int main() {
     accumulator.Clear();
     CHECK(accumulator.state() == ManualCaptureState::Idle);
     CHECK(accumulator.Summary().record_count == 0);
+  }
+
+  // AllocateExportFilename: no collision returns the bare stem+extension.
+  {
+    std::unordered_set<std::string> existing;
+    const auto exists = [&existing](const std::string& candidate) {
+      return existing.contains(candidate);
+    };
+    CHECK(AllocateExportFilename("manual-capture-20260823-220500", ".tsv",
+              exists) == "manual-capture-20260823-220500.tsv");
+  }
+
+  // A single collision (two captures stopped in the same second) picks the
+  // "-1" suffix; a second collision advances to "-2".
+  {
+    std::unordered_set<std::string> existing = {
+        "manual-capture-20260823-220500.tsv"};
+    const auto exists = [&existing](const std::string& candidate) {
+      return existing.contains(candidate);
+    };
+    CHECK(AllocateExportFilename("manual-capture-20260823-220500", ".tsv",
+              exists) == "manual-capture-20260823-220500-1.tsv");
+
+    existing.insert("manual-capture-20260823-220500-1.tsv");
+    CHECK(AllocateExportFilename("manual-capture-20260823-220500", ".tsv",
+              exists) == "manual-capture-20260823-220500-2.tsv");
+  }
+
+  // Exhausting every numbered suffix returns the last candidate instead of
+  // looping forever.
+  {
+    std::unordered_set<std::string> existing = {"stem.tsv"};
+    for (int suffix = 1; suffix <= kMaxExportFilenameAttempts; ++suffix)
+      existing.insert("stem-" + std::to_string(suffix) + ".tsv");
+    const auto exists = [&existing](const std::string& candidate) {
+      return existing.contains(candidate);
+    };
+    CHECK(AllocateExportFilename("stem", ".tsv", exists) ==
+        "stem-" + std::to_string(kMaxExportFilenameAttempts) + ".tsv");
   }
 
   return 0;

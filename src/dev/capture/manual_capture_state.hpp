@@ -18,6 +18,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -172,5 +174,23 @@ class ManualCaptureAccumulator {
       ManualCaptureRecordKeyHash>
       index_;
 };
+
+// Upper bound on numbered-suffix attempts before AllocateExportFilename
+// gives up and returns the last candidate anyway (a residual, deliberately
+// unresolved collision at that point is astronomically unlikely for a Dev
+// diagnostic export and preferable to spinning forever).
+constexpr int kMaxExportFilenameAttempts = 1000;
+
+// Returns the first of "<stem><extension>", "<stem>-1<extension>",
+// "<stem>-2<extension>", ... for which `exists` reports false. Pure/
+// portable: takes an injected existence check instead of touching the
+// filesystem itself, so it is unit-testable without ReShade or real files.
+// Exists to make manual-capture export filenames collision-free even when
+// two sessions are stopped within the same LocalExportTimestamp() second
+// (LocalExportTimestamp() has only second precision, and the exporter opens
+// with std::ios::trunc).
+std::string AllocateExportFilename(const std::string& stem,
+    const std::string& extension,
+    const std::function<bool(const std::string&)>& exists);
 
 }  // namespace wuwa_tfr::dev
