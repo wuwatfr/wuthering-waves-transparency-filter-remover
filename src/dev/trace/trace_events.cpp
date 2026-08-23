@@ -8,10 +8,6 @@
 
 #include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
-#include "dev/experiments/experiments_common.hpp"
-#include "dev/experiments/experiments_fade_primitive.hpp"
-#include "dev/experiments/experiments_legacy_bypass.hpp"
-#include "dev/experiments/experiments_recipe.hpp"
 #include "dev/trace/trace_report.hpp"
 
 using namespace reshade::api;
@@ -33,7 +29,12 @@ void OnInitTracePipeline(
     std::uint32_t subobject_count,
     const pipeline_subobject* subobjects,
     pipeline handle) {
-  if (g_target_bypass_internal_create) return;
+  // g_dev_antifade_runtime (dev/dev_runtime.hpp) is the sole fade-primitive
+  // replacement owner; its own internal replacement-pipeline create/destroy
+  // re-fires this same event, and dev_runtime.cpp holds this flag for the
+  // duration of that call so this independent trace observer never mistakes
+  // a replacement pipeline for a genuine application one.
+  if (g_dev_runtime_internal_pipeline_event) return;
   if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
       handle.handle == 0)
     return;
@@ -49,7 +50,6 @@ void OnInitTracePipeline(
     std::lock_guard lock(g_trace_mutex);
     g_trace_pso_incarnations.Destroy(key);
     g_trace_pipelines.erase(key);
-    g_target_bypass_recipes.erase(key);
     return;
   }
 
@@ -59,14 +59,6 @@ void OnInitTracePipeline(
 
   TracePipelineInfo pipeline_info = DescribeTracePipeline(
       subobject_count, subobjects, shader_hash);
-
-  std::shared_ptr<const TargetBypassPipelineRecipe> target_recipe;
-  std::string target_recipe_error;
-  // The frozen execution-set is chosen after capture completes, so Dev keeps
-  // a deep copy for every live DXIL PSO until that point. Only the frozen set
-  // is ever patched or given a replacement.
-  target_recipe = CopyTargetBypassRecipe(key.owner, layout, subobject_count,
-      subobjects, handle, shader_hash, target_recipe_error);
 
   std::uint64_t creation_fingerprint = kTraceFnvOffset;
   TraceHashValue(creation_fingerprint, layout.handle);
@@ -92,11 +84,6 @@ void OnInitTracePipeline(
     pipeline_info.live = true;
     g_trace_pipelines[key] = pipeline_info;
     g_trace_shaders.try_emplace(shader_hash);
-    if (target_recipe) {
-      g_target_bypass_recipes[key] = target_recipe;
-    } else {
-      g_target_bypass_recipes.erase(key);
-    }
     const std::size_t pruned =
         g_trace_pso_incarnations.PruneTo(kMaxTrackedPsoIncarnations);
     if (pruned != 0) {
@@ -105,25 +92,12 @@ void OnInitTracePipeline(
       std::erase_if(g_trace_pipelines, [](const auto& entry) {
         return g_trace_pso_incarnations.FindActive(entry.first) == nullptr;
       });
-      std::erase_if(g_target_bypass_recipes, [](const auto& entry) {
-        return g_trace_pso_incarnations.FindActive(entry.first) == nullptr;
-      });
-    }
-  }
-
-  EnsureAllVerifiedV1Target(shader_hash);
-  if (IsFadePrimitiveExecutionActive(shader_hash)) {
-    if (target_recipe) {
-      CreateFadePrimitiveExecutionReplacement(owner, target_recipe, shader_hash);
-    } else {
-      RecordFadePrimitiveExecutionFailure(shader_hash, "replacement PSO creation",
-          "could not cache pipeline recipe: " + target_recipe_error);
     }
   }
 }
 
 void OnDestroyTracePipeline(device* owner, pipeline handle) {
-  if (g_target_bypass_internal_destroy) return;
+  if (g_dev_runtime_internal_pipeline_event) return;
   if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
       handle.handle == 0)
     return;
@@ -131,34 +105,9 @@ void OnDestroyTracePipeline(device* owner, pipeline handle) {
   if (!active) return;
 
   const TracePipelineKey key{DeviceKey(owner), handle.handle};
-  std::uint64_t shader_hash = 0;
-  {
-    std::lock_guard lock(g_trace_mutex);
-    if (const auto pipeline_it = g_trace_pipelines.find(key);
-        pipeline_it != g_trace_pipelines.end())
-      shader_hash = pipeline_it->second.shader_hash;
-  }
-  const auto removed = g_target_bypass_replacements.Remove(
-      key.owner, key.handle);
-  if (removed.final_antifade)
-    DestroyTargetBypassReplacement(owner, *removed.final_antifade);
-  const auto batch_removed = g_fade_primitive_execution_replacements.Remove(
-      key.owner, key.handle);
-  if (batch_removed.final_antifade) {
-    DestroyTargetBypassReplacement(owner, *batch_removed.final_antifade);
-    g_fade_primitive_execution_replacements_destroyed.fetch_add(1,
-        std::memory_order_relaxed);
-    std::lock_guard lock(g_fade_primitive_execution_mutex);
-    if (const auto target = g_fade_primitive_execution_targets.find(shader_hash);
-        target != g_fade_primitive_execution_targets.end() &&
-        target->second.live_replacements != 0)
-      --target->second.live_replacements;
-  }
-
   std::lock_guard lock(g_trace_mutex);
   g_trace_pso_incarnations.Destroy(key);
   g_trace_pipelines.erase(key);
-  g_target_bypass_recipes.erase(key);
 }
 
 // --- Resources / resource views ---
@@ -283,60 +232,22 @@ void OnBindTracePipeline(
     command_list* cmd_list,
     pipeline_stage stages,
     pipeline handle) {
-  if (g_target_bypass_internal_bind) return;
+  if (g_dev_runtime_internal_pipeline_event) return;
   if (!cmd_list ||
       (stages & pipeline_stage::pixel_shader) != pipeline_stage::pixel_shader)
     return;
   auto* trace = cmd_list->get_private_data<CommandListTrace>();
   if (!trace) return;
-  std::uint64_t shader_hash = 0;
-  {
-    std::lock_guard lock(g_trace_mutex);
-    const auto pipeline_it = g_trace_pipelines.find(
-        {trace->device, handle.handle});
-    if (pipeline_it == g_trace_pipelines.end()) {
-      trace->bound_pso_incarnation = 0;
-      trace->bound_pipeline.reset();
-      return;
-    }
-    trace->bound_pso_incarnation = pipeline_it->second.incarnation_id;
-    trace->bound_pipeline = pipeline_it->second;
-    shader_hash = pipeline_it->second.shader_hash;
-  }
-
-  if (!IsFadePrimitiveExecutionActive(shader_hash)) return;
-
-  // g_dev_antifade_runtime (dev/dev_runtime.hpp) is Dev's other, independent
-  // replacement path for the same primitive. If it is enabled it is
-  // authoritative for the bind decision, so this legacy experiment path must
-  // not also publish a competing replacement bind for the same application
-  // pipeline.
-  if (!g_target_bypass_enabled.load(std::memory_order_relaxed) ||
-      g_dev_antifade_runtime.enabled()) {
-    g_fade_primitive_execution_original_bind_hits.fetch_add(1,
-        std::memory_order_relaxed);
-    std::lock_guard lock(g_fade_primitive_execution_mutex);
-    if (const auto target = g_fade_primitive_execution_targets.find(shader_hash);
-        target != g_fade_primitive_execution_targets.end())
-      ++target->second.original_bind_hits;
+  std::lock_guard lock(g_trace_mutex);
+  const auto pipeline_it = g_trace_pipelines.find(
+      {trace->device, handle.handle});
+  if (pipeline_it == g_trace_pipelines.end()) {
+    trace->bound_pso_incarnation = 0;
+    trace->bound_pipeline.reset();
     return;
   }
-
-  bool replacement_bound = false;
-  g_fade_primitive_execution_replacements.WithSelected(
-      trace->device, handle.handle, true, true,
-      [&](pipeline replacement) {
-        ScopedThreadFlag internal_bind(g_target_bypass_internal_bind);
-        cmd_list->bind_pipeline(stages, replacement);
-        g_fade_primitive_execution_bind_hits.fetch_add(1,
-            std::memory_order_relaxed);
-        replacement_bound = true;
-      });
-  if (!replacement_bound) return;
-  std::lock_guard lock(g_fade_primitive_execution_mutex);
-  if (const auto target = g_fade_primitive_execution_targets.find(shader_hash);
-      target != g_fade_primitive_execution_targets.end())
-    ++target->second.replacement_bind_hits;
+  trace->bound_pso_incarnation = pipeline_it->second.incarnation_id;
+  trace->bound_pipeline = pipeline_it->second;
 }
 
 void OnBindTracePipelineStates(command_list* cmd_list, std::uint32_t count,

@@ -15,15 +15,11 @@
 #if WUWA_TFR_DEVTOOLS
 #include "dxil_dither_diagnostic.hpp"
 #include "fade_primitive_detector.hpp"
-#include "pipeline_replacement_state.hpp"
 #include "target_dither_bypass.hpp"
 #include "trace_submission_identity.hpp"
 
 #include "dev/diagnostics/dev_diagnostics.hpp"
-#include "dev/experiments/experiments_common.hpp"
-#include "dev/experiments/experiments_fade_primitive.hpp"
-#include "dev/experiments/experiments_legacy_bypass.hpp"
-#include "dev/experiments/experiments_recipe.hpp"
+#include "dev/dev_runtime.hpp"
 #include "dev/trace/trace_events.hpp"
 #include "dev/trace/trace_report.hpp"
 #include "dev/trace/trace_state.hpp"
@@ -344,7 +340,7 @@ bool OnCreatePipeline(
     pipeline_layout,
     std::uint32_t subobject_count,
     const pipeline_subobject* subobjects) {
-  if (wuwa_tfr::dev::g_target_bypass_internal_create) return false;
+  if (wuwa_tfr::dev::g_dev_runtime_internal_pipeline_event) return false;
   // Dev capture observes the original descriptor only; it never mutates it.
   if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
       (!g_diagnostic && !g_dump) || !subobjects)
@@ -370,9 +366,6 @@ void OnInitDevice(device* owner) {
     return;
   if (g_device_activity.Activate(DeviceKey(owner)))
     g_d3d12_device_count.fetch_add(1, std::memory_order_relaxed);
-#if WUWA_TFR_DEVTOOLS
-  wuwa_tfr::dev::OnInitDeviceHook(owner);
-#endif
 }
 
 void OnDestroyDevice(device* owner) {

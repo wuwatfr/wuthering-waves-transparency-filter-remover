@@ -16,12 +16,10 @@ namespace wuwa_tfr::dev {
 // DllMain only when WUWA_TFR_DEVTOOLS is set.
 void RegisterDevEvents();
 
-// The Dev-only tail of OnInitDevice: records the device so the pipeline-
-// replacement experiments can look it up later.
-void OnInitDeviceHook(reshade::api::device* owner);
-
-// The Dev-only tail of OnDestroyDevice: tears down this device's trace state
-// and drains both pipeline-replacement experiments' replacement pipelines.
+// The Dev-only tail of OnDestroyDevice: tears down this device's trace
+// incarnation/pipeline state. (Fade-primitive replacement lifecycle is owned
+// entirely by g_dev_antifade_runtime -- see dev/dev_runtime.hpp -- which is
+// torn down independently via its own init_device/destroy_device handlers.)
 void OnDestroyDeviceHook(reshade::api::device* owner);
 
 }  // namespace wuwa_tfr::dev

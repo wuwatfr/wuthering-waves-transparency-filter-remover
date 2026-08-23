@@ -11,12 +11,13 @@
 
 #include <imgui.h>
 
+#include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
-#include "dev/experiments/experiments_common.hpp"
-#include "dev/experiments/experiments_fade_primitive.hpp"
+#include "dev/diagnostics/fade_primitive_diagnostics.hpp"
 #include "dev/trace/trace_events.hpp"
 #include "dev/trace/trace_report.hpp"
 #include "dev/trace/trace_state.hpp"
+#include "production/addon_shared.hpp"
 
 using namespace reshade::api;
 
@@ -27,206 +28,117 @@ void DrawFadePrimitiveTargetModes() {
           "Dev transparency-filter target modes", ImGuiTreeNodeFlags_DefaultOpen))
     return;
 
-  bool enabled = g_target_bypass_enabled.load(std::memory_order_relaxed);
+  // g_dev_antifade_runtime is the sole replacement owner (see
+  // dev/dev_runtime.hpp): a second, independent instance of the same
+  // FadePrimitiveRuntime class Production uses. It has no per-hash selection
+  // concept -- when enabled, it evaluates every observed DXIL pixel shader.
+  bool enabled = g_dev_antifade_runtime.enabled();
   if (ImGui::Checkbox("Remove Transparency Filter", &enabled))
-    g_target_bypass_enabled.store(enabled, std::memory_order_relaxed);
+    g_dev_antifade_runtime.set_enabled(enabled);
+  ImGui::TextDisabled(
+      "Replacement is owned entirely by the shared FadePrimitiveRuntime: every "
+      "fully verified Fade Primitive v1 shader is matched and prepared; there "
+      "is no per-hash selection.");
 
-  TargetBypassMode mode = g_target_bypass_mode.load(
-      std::memory_order_relaxed);
-  if (ImGui::RadioButton("All v1", mode == TargetBypassMode::AllVerifiedV1)) {
-    g_target_bypass_mode.store(TargetBypassMode::AllVerifiedV1,
-        std::memory_order_relaxed);
-    RebuildFadePrimitiveExecutionTargets();
-    mode = TargetBypassMode::AllVerifiedV1;
-  }
+  const auto telemetry = g_dev_antifade_runtime.memory_telemetry_snapshot();
+  ImGui::Text(
+      "Shader cache: entries=%llu bytes=%llu | preparations in flight=%llu | replacement PSOs live=%llu | active devices=%llu",
+      static_cast<unsigned long long>(telemetry.shader_cache_entries),
+      static_cast<unsigned long long>(telemetry.shader_cache_bytecode_bytes),
+      static_cast<unsigned long long>(telemetry.preparations_in_flight),
+      static_cast<unsigned long long>(telemetry.live_replacement_pipelines),
+      static_cast<unsigned long long>(telemetry.active_devices));
+  ImGui::Text(
+      "Matched=%llu | prepared=%llu | replacements created=%llu failed=%llu | replacement binds=%llu",
+      static_cast<unsigned long long>(telemetry.matched_shaders_total),
+      static_cast<unsigned long long>(telemetry.prepared_shaders_total),
+      static_cast<unsigned long long>(telemetry.replacements_created_total),
+      static_cast<unsigned long long>(telemetry.replacements_failed_total),
+      static_cast<unsigned long long>(telemetry.replacement_binds_total));
+
+  ImGui::Separator();
+  if (ImGui::Button("Import current captured PSOs as highlights"))
+    ImportCurrentCapturedPsosIntoHighlights();
   ImGui::SameLine();
-  if (ImGui::RadioButton("Manual shader list",
-          mode == TargetBypassMode::ManualShaderList)) {
-    g_target_bypass_mode.store(TargetBypassMode::ManualShaderList,
-        std::memory_order_relaxed);
-    RebuildFadePrimitiveExecutionTargets();
-    mode = TargetBypassMode::ManualShaderList;
-  }
-
+  if (ImGui::Button("Clear highlights")) ClearFadePrimitiveHighlights();
   ImGui::TextDisabled(
-      "All v1 follows only fully verified Fade Primitive v1 structure; it has no N/P/F, frozen-hash, or character-list filter.");
-  ImGui::TextDisabled(
-      "Manual selection is hash-group control only. Non-v1 rows remain ineligible and are never patched.");
-
-  if (mode == TargetBypassMode::ManualShaderList) {
-    if (ImGui::Button("Import current captured PSOs"))
-      ImportCurrentCapturedPsosIntoManualList();
-    ImGui::SameLine();
-    if (ImGui::Button("Clear manual list"))
-      ClearManualFadePrimitiveList();
-  }
+      "Highlighting below is a diagnostic filter only; it never affects "
+      "which shaders are matched or replaced.");
 
   struct DisplayRow {
     std::uint64_t shader_hash = 0;
-    bool manual_enabled = false;
+    bool highlighted = false;
     std::size_t live_application_psos = 0;
-    bool v1_match = false;
     std::uint32_t instances = 0;
     std::string consumers;
-    FadePrimitiveExecutionTarget target;
-    bool active_target = false;
   };
-  std::unordered_map<std::uint64_t, std::unordered_set<TracePipelineKey,
-      TracePipelineKeyHash>> live_psos;
-  std::unordered_set<std::uint64_t> known_v1_hashes;
-  {
-    std::lock_guard inspection_lock(g_inspection_mutex);
-    known_v1_hashes.reserve(g_inspections.size());
-    for (const auto& [shader_hash, inspection] : g_inspections) {
-      if (inspection.success && !inspection.fade_primitive.instances.empty())
-        known_v1_hashes.insert(shader_hash);
-    }
-  }
-  std::size_t live_matched_application_psos = 0;
+  std::unordered_map<std::uint64_t, std::size_t> live_pso_counts;
   {
     std::lock_guard lock(g_trace_mutex);
-    for (const auto& [key, pipeline] : g_trace_pipelines) {
-      live_psos[pipeline.shader_hash].insert(key);
-      if (known_v1_hashes.contains(pipeline.shader_hash))
-        ++live_matched_application_psos;
-    }
+    for (const auto& [key, pipeline] : g_trace_pipelines)
+      ++live_pso_counts[pipeline.shader_hash];
   }
-  std::unordered_map<std::uint64_t, bool> manual_hashes;
-  std::unordered_map<std::uint64_t, FadePrimitiveExecutionTarget> targets;
-  std::string status;
+  std::unordered_map<std::uint64_t, bool> highlighted_hashes;
   {
-    std::lock_guard lock(g_fade_primitive_execution_mutex);
-    manual_hashes = g_manual_fade_primitive_hashes;
-    targets = g_fade_primitive_execution_targets;
-    status = g_fade_primitive_execution_status;
-  }
-  std::unordered_set<std::uint64_t> display_hashes;
-  if (mode == TargetBypassMode::ManualShaderList) {
-    for (const auto& [shader_hash, enabled_hash] : manual_hashes) {
-      (void)enabled_hash;
-      display_hashes.insert(shader_hash);
-    }
-  } else {
-    for (const auto& [shader_hash, target] : targets) {
-      (void)target;
-      display_hashes.insert(shader_hash);
-    }
+    std::lock_guard lock(g_fade_primitive_diagnostics_mutex);
+    highlighted_hashes = g_fade_primitive_highlighted_hashes;
   }
 
   std::vector<DisplayRow> rows;
-  rows.reserve(display_hashes.size());
-  for (const std::uint64_t shader_hash : display_hashes) {
-    DisplayRow row;
-    row.shader_hash = shader_hash;
-    row.manual_enabled = manual_hashes.contains(shader_hash) &&
-        manual_hashes[shader_hash];
-    row.live_application_psos = live_psos[shader_hash].size();
-    {
-      std::lock_guard inspection_lock(g_inspection_mutex);
-      if (const auto inspection = g_inspections.find(shader_hash);
-          inspection != g_inspections.end() && inspection->second.success &&
-          !inspection->second.fade_primitive.instances.empty()) {
-        row.v1_match = true;
-        row.instances = static_cast<std::uint32_t>(
-            inspection->second.fade_primitive.instances.size());
-        row.consumers = FadePrimitiveConsumers(inspection->second.fade_primitive);
-      }
+  {
+    std::lock_guard inspection_lock(g_inspection_mutex);
+    rows.reserve(g_inspections.size());
+    for (const auto& [shader_hash, inspection] : g_inspections) {
+      if (!inspection.success || inspection.fade_primitive.instances.empty())
+        continue;
+      DisplayRow row;
+      row.shader_hash = shader_hash;
+      row.highlighted = highlighted_hashes.contains(shader_hash) &&
+          highlighted_hashes[shader_hash];
+      if (const auto live = live_pso_counts.find(shader_hash);
+          live != live_pso_counts.end())
+        row.live_application_psos = live->second;
+      row.instances = static_cast<std::uint32_t>(
+          inspection.fade_primitive.instances.size());
+      row.consumers = FadePrimitiveConsumers(inspection.fade_primitive);
+      rows.push_back(std::move(row));
     }
-    if (const auto target = targets.find(shader_hash); target != targets.end()) {
-      row.target = target->second;
-      row.active_target = true;
-    }
-    rows.push_back(std::move(row));
   }
   std::sort(rows.begin(), rows.end(), [](const DisplayRow& left,
                                          const DisplayRow& right) {
     return left.shader_hash < right.shader_hash;
   });
 
-  const auto replacement_counts = g_fade_primitive_execution_replacements.Sizes();
-  std::size_t active_shader_count = 0;
-  std::size_t active_instance_count = 0;
-  for (const auto& row : rows) {
-    const bool active = mode == TargetBypassMode::AllVerifiedV1
-        ? row.v1_match
-        : row.manual_enabled && row.v1_match;
-    if (!active) continue;
-    ++active_shader_count;
-    active_instance_count += row.instances;
-  }
-  ImGui::Text("Prepared shader cache=%zu | active shaders=%zu | active primitive instances=%zu | replacement PSOs live=%zu",
-      targets.size(), active_shader_count, active_instance_count,
-      replacement_counts.second);
-  ImGui::Text("Soak: v1 matched=%zu | patched prepared=%llu | live matched application PSOs=%zu | replacements created=%llu destroyed=%llu failed=%llu",
-      known_v1_hashes.size(), static_cast<unsigned long long>(
-          g_fade_primitive_execution_shaders_prepared.load(
-              std::memory_order_relaxed)), live_matched_application_psos,
-      static_cast<unsigned long long>(
-          g_fade_primitive_execution_replacements_created.load(
-              std::memory_order_relaxed)),
-      static_cast<unsigned long long>(
-          g_fade_primitive_execution_replacements_destroyed.load(
-              std::memory_order_relaxed)),
-      static_cast<unsigned long long>(
-          g_fade_primitive_execution_replacements_failed.load(
-              std::memory_order_relaxed)));
-  ImGui::Text("Bind hits: replacement=%llu | original while OFF=%llu",
-      static_cast<unsigned long long>(g_fade_primitive_execution_bind_hits.load(
-          std::memory_order_relaxed)),
-      static_cast<unsigned long long>(
-          g_fade_primitive_execution_original_bind_hits.load(
-              std::memory_order_relaxed)));
-  ImGui::TextDisabled("%s", status.c_str());
+  ImGui::Text("Fully verified Fade Primitive v1 shaders observed: %zu",
+      rows.size());
 
-  if (mode != TargetBypassMode::ManualShaderList) return;
-  if (!ImGui::BeginTable("manual_v1_shader_groups", 10,
+  if (!ImGui::BeginTable("fade_primitive_diagnostics", 5,
           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
           ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
           ImVec2(0.0f, 420.0f)))
     return;
-  ImGui::TableSetupColumn("Enabled");
+  ImGui::TableSetupColumn("Highlighted");
   ImGui::TableSetupColumn("Pixel shader hash");
   ImGui::TableSetupColumn("Live application PSOs");
-  ImGui::TableSetupColumn("v1 match");
   ImGui::TableSetupColumn("Instances");
   ImGui::TableSetupColumn("Consumers");
-  ImGui::TableSetupColumn("Replacement live");
-  ImGui::TableSetupColumn("Created / failed");
-  ImGui::TableSetupColumn("Replacement binds");
-  ImGui::TableSetupColumn("Status");
   ImGui::TableHeadersRow();
   for (const auto& row : rows) {
     const std::string hash = Hex64(row.shader_hash);
     ImGui::PushID(hash.c_str());
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
-    bool selected = row.manual_enabled;
-    if (ImGui::Checkbox("##manual_enabled", &selected))
-      SetManualFadePrimitiveEnabled(row.shader_hash, selected);
+    bool selected = row.highlighted;
+    if (ImGui::Checkbox("##highlighted", &selected))
+      SetFadePrimitiveHighlighted(row.shader_hash, selected);
     ImGui::TableSetColumnIndex(1);
     ImGui::TextUnformatted(hash.c_str());
     ImGui::TableSetColumnIndex(2);
     ImGui::Text("%zu", row.live_application_psos);
     ImGui::TableSetColumnIndex(3);
-    ImGui::TextUnformatted(row.v1_match ? "yes" : "no (not eligible)");
-    ImGui::TableSetColumnIndex(4);
     ImGui::Text("%u", row.instances);
-    ImGui::TableSetColumnIndex(5);
-    ImGui::TextUnformatted(row.v1_match ? row.consumers.c_str() : "-");
-    ImGui::TableSetColumnIndex(6);
-    ImGui::Text("%llu", static_cast<unsigned long long>(
-        row.target.live_replacements));
-    ImGui::TableSetColumnIndex(7);
-    ImGui::Text("%llu / %llu", static_cast<unsigned long long>(
-        row.target.replacements_created), static_cast<unsigned long long>(
-        row.target.replacements_failed));
-    ImGui::TableSetColumnIndex(8);
-    ImGui::Text("%llu", static_cast<unsigned long long>(
-        row.target.replacement_bind_hits));
-    ImGui::TableSetColumnIndex(9);
-    ImGui::TextUnformatted(row.target.failure.empty()
-        ? (row.v1_match ? "eligible" : "not eligible")
-        : row.target.failure.c_str());
+    ImGui::TableSetColumnIndex(4);
+    ImGui::TextUnformatted(row.consumers.c_str());
     ImGui::PopID();
   }
   ImGui::EndTable();

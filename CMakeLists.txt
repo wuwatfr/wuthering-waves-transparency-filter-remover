@@ -108,10 +108,7 @@ if(WIN32)
           src/fade_primitive_runtime.cpp
           src/dxil_dither_diagnostic.cpp
           src/dev/diagnostics/dev_diagnostics.cpp
-          src/dev/experiments/experiments_common.cpp
-          src/dev/experiments/experiments_fade_primitive.cpp
-          src/dev/experiments/experiments_legacy_bypass.cpp
-          src/dev/experiments/experiments_recipe.cpp
+          src/dev/diagnostics/fade_primitive_diagnostics.cpp
           src/dev/trace/trace_events.cpp
           src/dev/trace/trace_report.cpp
           src/dev/trace/trace_state.cpp

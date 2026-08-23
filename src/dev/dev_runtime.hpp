@@ -20,6 +20,18 @@ namespace wuwa_tfr::dev {
 
 extern wuwa_tfr::FadePrimitiveRuntime g_dev_antifade_runtime;
 
+// True for the duration of any forwarding call below into
+// g_dev_antifade_runtime, including any ReShade event nested inside it (the
+// runtime's own internal create/destroy/bind of a replacement pipeline).
+// dev/trace/trace_events.cpp's independent observers check this so they
+// never mistake a replacement pipeline the runtime creates for itself for a
+// genuine application pipeline. Registration order matters: RegisterDevEvents
+// registers the trace handlers before the ones below, so the outer (real)
+// event still reaches the trace handlers before this flag is ever set; only
+// the nested/synthetic event triggered by the runtime's own replacement
+// create/destroy/bind is shielded.
+extern thread_local bool g_dev_runtime_internal_pipeline_event;
+
 // Must run before any ReShade callback can reach g_dev_antifade_runtime.
 // Called once, at the top of RegisterDevEvents().
 void InitializeDevRuntime();
