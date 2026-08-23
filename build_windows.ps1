@@ -127,22 +127,26 @@ Write-Host "Configuring x64 Release build with: $generator"
 & $cmake.Source -S $root -B $build -G $generator -A x64 `
     "-DRESHADE_INCLUDE_DIR=$reshadeInclude" `
     "-DDXC_INCLUDE_DIR=$dxcInclude" `
+    "-DDXC_RUNTIME_DIR=$(Join-Path $dxcBinaryRoot 'bin/x64')" `
     "-DIMGUI_INCLUDE_DIR=$imguiInclude"
 if ($LASTEXITCODE -ne 0) {
     Fail 'CMake configuration failed. Make sure the installed Visual Studio Build Tools include Desktop development with C++.'
 }
 
 $testTargets = @(
-    'pipeline_replacement_state_tests',
+    'pipeline_generation_state_tests',
     'dxc_validation_policy_tests',
     'device_activity_state_tests',
     'dxil_dither_diagnostic_tests',
     'fade_primitive_detector_tests',
     'target_dither_bypass_tests',
-    'trace_submission_identity_tests'
+    'trace_submission_identity_tests',
+    'single_flight_cache_tests',
+    'memory_telemetry_tests',
+    'complete_dxil_validation_tests'
 )
 
-Write-Host 'Compiling test targets...'
+Write-Host 'Compiling Release test targets...'
 & $cmake.Source --build $build --config Release --target $testTargets
 if ($LASTEXITCODE -ne 0) { Fail 'Test compilation failed. See the compiler errors above.' }
 
@@ -151,9 +155,17 @@ if (-not (Test-Path -LiteralPath $ctest -PathType Leaf)) {
     Fail 'ctest.exe was not found alongside cmake.exe.'
 }
 
-Write-Host 'Running all CTest tests...'
+Write-Host 'Running all Release CTest tests...'
 & $ctest --test-dir $build --build-config Release --output-on-failure
 if ($LASTEXITCODE -ne 0) { Fail 'Tests failed; build verification did not succeed.' }
+
+Write-Host 'Compiling Debug test targets...'
+& $cmake.Source --build $build --config Debug --target $testTargets
+if ($LASTEXITCODE -ne 0) { Fail 'Debug test compilation failed. See the compiler errors above.' }
+
+Write-Host 'Running all Debug CTest tests...'
+& $ctest --test-dir $build --build-config Debug --output-on-failure
+if ($LASTEXITCODE -ne 0) { Fail 'Debug tests failed; build verification did not succeed.' }
 
 Write-Host 'Compiling production add-on...'
 & $cmake.Source --build $build --config Release --target WuwaTFR

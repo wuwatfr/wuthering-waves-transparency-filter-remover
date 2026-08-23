@@ -7,17 +7,19 @@
 #include "device_activity_state.hpp"
 #include "dxc_bridge.hpp"
 #include "fade_primitive_detector.hpp"
-#include "pipeline_replacement_state.hpp"
+#include "pipeline_replacement_coordinator.hpp"
+#include "preparation_context_pool.hpp"
+#include "single_flight_cache.hpp"
 #include "target_dither_bypass.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <memory>
-#include <mutex>
+#include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace wuwa_tfr {
@@ -102,69 +104,108 @@ struct PreparedShader {
   std::shared_ptr<const std::vector<std::uint8_t>> bytecode;
   std::string failure;
 };
+
+struct PreparedShaderPayloadBytes {
+  std::size_t operator()(const PreparedShader& state) const noexcept {
+    return state.bytecode ? state.bytecode->size() : 0;
+  }
+};
+
+constexpr std::size_t kDxcContextPoolCapacity = 4;
 } // namespace
 
 struct FadePrimitiveRuntime::Impl {
-  std::mutex preparation_mutex;
-  std::unordered_map<std::uint64_t, PreparedShader> prepared;
-  std::unique_ptr<DxcBridge> dxc;
+  // Lock order is activity -> single-flight cache -> DXC pool. The cache lock
+  // is released before a context is acquired or any DXC call begins. Last-
+  // device teardown holds activity exclusively, then drains the pool; it never
+  // takes the cache lock, so it cannot wait in a lock cycle with a callback.
+  SingleFlightCache<std::uint64_t, PreparedShader, std::hash<std::uint64_t>,
+      PreparedShaderPayloadBytes> prepared;
   std::filesystem::path dxc_runtime_directory;
+  PreparationContextPool<DxcBridge> dxc_pool;
   std::atomic<std::uint32_t> device_count{0};
   DeviceActivityState<DeviceId> activity;
-  PipelineReplacementState<DeviceId, pipeline> replacements;
+  PipelineReplacementCoordinator<DeviceId, pipeline> replacements;
   std::atomic<bool> enabled{false};
+  // These are cumulative runtime activity counters, not retained-object
+  // gauges. Telemetry snapshots only load them and never increment them.
   std::atomic<std::uint64_t> matched_shaders{0};
   std::atomic<std::uint64_t> prepared_shaders{0};
   std::atomic<std::uint64_t> replacements_created{0};
   std::atomic<std::uint64_t> replacements_failed{0};
   std::atomic<std::uint64_t> replacement_binds{0};
 
-  std::shared_ptr<const std::vector<std::uint8_t>> Prepare(
-      std::uint64_t hash, const shader_desc& original) {
-    std::lock_guard lock(preparation_mutex);
-    if (const auto entry = prepared.find(hash); entry != prepared.end())
-      return entry->second.bytecode;
+  Impl()
+      : dxc_pool(kDxcContextPoolCapacity, [this] {
+          // DxcBridge owns its own module, COM interfaces, assembler, and
+          // validator. A leased instance is never called concurrently.
+          return std::make_unique<DxcBridge>(dxc_runtime_directory);
+        }) {}
+
+  PreparedShader PrepareOne(const shader_desc& original) {
     PreparedShader state;
     state.attempted = true;
-    if (!dxc)
-      dxc = std::make_unique<DxcBridge>(dxc_runtime_directory);
-    if (!dxc->available()) {
-      state.failure = dxc->init_error();
-    } else {
-      const auto inspected = dxc->InspectShader(original.code, original.code_size);
-      if (!inspected.success) {
-        state.failure = inspected.error;
+    try {
+      auto dxc = dxc_pool.Acquire();
+      if (!dxc) {
+        state.failure = "DXC context allocation failed";
+      } else if (!dxc->available()) {
+        state.failure = dxc->init_error();
       } else {
-        const auto diagnostic = AnalyzeFadePrimitiveV1(inspected.original_ir);
-        state.matches = !diagnostic.instances.empty();
-        if (!state.matches) {
-          state.failure = "no fully verified transparency-filter primitive";
+        const auto inspected = dxc->InspectShader(original.code, original.code_size);
+        if (!inspected.success) {
+          state.failure = inspected.error;
         } else {
-          matched_shaders.fetch_add(1, std::memory_order_relaxed);
-          const auto patched = PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-              inspected.original_ir);
-          if (!patched.success ||
-              patched.verified_instance_count != diagnostic.instances.size() ||
-              patched.patched_instance_count != diagnostic.instances.size()) {
-            state.failure = patched.error.empty() ? "structural verification failed" : patched.error;
+          const auto diagnostic = AnalyzeFadePrimitiveV1(inspected.original_ir);
+          state.matches = !diagnostic.instances.empty();
+          if (!state.matches) {
+            state.failure = "no fully verified transparency-filter primitive";
           } else {
-            auto bytes = std::make_shared<std::vector<std::uint8_t>>();
-            std::string error;
-            DxilAssemblyValidationOutput result;
-            if (!dxc->AssembleAndValidate(patched.llvm_ir, *bytes, error, result)) {
-              state.failure = error;
+            matched_shaders.fetch_add(1, std::memory_order_relaxed);
+            const auto patched = PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+                inspected.original_ir);
+            if (!patched.success ||
+                patched.verified_instance_count != diagnostic.instances.size() ||
+                patched.patched_instance_count != diagnostic.instances.size()) {
+              state.failure = patched.error.empty() ?
+                  "structural verification failed" : patched.error;
             } else {
-              state.bytecode = std::move(bytes);
-              prepared_shaders.fetch_add(1, std::memory_order_relaxed);
+              auto bytes = std::make_shared<std::vector<std::uint8_t>>();
+              std::string error;
+              DxilAssemblyValidationOutput result;
+              if (!dxc->AssembleAndValidate(patched.llvm_ir, *bytes, error, result)) {
+                state.failure = error;
+              } else {
+                state.bytecode = std::move(bytes);
+                prepared_shaders.fetch_add(1, std::memory_order_relaxed);
+              }
             }
           }
         }
       }
+    } catch (const std::exception& exception) {
+      state.failure = "preparation exception: " + std::string(exception.what());
+    } catch (...) {
+      state.failure = "preparation exception";
     }
-    const auto inserted = prepared.emplace(hash, std::move(state));
-    if (!inserted.first->second.bytecode)
+    if (!state.bytecode)
       replacements_failed.fetch_add(1, std::memory_order_relaxed);
-    return inserted.first->second.bytecode;
+    return state;
+  }
+
+  std::shared_ptr<const std::vector<std::uint8_t>> Prepare(
+      std::uint64_t hash, const shader_desc& original) {
+    const PreparedShader state = prepared.GetOrPrepare(
+        hash,
+        [&] { return PrepareOne(original); },
+        [&] {
+          PreparedShader aborted;
+          aborted.attempted = true;
+          aborted.failure = "preparation aborted";
+          replacements_failed.fetch_add(1, std::memory_order_relaxed);
+          return aborted;
+        });
+    return state.bytecode;
   }
 };
 
@@ -186,14 +227,15 @@ void FadePrimitiveRuntime::OnDestroyDevice(device* owner) {
   if (!owner || owner->get_api() != device_api::d3d12) return;
   auto teardown = impl_->activity.Deactivate(DeviceKey(owner));
   if (!teardown) return;
-  for (const auto& item : impl_->replacements.DrainOwner(DeviceKey(owner))) {
-    if (!item.replacements.final_antifade) continue;
+  impl_->replacements.OnDestroyOwner(DeviceKey(owner), [owner](pipeline replacement) {
     ScopedFlag internal(g_internal_destroy);
-    owner->destroy_pipeline(*item.replacements.final_antifade);
-  }
+    owner->destroy_pipeline(replacement);
+  });
   if (impl_->device_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-    std::lock_guard lock(impl_->preparation_mutex);
-    impl_->dxc.reset();
+    // Deactivate holds activity exclusively, so all callers that can lease a
+    // DXC context have returned. Drain also protects against future changes
+    // that add a preparation path outside this callback.
+    impl_->dxc_pool.Drain();
   }
 }
 
@@ -202,51 +244,64 @@ void FadePrimitiveRuntime::OnInitPipeline(device* owner, pipeline_layout layout,
   if (g_internal_create || !owner || application.handle == 0) return;
   auto active = impl_->activity.Acquire(DeviceKey(owner));
   if (!active) return;
+  // D3D12 PSOs are immutable: the live (device, application handle) pair is
+  // the canonical identity of all application pipeline state. A differing
+  // observed shader hash for that same live handle is contradictory evidence,
+  // so the coordinator disables replacement selection rather than replacing
+  // or destroying an object that may still be referenced by command lists.
   const shader_desc* original = nullptr;
   std::uint64_t hash = 0;
-  if (!FindPixelShader(count, subobjects, original, hash)) return;
-  const auto bytecode = impl_->Prepare(hash, *original);
-  if (!bytecode || impl_->replacements.WithSelected(DeviceKey(owner), application.handle,
-          true, true, [](pipeline) {})) return;
-  std::vector<pipeline_subobject> replacement_subobjects(subobjects, subobjects + count);
-  shader_desc replacement_shader = *original;
-  replacement_shader.code = bytecode->data();
-  replacement_shader.code_size = bytecode->size();
-  bool replaced = false;
-  for (auto& subobject : replacement_subobjects) {
-    if (subobject.type == pipeline_subobject_type::pixel_shader &&
-        subobject.data == original) {
-      subobject.data = &replacement_shader;
-      replaced = true;
-    }
-  }
-  if (!replaced) { impl_->replacements_failed.fetch_add(1, std::memory_order_relaxed); return; }
-  pipeline replacement{};
-  {
-    ScopedFlag internal(g_internal_create);
-    if (!owner->create_pipeline(layout, count, replacement_subobjects.data(), &replacement) ||
-        replacement.handle == 0) {
-      impl_->replacements_failed.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
-  }
-  const auto previous = impl_->replacements.PutFinalAntiFade(
-      DeviceKey(owner), application.handle, replacement);
-  if (previous) {
+  const bool has_pixel_shader = FindPixelShader(count, subobjects, original, hash);
+  const auto destroy_replacement = [owner](pipeline replacement) {
     ScopedFlag internal(g_internal_destroy);
-    owner->destroy_pipeline(*previous);
-  }
-  impl_->replacements_created.fetch_add(1, std::memory_order_relaxed);
+    owner->destroy_pipeline(replacement);
+  };
+  const auto init_result = impl_->replacements.OnInit(
+      DeviceKey(owner), application.handle, has_pixel_shader ? hash : 0,
+      [&]() -> std::optional<pipeline> {
+        if (!has_pixel_shader) return std::nullopt;
+        const auto bytecode = impl_->Prepare(hash, *original);
+        if (!bytecode) return std::nullopt;
+        std::vector<pipeline_subobject> replacement_subobjects(
+            subobjects, subobjects + count);
+        shader_desc replacement_shader = *original;
+        replacement_shader.code = bytecode->data();
+        replacement_shader.code_size = bytecode->size();
+        bool replaced = false;
+        for (auto& subobject : replacement_subobjects) {
+          if (subobject.type == pipeline_subobject_type::pixel_shader &&
+              subobject.data == original) {
+            subobject.data = &replacement_shader;
+            replaced = true;
+          }
+        }
+        if (!replaced) {
+          impl_->replacements_failed.fetch_add(1, std::memory_order_relaxed);
+          return std::nullopt;
+        }
+        pipeline replacement{};
+        ScopedFlag internal(g_internal_create);
+        if (!owner->create_pipeline(layout, count, replacement_subobjects.data(),
+                &replacement) || replacement.handle == 0) {
+          impl_->replacements_failed.fetch_add(1, std::memory_order_relaxed);
+          return std::nullopt;
+        }
+        return replacement;
+      }, destroy_replacement);
+  if (init_result == PipelineReplacementCoordinator<DeviceId, pipeline>::
+          InitResult::Published)
+    impl_->replacements_created.fetch_add(1, std::memory_order_relaxed);
 }
 
 void FadePrimitiveRuntime::OnDestroyPipeline(device* owner, pipeline application) {
   if (g_internal_destroy || !owner || application.handle == 0) return;
   auto active = impl_->activity.Acquire(DeviceKey(owner));
   if (!active) return;
-  const auto removed = impl_->replacements.Remove(DeviceKey(owner), application.handle);
-  if (!removed.final_antifade) return;
-  ScopedFlag internal(g_internal_destroy);
-  owner->destroy_pipeline(*removed.final_antifade);
+  impl_->replacements.OnDestroyPipeline(DeviceKey(owner), application.handle,
+      [owner](pipeline replacement) {
+        ScopedFlag internal(g_internal_destroy);
+        owner->destroy_pipeline(replacement);
+      });
 }
 
 void FadePrimitiveRuntime::OnBindPipeline(command_list* list, pipeline_stage stages,
@@ -256,7 +311,7 @@ void FadePrimitiveRuntime::OnBindPipeline(command_list* list, pipeline_stage sta
     return;
   device* owner = list->get_device();
   if (!owner) return;
-  impl_->replacements.WithSelected(DeviceKey(owner), application.handle, true, true,
+  impl_->replacements.OnBind(DeviceKey(owner), application.handle,
       [&](pipeline replacement) {
         ScopedFlag internal(g_internal_bind);
         list->bind_pipeline(stages, replacement);
@@ -270,6 +325,26 @@ bool FadePrimitiveRuntime::enabled() const {
 
 void FadePrimitiveRuntime::set_enabled(bool enabled) {
   impl_->enabled.store(enabled, std::memory_order_relaxed);
+}
+
+FadePrimitiveRuntimeTelemetrySnapshot
+FadePrimitiveRuntime::memory_telemetry_snapshot() const {
+  // GetSnapshot() releases the single-flight cache lock before this function
+  // separately obtains the replacement-state lock via RetainedSize(). Do not
+  // combine these two snapshots under nested locks.
+  const auto cache = impl_->prepared.GetSnapshot();
+  const auto replacement_count = impl_->replacements.RetainedSize();
+  return {
+      static_cast<std::uint64_t>(cache.completed_entries),
+      static_cast<std::uint64_t>(cache.retained_payload_bytes),
+      static_cast<std::uint64_t>(cache.in_flight_entries),
+      static_cast<std::uint64_t>(replacement_count),
+      impl_->device_count.load(std::memory_order_relaxed),
+      impl_->matched_shaders.load(std::memory_order_relaxed),
+      impl_->prepared_shaders.load(std::memory_order_relaxed),
+      impl_->replacements_created.load(std::memory_order_relaxed),
+      impl_->replacements_failed.load(std::memory_order_relaxed),
+      impl_->replacement_binds.load(std::memory_order_relaxed)};
 }
 
 } // namespace wuwa_tfr

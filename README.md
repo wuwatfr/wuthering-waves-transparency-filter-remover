@@ -71,12 +71,30 @@ WuwaTFR section.
 The setting can be changed at runtime without restarting the game. Its value
 is stored in `WuwaTFR.ini` as `EnableTFR`.
 
-## Release Status
+## Optional Memory Telemetry
 
-**v1.0.0-rc.1** is the first public release candidate. It has been tested
-across multiple playable characters, alternate forms, skills, and animation
-states. Broader environmental and special-material compatibility testing
-continues during the RC period.
+The Production overlay also has a **Log memory telemetry (10 s)** control for
+long-session diagnostics. It is off by default on every process launch and is
+not stored in `WuwaTFR.ini`. When enabled, it writes one schema/start line and
+one sample every fixed 10 seconds to `ReShade.log`; a continuously enabled
+five-hour session produces about 1,801 sample lines.
+
+The process metrics (`working_set_bytes`, `private_commit_bytes`, and
+`handle_count`) describe the entire game process, including the game, ReShade,
+add-ons, and user-mode driver allocations. The WuwaTFR values are deliberately
+narrower: they cover only the completed shader cache, its retained patched
+bytecode payloads, in-flight preparations, tracked live replacement pipelines,
+and active devices. `shader_cache_entries` includes cached fail-closed
+outcomes, while `shader_cache_bytecode_bytes` includes only retained patched
+bytecode vectors. The activity totals are cumulative counts since the
+Production runtime started and are not changed by telemetry.
+
+Therefore, process private commit growing while WuwaTFR's explicitly tracked
+retention values remain flat is evidence against those caches and replacement
+pipelines being responsible. It does not prove that the add-on contributes no
+memory elsewhere.
+
+## Reporting Visual Regressions
 
 When reporting a visual regression, compare the same scene with **Remove
 Transparency Filter** enabled and disabled.
