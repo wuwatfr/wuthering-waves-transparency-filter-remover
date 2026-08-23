@@ -8,11 +8,23 @@
 // the existing runtime differential trace's own observation
 // (CommandListTrace::recorded_draws, dev/trace/trace_state.hpp).
 //
-// Record identity intentionally mirrors dev/trace/trace_state.hpp's
-// RecordedTraceDrawKey (PSO incarnation + exact geometry/pass + observed
-// binding-state fingerprints) so this never aggregates by shader hash alone:
-// one shader observed under several distinct application PSOs, passes, or
-// binding routes stays as several distinct records.
+// Record identity is the same stable execution-route identity the existing
+// concrete trace already uses -- wuwa_tfr::TraceConcreteDrawKey (PSO
+// incarnation + exact geometry + pass fingerprint) -- so this never
+// aggregates by shader hash alone: one shader observed under several
+// distinct application PSOs, passes, or geometry stays as several distinct
+// records.
+//
+// Binding-state fingerprints (root constants, pushed CBVs, descriptor
+// tables) are deliberately NOT part of record identity: the first real
+// in-game captures showed that including them there fragments a single
+// stable Draw route into thousands of near-duplicate records, because the
+// pushed-CBV and descriptor-table fingerprints in particular are
+// *accumulated binding-event* fingerprints, not stable per-Draw state (see
+// dev/trace/trace_state.hpp's CommandListTrace::pushed_cbv_fingerprint /
+// descriptor_table_fingerprint). They remain valuable investigation clues,
+// so each record instead keeps a compact first/last/changed summary per
+// binding kind -- bounded storage, not an unbounded fingerprint set.
 
 #pragma once
 
@@ -39,31 +51,42 @@ enum class ManualCaptureState : std::uint8_t {
 // investigation window, not the full differential trace.
 constexpr std::size_t kMaxManualCaptureRecords = 16384;
 
-struct ManualCaptureRecordKey {
-  std::uint64_t pso_incarnation = 0;
-  wuwa_tfr::TraceGeometryKey geometry;
-  std::uint64_t pass_fingerprint = 0;
+// Deliberately the same type the existing concrete trace uses for route
+// identity (dev/trace/trace_state.hpp's g_concrete_trace is keyed by this
+// too) -- reusing it directly instead of a look-alike local struct keeps the
+// two identities from silently drifting apart.
+using ManualCaptureRecordKey = wuwa_tfr::TraceConcreteDrawKey;
+using ManualCaptureRecordKeyHash = wuwa_tfr::TraceConcreteDrawKeyHash;
+
+// Which pixel shaders a manual-capture session accumulates. Snapshotted once
+// at Start() and fixed for the session's lifetime -- see
+// ManualCaptureAccumulator::Start.
+enum class ManualCaptureShaderFilter : std::uint8_t {
+  AllObservedPixelShaders,
+  VerifiedFadePrimitiveOnly,
+};
+
+// A compact summary of one binding kind's fingerprints across every Draw
+// aggregated into a record, instead of storing every distinct fingerprint
+// (which would just move the unbounded-storage problem into each record).
+// `changed` is sticky: once two observations disagree it stays true even if
+// a later observation happens to match again.
+struct ManualCaptureBindingSummary {
+  std::uint64_t first_fingerprint = 0;
+  std::uint64_t last_fingerprint = 0;
+  bool changed = false;
+};
+
+// One Draw's observed binding-state fingerprints, exactly as computed by
+// the existing trace's CommandListTrace (dev/trace/trace_state.hpp) at the
+// moment of that Draw -- copied in, never recomputed here. `observed_bindings`
+// bit 0x1 = root constants, 0x2 = pushed CBVs, 0x4 = descriptor tables,
+// matching dev/trace/trace_events.cpp's own bit usage.
+struct ManualCaptureBindingObservation {
   std::uint64_t root_constant_fingerprint = 0;
   std::uint64_t pushed_cbv_fingerprint = 0;
   std::uint64_t descriptor_table_fingerprint = 0;
   std::uint8_t observed_bindings = 0;
-
-  friend bool operator==(
-      const ManualCaptureRecordKey&, const ManualCaptureRecordKey&) = default;
-};
-
-struct ManualCaptureRecordKeyHash {
-  std::size_t operator()(const ManualCaptureRecordKey& key) const noexcept {
-    std::size_t hash = std::hash<std::uint64_t>{}(key.pso_incarnation);
-    wuwa_tfr::TraceHashCombine(
-        hash, wuwa_tfr::TraceGeometryKeyHash{}(key.geometry));
-    wuwa_tfr::TraceHashCombine(hash, key.pass_fingerprint);
-    wuwa_tfr::TraceHashCombine(hash, key.root_constant_fingerprint);
-    wuwa_tfr::TraceHashCombine(hash, key.pushed_cbv_fingerprint);
-    wuwa_tfr::TraceHashCombine(hash, key.descriptor_table_fingerprint);
-    wuwa_tfr::TraceHashCombine(hash, key.observed_bindings);
-    return hash;
-  }
 };
 
 // Pipeline/shader identity for one accumulated record, copied verbatim from
@@ -93,6 +116,12 @@ struct ManualCaptureRecord {
   std::uint64_t submissions = 0;
   std::uint64_t first_frame = 0;
   std::uint64_t last_frame = 0;
+  // OR of every accumulated Draw's observed_bindings -- which binding kinds
+  // were ever observed for this route, not any single Draw's state.
+  std::uint8_t observed_bindings = 0;
+  ManualCaptureBindingSummary root_constants;
+  ManualCaptureBindingSummary pushed_cbvs;
+  ManualCaptureBindingSummary descriptor_tables;
 };
 
 struct ManualCaptureSnapshot {
@@ -101,6 +130,8 @@ struct ManualCaptureSnapshot {
   std::uint64_t end_frame = 0;
   std::uint64_t captured_presents = 0;
   bool capacity_exceeded = false;
+  ManualCaptureShaderFilter shader_filter =
+      ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly;
   std::vector<std::pair<ManualCaptureRecordKey, ManualCaptureRecord>> records;
 };
 
@@ -112,6 +143,8 @@ struct ManualCaptureSummary {
   std::uint64_t captured_presents = 0;
   std::size_t record_count = 0;
   bool capacity_exceeded = false;
+  ManualCaptureShaderFilter shader_filter =
+      ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly;
 };
 
 // Not internally synchronized: the caller (dev/capture/manual_capture.cpp)
@@ -123,15 +156,19 @@ class ManualCaptureAccumulator {
  public:
   // Begins a new session: clears the previous manual-capture result (if
   // any), resets accumulation, and starts accepting records. Never touches
-  // any other Dev investigation state.
-  void Start(std::uint64_t session_id, std::uint64_t start_frame);
+  // any other Dev investigation state. `shader_filter` is snapshotted for
+  // the whole session -- see ManualCaptureShaderFilter.
+  void Start(std::uint64_t session_id, std::uint64_t start_frame,
+      ManualCaptureShaderFilter shader_filter);
 
-  // Accumulates one submitted key/pipeline pair. No-op outside the
-  // Capturing state. `frame` is the session-relative frame this submission
-  // belongs to (see ObservePresent).
+  // Accumulates one submitted key/pipeline pair, plus that Draw's observed
+  // binding-state fingerprints (folded into the record's compact
+  // first/last/changed summaries, never stored per-observation). No-op
+  // outside the Capturing state. `frame` is the session-relative frame this
+  // submission belongs to (see ObservePresent).
   void Accumulate(const ManualCaptureRecordKey& key,
       const ManualCapturePipelineInfo& pipeline, std::uint64_t commands,
-      std::uint64_t frame);
+      std::uint64_t frame, const ManualCaptureBindingObservation& binding);
 
   // Marks the active session incomplete without discarding what was already
   // captured, e.g. when a source command list hit its own per-list

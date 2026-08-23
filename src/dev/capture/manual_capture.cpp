@@ -11,9 +11,11 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 
 #include <imgui.h>
 
+#include "dev/dev_inspection.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/trace/trace_report.hpp"
 #include "dev/trace/trace_state.hpp"
@@ -40,6 +42,19 @@ std::atomic<bool> g_manual_capture_active{false};
 
 std::string g_manual_capture_status = "idle";
 std::string g_manual_capture_last_export;
+
+// UI-thread-only (the checkbox and StartManualCapture() both run on the
+// ImGui render thread, same as g_dev_antifade_runtime's toggle elsewhere in
+// Dev): the pending choice for the *next* session. Start() snapshots this
+// into the session itself, which is the value that actually governs
+// filtering -- this variable only ever feeds a new Start().
+bool g_manual_capture_filter_pending_verified_only = true;
+
+const char* ShaderFilterName(ManualCaptureShaderFilter filter) {
+  return filter == ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly
+      ? "verified_fade_primitive_only"
+      : "all_observed_pixel_shaders";
+}
 
 std::string SerializeVertexBindings(
     const std::vector<wuwa_tfr::TraceVertexBinding>& bindings) {
@@ -81,7 +96,7 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
 
-  report << "format\twuwa_tfr_manual_execution_capture_v1\n";
+  report << "format\twuwa_tfr_manual_execution_capture_v2\n";
   report << "capture_type\tmanual_user_delimited_session\n";
   report << "session_id\t" << snapshot.session_id << '\n';
   report << "start_frame\t" << snapshot.start_frame << '\n';
@@ -90,9 +105,14 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
   report << "record_count\t" << snapshot.records.size() << '\n';
   report << "capacity_exceeded\t"
          << static_cast<int>(snapshot.capacity_exceeded) << '\n';
+  report << "shader_filter\t" << ShaderFilterName(snapshot.shader_filter)
+         << '\n';
   report << "export_timestamp_local\t" << timestamp << '\n';
   report << "membership_boundary\t"
       "command_list_submitted_while_capturing_not_recording_time\n";
+  report << "record_identity\t"
+      "pso_incarnation_plus_geometry_plus_pass_fingerprint_same_identity_as_"
+      "the_differential_trace_concrete_draw_key_never_shader_hash_alone\n";
   report << "swapchain_policy\t"
       "first_present_observed_after_start_capture_all_other_swapchains_"
       "ignored\n";
@@ -101,9 +121,17 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
       "disambiguates_handle_reuse_pso_fingerprint_is_observed_pipeline_"
       "creation_identity_pixel_shader_hash_is_the_original_dxil_pixel_"
       "shader\n";
-  report << "binding_observation\t"
-      "fingerprints_of_observed_binding_state_and_events_not_captured_"
+  report << "root_constant_fingerprint_meaning\t"
+      "observed_root_constant_state_fingerprint\n";
+  report << "pushed_cbv_fingerprint_meaning\t"
+      "accumulated_binding_event_fingerprint_not_stable_state_not_"
       "constant_buffer_contents\n";
+  report << "descriptor_table_fingerprint_meaning\t"
+      "accumulated_binding_event_fingerprint_not_stable_state_not_"
+      "constant_buffer_contents\n";
+  report << "binding_summary_semantics\t"
+      "first_last_fingerprint_and_changed_flag_across_every_draw_"
+      "aggregated_into_this_route_not_a_single_draws_binding_state\n";
   report << "pass_observation\t"
       "pass_observed_marks_exact_render_pass_proof_per_row_an_unobserved_"
       "pass_is_never_shown_as_proven_identity\n";
@@ -124,8 +152,13 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
       "\tindirect_argument_resource\tindirect_offset"
       "\tindirect_declared_count\tindirect_stride"
       "\tpass_fingerprint\tpass_observed"
-      "\troot_constant_fingerprint\tpushed_cbv_fingerprint"
-      "\tdescriptor_table_fingerprint\tobserved_bindings"
+      "\tobserved_bindings"
+      "\troot_constant_first_fingerprint\troot_constant_last_fingerprint"
+      "\troot_constant_changed"
+      "\tpushed_cbv_first_fingerprint\tpushed_cbv_last_fingerprint"
+      "\tpushed_cbv_changed"
+      "\tdescriptor_table_first_fingerprint"
+      "\tdescriptor_table_last_fingerprint\tdescriptor_table_changed"
       "\trt0_blend\talpha_to_coverage\tdepth_test\tdepth_write"
       "\trender_target_count\tsample_count"
       "\tcommands\tsubmissions\tfirst_frame\tlast_frame\n";
@@ -153,10 +186,16 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
            << static_cast<int>(
                   (key.geometry.observations & wuwa_tfr::TraceObservedPass) !=
                   0)
-           << '\t' << Hex64(key.root_constant_fingerprint) << '\t'
-           << Hex64(key.pushed_cbv_fingerprint) << '\t'
-           << Hex64(key.descriptor_table_fingerprint) << '\t'
-           << static_cast<int>(key.observed_bindings) << '\t'
+           << '\t' << static_cast<int>(record.observed_bindings) << '\t'
+           << Hex64(record.root_constants.first_fingerprint) << '\t'
+           << Hex64(record.root_constants.last_fingerprint) << '\t'
+           << static_cast<int>(record.root_constants.changed) << '\t'
+           << Hex64(record.pushed_cbvs.first_fingerprint) << '\t'
+           << Hex64(record.pushed_cbvs.last_fingerprint) << '\t'
+           << static_cast<int>(record.pushed_cbvs.changed) << '\t'
+           << Hex64(record.descriptor_tables.first_fingerprint) << '\t'
+           << Hex64(record.descriptor_tables.last_fingerprint) << '\t'
+           << static_cast<int>(record.descriptor_tables.changed) << '\t'
            << static_cast<int>(record.pipeline.rt0_blend) << '\t'
            << static_cast<int>(record.pipeline.alpha_to_coverage) << '\t'
            << static_cast<int>(record.pipeline.depth_test) << '\t'
@@ -170,6 +209,18 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
   return static_cast<bool>(report);
 }
 
+// Fully verified: the shader has a successful inspection carrying at least
+// one fully verified Fade Primitive v1 instance. Reuses the existing Dev
+// inspection cache as the source of truth (dev/dev_inspection.hpp) instead
+// of running the matcher again here -- same success criterion the read-only
+// diagnostics panel already uses (dev/dev_overlay.cpp's
+// DrawFadePrimitiveTargetModes).
+bool IsVerifiedFadePrimitiveShaderLocked(std::uint64_t shader_hash) {
+  const auto it = g_inspections.find(shader_hash);
+  return it != g_inspections.end() && it->second.success &&
+      !it->second.fade_primitive.instances.empty();
+}
+
 }  // namespace
 
 void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
@@ -181,17 +232,43 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
           !trace->recorded_draw_capacity_exceeded))
     return;
 
+  // Snapshot the session's fixed filter mode without holding g_trace_mutex
+  // across the g_inspection_mutex lookups below -- lock order must never
+  // nest g_inspection_mutex inside g_trace_mutex.
+  ManualCaptureShaderFilter filter_mode;
+  {
+    std::lock_guard lock(g_trace_mutex);
+    if (g_manual_capture.state() != ManualCaptureState::Capturing) return;
+    filter_mode = g_manual_capture.active().shader_filter;
+  }
+
+  std::unordered_set<std::uint64_t> eligible_shader_hashes;
+  const bool filter_active =
+      filter_mode == ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly;
+  if (filter_active) {
+    std::unordered_set<std::uint64_t> observed_shader_hashes;
+    observed_shader_hashes.reserve(trace->recorded_draws.size());
+    for (const auto& [draw_key, draw] : trace->recorded_draws)
+      observed_shader_hashes.insert(draw.pipeline.shader_hash);
+
+    std::lock_guard inspection_lock(g_inspection_mutex);
+    for (const auto shader_hash : observed_shader_hashes) {
+      if (IsVerifiedFadePrimitiveShaderLocked(shader_hash))
+        eligible_shader_hashes.insert(shader_hash);
+    }
+  }
+
   std::lock_guard lock(g_trace_mutex);
   if (g_manual_capture.state() != ManualCaptureState::Capturing) return;
   if (trace->recorded_draw_capacity_exceeded)
     g_manual_capture.MarkCapacityExceeded();
   const std::uint64_t frame = g_manual_capture_frame_counter;
   for (const auto& [draw_key, draw] : trace->recorded_draws) {
-    const ManualCaptureRecordKey key{
-        draw_key.concrete.pso_incarnation, draw_key.concrete.geometry,
-        draw_key.concrete.pass_fingerprint, draw_key.root_constants,
-        draw_key.pushed_cbvs, draw_key.descriptor_tables,
-        draw_key.observed_bindings};
+    if (filter_active &&
+        !eligible_shader_hashes.contains(draw.pipeline.shader_hash))
+      continue;
+    const ManualCaptureRecordKey key{draw_key.concrete.pso_incarnation,
+        draw_key.concrete.geometry, draw_key.concrete.pass_fingerprint};
     const ManualCapturePipelineInfo pipeline{draw.pipeline.device,
         draw.pipeline.application_pipeline, draw.pipeline.incarnation_id,
         draw.pipeline.pso_fingerprint, draw.pipeline.context_hash,
@@ -199,7 +276,10 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
         draw.pipeline.rt0_blend, draw.pipeline.alpha_to_coverage,
         draw.pipeline.depth_test, draw.pipeline.depth_write,
         draw.pipeline.render_target_count, draw.pipeline.sample_count};
-    g_manual_capture.Accumulate(key, pipeline, draw.commands, frame);
+    const ManualCaptureBindingObservation binding{draw_key.root_constants,
+        draw_key.pushed_cbvs, draw_key.descriptor_tables,
+        draw_key.observed_bindings};
+    g_manual_capture.Accumulate(key, pipeline, draw.commands, frame, binding);
   }
 }
 
@@ -227,11 +307,18 @@ void RegisterManualCaptureEvents() {
 }
 
 void StartManualCapture() {
+  // Read on the ImGui render thread, same as the checkbox that sets it;
+  // Start() below copies the value into the session, which is what actually
+  // governs filtering from this point on.
+  const auto filter_mode = g_manual_capture_filter_pending_verified_only
+      ? ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly
+      : ManualCaptureShaderFilter::AllObservedPixelShaders;
+
   std::lock_guard lock(g_trace_mutex);
   ++g_manual_capture_generation;
   g_manual_capture_frame_counter = 0;
   g_manual_capture_swapchain = 0;
-  g_manual_capture.Start(g_manual_capture_generation, 0);
+  g_manual_capture.Start(g_manual_capture_generation, 0, filter_mode);
   g_manual_capture_active.store(true, std::memory_order_release);
   g_manual_capture_status = "capturing";
 }
@@ -282,6 +369,16 @@ void DrawManualCaptureOverlay() {
   const bool is_capturing = summary.state == ManualCaptureState::Capturing;
 
   ImGui::BeginDisabled(is_capturing);
+  ImGui::Checkbox("Verified Fade Primitive only",
+      &g_manual_capture_filter_pending_verified_only);
+  ImGui::EndDisabled();
+  ImGui::TextDisabled(
+      "Snapshotted when Start capture is pressed and fixed for that "
+      "session. Admits a Draw only when its Pixel Shader Hash already has a "
+      "successful inspection with a fully verified Fade Primitive v1 "
+      "instance; the matcher is not re-run here.");
+
+  ImGui::BeginDisabled(is_capturing);
   if (ImGui::Button("Start capture")) StartManualCapture();
   ImGui::EndDisabled();
   ImGui::SameLine();
@@ -298,6 +395,7 @@ void DrawManualCaptureOverlay() {
       : (summary.state == ManualCaptureState::Capturing ? "Capturing"
                                                           : "Captured");
   ImGui::Text("State: %s", state_name);
+  ImGui::Text("Filter: %s", ShaderFilterName(summary.shader_filter));
   ImGui::Text("Session: %llu",
       static_cast<unsigned long long>(summary.session_id));
   ImGui::Text("Presents: %llu",
