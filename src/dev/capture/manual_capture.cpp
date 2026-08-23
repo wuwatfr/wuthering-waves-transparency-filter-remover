@@ -347,17 +347,22 @@ bool StopAndExportManualCapture() {
   const bool exported =
       WriteManualCaptureExport(snapshot, timestamp, export_path);
   bool fade_control_exported = false;
+  bool fade_snapshot_exported = false;
   if (fade_control_was_enabled) {
     std::filesystem::path fade_control_path;
     fade_control_exported =
         WriteFadeControlExport(timestamp, fade_control_path);
+    std::filesystem::path fade_snapshot_path;
+    fade_snapshot_exported =
+        WriteFadeControlSnapshotExport(timestamp, fade_snapshot_path);
   }
   g_manual_capture_status = exported
       ? (fade_control_was_enabled
-                ? (fade_control_exported
-                          ? "exported manual capture + fade control values"
-                          : "exported manual capture; fade control export "
-                            "failed: check DumpPath")
+                ? ((fade_control_exported && fade_snapshot_exported)
+                          ? "exported manual capture + fade control values "
+                            "+ snapshots"
+                          : "exported manual capture; fade control/"
+                            "snapshot export failed: check DumpPath")
                 : "exported manual capture")
       : "export failed: check DumpPath";
   if (exported) g_manual_capture_last_export = export_path.filename().string();
@@ -459,6 +464,12 @@ void DrawManualCaptureOverlay() {
     if (fade_control.capacity_exceeded) {
       ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
           "Fade control value capacity reached; this trace is incomplete.");
+    }
+    ImGui::Text("Predicate CBV snapshots: %zu", fade_control.snapshot_count);
+    if (fade_control.snapshot_capacity_exceeded) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
+          "Snapshot capacity reached; some predicate bindings were not "
+          "snapshotted.");
     }
   }
 }

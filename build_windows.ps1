@@ -143,6 +143,7 @@ $testTargets = @(
     'fade_control_analysis_tests',
     'fade_control_state_tests',
     'descriptor_table_state_tests',
+    'fade_control_snapshot_tests',
     'trace_submission_identity_tests',
     'manual_capture_state_tests',
     'single_flight_cache_tests',

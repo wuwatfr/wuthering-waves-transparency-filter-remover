@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "dev/capture/descriptor_table_state.hpp"
+#include "dev/capture/fade_control_snapshot.hpp"
 #include "dev/capture/manual_capture_state.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
@@ -28,6 +29,10 @@ namespace {
 // this module's header comment).
 std::mutex g_fade_control_mutex;
 FadeControlAccumulator g_fade_control_accumulator;
+// Strictly additive: captured only after a value already sampled via
+// g_fade_control_accumulator above succeeds; shares its session lifecycle
+// (Start/Stop) and its g_fade_control_mutex, never a separate one.
+FadeControlSnapshotAccumulator g_fade_control_snapshot_accumulator;
 bool g_fade_control_session_enabled = false;
 
 // Fast unlocked check so the Draw-time hook costs nothing when inactive.
@@ -394,6 +399,37 @@ FadeControlValueSample Unavailable(std::uint16_t reason) noexcept {
   return FadeControlValueSample{false, 0, reason};
 }
 
+// Strictly additive to the single-value sample above: attempts a bounded
+// byte-window snapshot around `predicate_vector` for a Predicate-role
+// source whose value was JUST successfully read from mapped memory. A
+// no-op unless capturing is active and this exact (key) has not already
+// been captured this session (see FadeControlSnapshotAccumulator::
+// ShouldCapture) -- checked first specifically so an already-satisfied
+// dedup never pays for the window/copy work below. Must be called while
+// g_fade_control_mutex is already held.
+void TryCaptureFadeControlSnapshot(const FadeControlRecordKey& key,
+    const FadeControlPipelineIdentity& pipeline_identity,
+    std::uint64_t cbv_offset, std::uint32_t predicate_vector,
+    const MappedBufferInfo& mapped) {
+  if (!g_fade_control_snapshot_accumulator.ShouldCapture(key)) return;
+
+  const auto window = ResolveFadeControlSnapshotWindow(cbv_offset,
+      predicate_vector, kFadeControlSnapshotVectorRadius, mapped.offset,
+      mapped.offset + mapped.size);
+  if (!window.valid) return;
+
+  FadeControlSnapshotRecord record;
+  record.pipeline = pipeline_identity;
+  record.cbv_offset = cbv_offset;
+  record.mapped_range_offset = mapped.offset;
+  record.mapped_range_size = mapped.size;
+  record.window_start = window.start;
+  record.window_size = window.size;
+  const std::byte* source_bytes = mapped.base + (window.start - mapped.offset);
+  std::memcpy(record.raw_bytes.data(), source_bytes, window.size);
+  g_fade_control_snapshot_accumulator.Commit(key, record);
+}
+
 // Shared tail of both binding routes below: given a resolved live resource
 // handle + range offset, looks up the currently mapped region (if any),
 // bounds-checks the target 4 bytes, and folds the sample into the bounded
@@ -424,6 +460,11 @@ void ObserveMappedCbvValue(const FadeControlRecordKey& key,
   std::memcpy(&bits, source_bytes, sizeof(bits));
   g_fade_control_accumulator.Observe(
       key, pipeline_identity, FadeControlValueSample{true, bits, 0});
+
+  if (key.role == FadeControlRole::Predicate) {
+    TryCaptureFadeControlSnapshot(
+        key, pipeline_identity, range_offset, vector_index, mapped_it->second);
+  }
 }
 
 // Attempts the root/pushed-CBV route: does `source`'s register resolve
@@ -590,6 +631,22 @@ std::string SampleFilenameStem(const std::string& timestamp) {
   return "manual-fade-controls-" + timestamp;
 }
 
+std::string SnapshotFilenameStem(const std::string& timestamp) {
+  return "manual-fade-snapshots-" + timestamp;
+}
+
+std::string BytesToHex(const std::byte* bytes, std::uint64_t size) {
+  static constexpr char kDigits[] = "0123456789abcdef";
+  std::string text;
+  text.resize(static_cast<std::size_t>(size) * 2);
+  for (std::uint64_t i = 0; i < size; ++i) {
+    const auto byte = static_cast<unsigned char>(bytes[i]);
+    text[static_cast<std::size_t>(i) * 2] = kDigits[byte >> 4];
+    text[static_cast<std::size_t>(i) * 2 + 1] = kDigits[byte & 0xF];
+  }
+  return text;
+}
+
 }  // namespace
 
 void RegisterFadeControlRuntimeEvents() {
@@ -620,7 +677,10 @@ void SetFadeControlCapturePending(bool enabled) {
 void StartFadeControlCapture(std::uint64_t session_id, bool enabled) {
   std::lock_guard lock(g_fade_control_mutex);
   g_fade_control_session_enabled = enabled;
-  if (enabled) g_fade_control_accumulator.Start(session_id);
+  if (enabled) {
+    g_fade_control_accumulator.Start(session_id);
+    g_fade_control_snapshot_accumulator.Start(session_id);
+  }
   g_fade_control_active.store(enabled, std::memory_order_release);
 }
 
@@ -629,6 +689,7 @@ bool StopFadeControlCapture() {
   g_fade_control_active.store(false, std::memory_order_release);
   if (!g_fade_control_session_enabled) return false;
   g_fade_control_accumulator.Stop();
+  g_fade_control_snapshot_accumulator.Stop();
   return true;
 }
 
@@ -647,6 +708,12 @@ FadeControlDiagnosticCounters GetFadeControlDiagnosticCounters() {
     counters.unavailable_values += record.stats.unavailable_observations;
   }
   counters.capacity_exceeded = result.capacity_exceeded;
+
+  const auto& snapshot_result = g_fade_control_snapshot_accumulator.active()
+      ? g_fade_control_snapshot_accumulator.active_snapshot()
+      : g_fade_control_snapshot_accumulator.last_result();
+  counters.snapshot_count = snapshot_result.snapshots.size();
+  counters.snapshot_capacity_exceeded = snapshot_result.capacity_exceeded;
   return counters;
 }
 
@@ -789,6 +856,113 @@ bool WriteFadeControlExport(
     }
     report << '\t' << static_cast<int>(record.stats.unavailable_reason_mask)
            << '\n';
+  }
+
+  report.flush();
+  return static_cast<bool>(report);
+}
+
+bool WriteFadeControlSnapshotExport(
+    const std::string& timestamp, std::filesystem::path& out_path) {
+  FadeControlSnapshotSet snapshot_set;
+  {
+    std::lock_guard lock(g_fade_control_mutex);
+    if (!g_fade_control_session_enabled) return false;
+    snapshot_set = g_fade_control_snapshot_accumulator.last_result();
+  }
+
+  const auto directory = DumpDir();
+  if (directory.empty()) return false;
+  const std::string filename = AllocateExportFilename(
+      SnapshotFilenameStem(timestamp), ".tsv",
+      [&directory](const std::string& candidate) {
+        return std::filesystem::exists(directory / candidate);
+      });
+  out_path = directory / filename;
+
+  std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
+  if (!report) return false;
+
+  report << "format\twuwa_tfr_manual_fade_control_snapshot_v1\n";
+  report << "capture_type\tmanual_targeted_fade_predicate_cbv_byte_window\n";
+  report << "session_id\t" << snapshot_set.session_id << '\n';
+  report << "record_count\t" << snapshot_set.snapshots.size() << '\n';
+  report << "capacity_exceeded\t"
+         << static_cast<int>(snapshot_set.capacity_exceeded) << '\n';
+  report << "export_timestamp_local\t" << timestamp << '\n';
+  report << "value_observation\t"
+      "cpu_command_recording_time_observation_of_mapped_constant_buffer_"
+      "memory_not_gpu_completion_not_proof_of_value_ultimately_consumed_"
+      "by_gpu_if_application_violates_normal_upload_buffer_"
+      "synchronization\n";
+  report << "scope\t"
+      "predicate_role_sources_only_that_already_successfully_resolved_and_"
+      "sampled_via_manual_fade_controls_tsv_coverage_sources_and_"
+      "unavailable_predicates_are_never_snapshotted\n";
+  report << "dedup_policy\t"
+      "at_most_one_snapshot_per_unique_route_primitive_control_role_static_"
+      "source_resolved_runtime_binding_first_successful_capture_this_"
+      "session_wins_and_is_never_overwritten_by_a_later_draw_of_the_same_"
+      "identity\n";
+  report << "vector_window_policy\t"
+      "vectors_predicate_vector_minus_16_through_predicate_vector_plus_16_"
+      "inclusive_16_bytes_per_vector_clamped_to_the_currently_mapped_"
+      "regions_real_extent_mapped_range_offset_and_mapped_range_size_"
+      "columns_record_exactly_what_that_extent_was\n";
+  report << "cbv_range_caveat\t"
+      "mapped_range_is_the_only_verified_real_extent_available_for_a_root_"
+      "pushed_cbv_d3d12_reports_no_declared_size_at_all_so_the_window_may_"
+      "extend_beyond_the_predicates_own_logical_cbuffer_into_neighboring_"
+      "data_if_the_application_suballocates_multiple_cbvs_from_one_larger_"
+      "mapped_resource\n";
+  report << "record_identity\t"
+      "identical_to_manual_fade_controls_tsv_stable_draw_route_plus_pixel_"
+      "shader_plus_primitive_index_plus_predicate_source_plus_resolved_"
+      "runtime_cbv_binding\n";
+
+  report << "device\tapplication_pso\tpso_incarnation\tpso_context_hash"
+      "\tpixel_shader_hash"
+      "\tdraw_kind\tgeometry_fingerprint\tpass_fingerprint"
+      "\tprimitive_index"
+      "\tcbuffer_space\tcbuffer_register\tpredicate_vector_index\tcomponent"
+      "\tbinding_route\truntime_resource_incarnation"
+      "\tcbv_offset\tmapped_range_offset\tmapped_range_size"
+      "\tsnapshot_byte_offset\tsnapshot_byte_size"
+      "\traw_bytes_hex\tfloat32_values\n";
+
+  for (const auto& [key, record] : snapshot_set.snapshots) {
+    const char* binding_route =
+        key.binding_route == FadeControlBindingRoute::RootPushDescriptors
+        ? "root_push_descriptors"
+        : key.binding_route == FadeControlBindingRoute::DescriptorTable
+            ? "descriptor_table"
+            : "unresolved";
+
+    report << Hex64(record.pipeline.device) << '\t'
+           << Hex64(record.pipeline.application_pso) << '\t'
+           << record.pipeline.pso_incarnation << '\t'
+           << Hex64(record.pipeline.pso_context_hash) << '\t'
+           << Hex64(record.pipeline.pixel_shader_hash) << '\t'
+           << TraceDrawKindName(key.route.geometry.kind) << '\t'
+           << Hex64(static_cast<std::uint64_t>(
+                  wuwa_tfr::TraceGeometryKeyHash{}(key.route.geometry)))
+           << '\t' << Hex64(key.route.pass_fingerprint) << '\t'
+           << key.primitive_index << '\t' << key.cbuffer_space << '\t'
+           << key.cbuffer_register << '\t' << key.vector_index << '\t'
+           << key.component << '\t' << binding_route << '\t'
+           << key.runtime_resource_incarnation << '\t' << record.cbv_offset
+           << '\t' << record.mapped_range_offset << '\t'
+           << record.mapped_range_size << '\t' << record.window_start << '\t'
+           << record.window_size << '\t'
+           << BytesToHex(record.raw_bytes.data(), record.window_size) << '\t';
+
+    for (std::uint64_t i = 0; i + 4 <= record.window_size; i += 4) {
+      if (i != 0) report << ';';
+      float value = 0.0f;
+      std::memcpy(&value, record.raw_bytes.data() + i, sizeof(value));
+      report << value;
+    }
+    report << '\n';
   }
 
   report.flush();

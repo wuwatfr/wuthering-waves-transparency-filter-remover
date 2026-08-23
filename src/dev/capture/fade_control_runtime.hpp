@@ -78,6 +78,11 @@ struct FadeControlDiagnosticCounters {
   std::uint64_t sampled_values = 0;
   std::uint64_t unavailable_values = 0;
   bool capacity_exceeded = false;
+  // Distinct predicate CBV byte-window snapshots captured this session (see
+  // dev/capture/fade_control_snapshot.hpp) -- at most one per unique
+  // resolved predicate binding, independent of sampled_values above.
+  std::size_t snapshot_count = 0;
+  bool snapshot_capacity_exceeded = false;
 };
 FadeControlDiagnosticCounters GetFadeControlDiagnosticCounters();
 
@@ -89,6 +94,17 @@ FadeControlDiagnosticCounters GetFadeControlDiagnosticCounters();
 // Returns false (out_path left untouched) if value tracing was never
 // enabled for the session, or if the export itself fails.
 bool WriteFadeControlExport(
+    const std::string& timestamp, std::filesystem::path& out_path);
+
+// Writes the session's captured predicate CBV byte-window snapshots (see
+// dev/capture/fade_control_snapshot.hpp) to a separate, timestamped,
+// collision-free TSV (manual-fade-snapshots-*.tsv), alongside (never in
+// place of) the route and per-value-stats TSVs. Same enable/timestamp
+// contract as WriteFadeControlExport: returns false (out_path untouched) if
+// value tracing was never enabled for the session, or the export itself
+// fails. A session with tracing enabled but zero verified predicates ever
+// resolving to mapped memory still succeeds, producing a header-only file.
+bool WriteFadeControlSnapshotExport(
     const std::string& timestamp, std::filesystem::path& out_path);
 
 // The Draw-time sampling hook: called once per recorded Draw from
