@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.0.0 - 2026-08-23
+
 ### Changed
 
 - Make fade-primitive detection and patching function-scoped, with exact SSA
