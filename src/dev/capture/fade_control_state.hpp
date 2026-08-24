@@ -1,16 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
-//
-// Dev-only, ReShade-independent pieces of the targeted Fade control-value
-// tracer: the byte-offset formula, the mapped-region bounds check, and the
-// bounded per-route aggregation state. See dev/capture/fade_control_runtime.*
-// for the ReShade-facing pipeline-layout/mapped-buffer tracking, the
-// Draw-time sampling hook, and TSV export that drive this state.
-//
-// Every value here is a CPU command-recording-time observation of mapped
-// constant-buffer memory (see fade_control_runtime.hpp's module comment for
-// the full disclosure) -- never GPU completion evidence, never proof of the
-// value the GPU ultimately consumed.
 
 #pragma once
 
@@ -25,67 +14,22 @@
 
 namespace wuwa_tfr::dev {
 
-// Predicate is the CBV value gating entry to the Fade arm (the matcher's
-// own gate-predicate evidence, fade_primitive_detector.hpp). PreFadeOperand
-// One/Two are the two direct-scalar-CBV operands of the verified instance's
-// matched pre-Fade FMin (pre_fade_fmin_analysis.hpp) -- the values Production
-// itself reads/rewrites, structurally proven. There is no single "coverage"
-// source: an earlier Dev-only analyzer modeled one, but it resolved to
-// neither operand for any real matched instance (its own single-CBV-load
-// search was structurally guaranteed to find the FMin's two loads and treat
-// that as ambiguous) -- see this project's Step 5/6B investigation.
 enum class FadeControlRole : std::uint8_t {
   Predicate,
   PreFadeOperandOne,
   PreFadeOperandTwo,
 };
 
-// Bit flags: a single value observation can only be unavailable for one
-// reason, but a record's *aggregated* mask can carry several across its
-// lifetime (e.g. mapped early, unmapped later in the same session).
-// uint16_t (not uint8_t): eight reasons already exist and D3D12's binding
-// forms are not yet exhaustively covered, so headroom is kept deliberately
-// rather than economizing bits.
 constexpr std::uint16_t kFadeControlReasonNotMapped = 1u << 0;
 constexpr std::uint16_t kFadeControlReasonOutOfRange = 1u << 1;
 constexpr std::uint16_t kFadeControlReasonBindingUnresolved = 1u << 2;
 constexpr std::uint16_t kFadeControlReasonSourceUnresolved = 1u << 3;
 constexpr std::uint16_t kFadeControlReasonUnsupportedBindingRoute = 1u << 4;
-// The descriptor-table-backed route was statically resolved, but the
-// bind_descriptor_tables call establishing it carried a nonzero
-// dynamic_offset_count -- see descriptor_table_state.hpp's
-// DescriptorTableBindingHasExactDynamicOffsets. Never observed on the
-// D3D12 backend today; kept explicit rather than assumed.
 constexpr std::uint16_t kFadeControlReasonDynamicOffsetUnresolved = 1u << 5;
-// The descriptor-table slot's cached resource incarnation no longer
-// matches the resource's current one: it was written once (typically at
-// resource-allocation time) and the underlying resource has since been
-// destroyed and its handle reused, without an intervening
-// update_descriptor_tables/copy_descriptor_tables call re-establishing this
-// slot. Rejected rather than trusted -- see
-// descriptor_table_state.hpp's DescriptorSlotContentIsCurrent.
 constexpr std::uint16_t kFadeControlReasonStaleDescriptorBinding = 1u << 6;
-// The register resolves to a currently-bound descriptor table (the root
-// parameter itself IS bound), but this exact table-relative slot has never
-// been observed via update_descriptor_tables/copy_descriptor_tables --
-// distinct from BindingUnresolved, which means no table at all is
-// currently bound to that root parameter.
 constexpr std::uint16_t kFadeControlReasonDescriptorUnknown = 1u << 7;
-// The register is declared as a pipeline_layout_param_type::push_constants
-// range (root constants), not any CBV descriptor form -- diagnostic only.
-// Root constants are a fundamentally different D3D12 binding mechanism
-// (32-bit values embedded directly in the command list, not a Constant
-// Buffer View), so this tracer -- scoped to CBVs -- does not attempt to
-// sample them; this reason exists purely so a real capture can prove or
-// rule out this exact cause when a predicate/pre-Fade-operand source is
-// otherwise unresolved.
 constexpr std::uint16_t kFadeControlReasonPushConstantBacked = 1u << 8;
 
-// Which binding mechanism resolved this record's live CBV, independent of
-// whether the byte value itself was ultimately readable. Distinct from
-// "unavailable_reason": a record can be RootPushDescriptors or
-// DescriptorTable and still report not_mapped/out_of_range for a given
-// observation.
 enum class FadeControlBindingRoute : std::uint8_t {
   Unresolved,
   RootPushDescriptors,
@@ -95,19 +39,12 @@ enum class FadeControlBindingRoute : std::uint8_t {
 constexpr std::size_t kMaxFadeControlDistinctValues = 32;
 constexpr std::size_t kMaxFadeControlRecords = 4096;
 
-// range_offset + vector_index * 16 + component * 4: a cbufferLoadLegacy row
-// is a 16-byte-aligned vector of four 4-byte lanes, and range_offset is the
-// live CBV binding's byte offset into the backing resource.
 constexpr std::uint64_t ResolveFadeControlByteOffset(std::uint64_t range_offset,
     std::uint32_t vector_index, std::uint32_t component) noexcept {
   return range_offset + static_cast<std::uint64_t>(vector_index) * 16 +
       static_cast<std::uint64_t>(component) * 4;
 }
 
-// True only when the whole 4-byte value at `byte_offset` lies entirely
-// inside [mapped_offset, mapped_offset + mapped_size). Pure so the bounds
-// arithmetic (including overflow/underflow at the edges) is unit-testable
-// without a real mapped pointer.
 constexpr bool FadeControlByteOffsetInMappedRegion(std::uint64_t byte_offset,
     std::uint64_t mapped_offset, std::uint64_t mapped_size) noexcept {
   if (byte_offset < mapped_offset) return false;
@@ -115,9 +52,6 @@ constexpr bool FadeControlByteOffsetInMappedRegion(std::uint64_t byte_offset,
   return relative <= mapped_size && mapped_size - relative >= 4;
 }
 
-// One Draw-time observation attempt, already resolved to either a raw
-// 32-bit value or a reason it could not be read. Never a silently
-// substituted zero.
 struct FadeControlValueSample {
   bool available = false;
   std::uint32_t raw_bits = 0;
@@ -129,9 +63,6 @@ struct FadeControlDistinctValue {
   std::uint64_t count = 0;
 };
 
-// Bounded (kMaxFadeControlDistinctValues) per-value-source statistics.
-// Deliberately not a std::vector/std::unordered_set of unbounded size: the
-// distinct-value table is a fixed array with an explicit overflow flag.
 struct FadeControlValueStats {
   std::uint64_t draw_observations = 0;
   std::uint64_t available_observations = 0;
@@ -152,12 +83,6 @@ struct FadeControlValueStats {
   void Observe(const FadeControlValueSample& sample);
 };
 
-// Identity for one accumulated control-value record: the stable execution
-// route (same identity the manual capture and concrete trace already use),
-// the primitive within its shader, which control role, the proven static
-// source, and the resolved runtime CBV binding. Two Draws that differ in
-// any of these are never merged -- see fade_control_state.cpp's tests for
-// why each field is load-bearing.
 struct FadeControlRecordKey {
   wuwa_tfr::TraceConcreteDrawKey route;
   std::uint32_t primitive_index = 0;
@@ -168,13 +93,6 @@ struct FadeControlRecordKey {
   std::uint32_t component = 0;
   std::uint64_t runtime_resource_incarnation = 0;
   std::uint64_t runtime_range_offset = 0;
-  // Which binding mechanism produced runtime_resource_incarnation above --
-  // load-bearing for identity because RootPushDescriptors and
-  // DescriptorTable resolutions are resolved through two independent
-  // incarnation counters (dev/trace/trace_state.hpp's resource-incarnation
-  // index for the former, fade_control_runtime.cpp's own for the latter),
-  // whose numeric values are not mutually comparable and could otherwise
-  // coincidentally collide.
   FadeControlBindingRoute binding_route = FadeControlBindingRoute::Unresolved;
 
   friend bool operator==(
@@ -198,9 +116,6 @@ struct FadeControlRecordKeyHash {
   }
 };
 
-// Pipeline/shader identity copied verbatim at first-observation time, for
-// export only -- never recomputed here. Mirrors
-// dev/capture/manual_capture_state.hpp's ManualCapturePipelineInfo split.
 struct FadeControlPipelineIdentity {
   std::uint64_t device = 0;
   std::uint64_t application_pso = 0;
@@ -220,22 +135,14 @@ struct FadeControlSnapshot {
   std::vector<std::pair<FadeControlRecordKey, FadeControlRecord>> records;
 };
 
-// Not internally synchronized -- the caller (dev/capture/fade_control_runtime.cpp)
-// serializes access under its own dedicated mutex, deliberately independent
-// of g_trace_mutex/g_inspection_mutex (see that file's module comment for
-// the lock-ordering rationale).
 class FadeControlAccumulator {
  public:
   void Start(std::uint64_t session_id);
 
-  // No-op outside an active session. Folds one Draw-time observation into
-  // the bounded aggregate for `key`.
   void Observe(const FadeControlRecordKey& key,
       const FadeControlPipelineIdentity& pipeline,
       const FadeControlValueSample& sample);
 
-  // Freezes the active session into last_result() and returns a copy.
-  // No-op (returns a default, empty snapshot) outside an active session.
   FadeControlSnapshot Stop();
 
   bool active() const noexcept { return active_; }
@@ -254,4 +161,4 @@ class FadeControlAccumulator {
       index_;
 };
 
-}  // namespace wuwa_tfr::dev
+}
