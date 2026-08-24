@@ -207,6 +207,14 @@ Write-Host 'Compiling developer add-on...'
 & $cmake.Source --build $build --config Release --target WuwaTFRDev
 if ($LASTEXITCODE -ne 0) { Fail 'Developer add-on compilation failed. See the compiler errors above.' }
 
+# Offline analysis tools (EXCLUDE_FROM_ALL: they read a directory of dumped
+# shaders, not a build/runtime dependency, so they never ship). Compiled
+# here only so a change to the shared matcher/analysis sources can't
+# silently break them between real uses.
+Write-Host 'Compiling offline audit tools...'
+& $cmake.Source --build $build --config Release --target fade_primitive_audit pre_fade_fmin_audit
+if ($LASTEXITCODE -ne 0) { Fail 'Offline audit tool compilation failed. See the compiler errors above.' }
+
 $addon = Get-ChildItem -Path $build -Recurse -Filter 'WuwaTFR.addon64' -File | Select-Object -First 1
 $devAddon = Get-ChildItem -Path $build -Recurse -Filter 'WuwaTFRDev.addon64' -File | Select-Object -First 1
 if (-not $addon) { Fail 'Build succeeded but WuwaTFR.addon64 was not found.' }
