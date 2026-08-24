@@ -178,6 +178,7 @@ $testTargets = @(
     'resource_lifecycle_state_tests',
     'single_flight_cache_tests',
     'memory_telemetry_tests',
+    'trace_submission_presence_tests',
     'complete_dxil_validation_tests'
 )
 

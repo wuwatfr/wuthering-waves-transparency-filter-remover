@@ -144,4 +144,12 @@ std::string AllocateExportFilename(const std::string& stem,
     const std::string& extension,
     const std::function<bool(const std::string&)>& exists);
 
+// Multi-file counterpart of AllocateExportFilename: allocates one shared
+// suffix (none, then "-1", "-2", ...) applied to every stem so a group of
+// files from the same export stays correlated by that suffix, instead of
+// each file independently drifting to a different collision suffix.
+std::vector<std::string> AllocateExportFilenameGroup(
+    const std::vector<std::string>& stems, const std::string& extension,
+    const std::function<bool(const std::string&)>& exists);
+
 }

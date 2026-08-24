@@ -10,6 +10,7 @@
 namespace {
 
 using wuwa_tfr::dev::AllocateExportFilename;
+using wuwa_tfr::dev::AllocateExportFilenameGroup;
 using wuwa_tfr::dev::ManualCaptureAccumulator;
 using wuwa_tfr::ExecutionPipelineIdentity;
 using wuwa_tfr::dev::ManualCaptureBindingObservation;
@@ -372,6 +373,67 @@ int main() {
     };
     CHECK(AllocateExportFilename("stem", ".tsv", exists) ==
         "stem-" + std::to_string(kMaxExportFilenameAttempts) + ".tsv");
+  }
+
+  // AllocateExportFilenameGroup: first export of a group gets the bare
+  // stem+extension for every member -- no group member exists yet.
+  {
+    std::unordered_set<std::string> existing;
+    const auto exists = [&existing](const std::string& candidate) {
+      return existing.contains(candidate);
+    };
+    const auto filenames = AllocateExportFilenameGroup(
+        {"runtime-trace-20260825-071000",
+            "concrete-submission-trace-20260825-071000",
+            "lifecycle-ambiguities-20260825-071000"},
+        ".tsv", exists);
+    CHECK(filenames.size() == 3);
+    CHECK(filenames[0] == "runtime-trace-20260825-071000.tsv");
+    CHECK(filenames[1] == "concrete-submission-trace-20260825-071000.tsv");
+    CHECK(filenames[2] == "lifecycle-ambiguities-20260825-071000.tsv");
+  }
+
+  // A collision on just ONE member of the group must not leave the group
+  // correlated by different suffixes -- every filename advances together.
+  {
+    std::unordered_set<std::string> existing = {
+        "runtime-trace-20260825-071000.tsv"};
+    const auto exists = [&existing](const std::string& candidate) {
+      return existing.contains(candidate);
+    };
+    const auto filenames = AllocateExportFilenameGroup(
+        {"runtime-trace-20260825-071000",
+            "concrete-submission-trace-20260825-071000",
+            "lifecycle-ambiguities-20260825-071000"},
+        ".tsv", exists);
+    CHECK(filenames[0] == "runtime-trace-20260825-071000-1.tsv");
+    CHECK(filenames[1] == "concrete-submission-trace-20260825-071000-1.tsv");
+    CHECK(filenames[2] == "lifecycle-ambiguities-20260825-071000-1.tsv");
+
+    // None of the previously-allocated group's files were touched by the
+    // second allocation: the caller never even queried a name that
+    // resolves to something already in `existing` beyond the one seed.
+    CHECK(existing.size() == 1);
+  }
+
+  // A second collision (this time hitting a different member than before)
+  // still advances the whole group together, to "-2".
+  {
+    std::unordered_set<std::string> existing = {
+        "runtime-trace-20260825-071000.tsv",
+        "runtime-trace-20260825-071000-1.tsv",
+        "lifecycle-ambiguities-20260825-071000-1.tsv"};
+    const auto exists = [&existing](const std::string& candidate) {
+      return existing.contains(candidate);
+    };
+    const auto filenames = AllocateExportFilenameGroup(
+        {"runtime-trace-20260825-071000",
+            "concrete-submission-trace-20260825-071000",
+            "lifecycle-ambiguities-20260825-071000"},
+        ".tsv", exists);
+    CHECK(filenames[0] == "runtime-trace-20260825-071000-2.tsv");
+    CHECK(filenames[1] == "concrete-submission-trace-20260825-071000-2.tsv");
+    CHECK(filenames[2] == "lifecycle-ambiguities-20260825-071000-2.tsv");
   }
 
   return 0;

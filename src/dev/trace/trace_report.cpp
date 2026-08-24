@@ -4,12 +4,14 @@
 #include "dev/trace/trace_report.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 
 #include <Windows.h>
 
+#include "dev/capture/manual_capture_state.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/trace/trace_events.hpp"
 
@@ -57,11 +59,20 @@ bool WriteTraceReport() {
   if (directory.empty()) return false;
   const auto rows = TraceSnapshot();
 
+  const std::string timestamp = LocalExportTimestamp();
+  const auto filenames = AllocateExportFilenameGroup(
+      {"runtime-trace-" + timestamp, "concrete-submission-trace-" + timestamp,
+          "lifecycle-ambiguities-" + timestamp},
+      ".tsv", [&directory](const std::string& candidate) {
+        return std::filesystem::exists(directory / candidate);
+      });
+
   std::ofstream report(
-      directory / "runtime-trace.tsv",
+      directory / filenames[0],
       std::ios::binary | std::ios::trunc);
   if (!report) return false;
   report << "format\twuwa_tfr_runtime_trace_v5\n";
+  report << "export_timestamp_local\t" << timestamp << "\n";
   report << "source\twuthering_waves_runtime\n";
   report << "capture_window_mutation\tnone\n";
   report << "evidence\tsearch_clues_only_not_camera_fade_positive\n";
@@ -155,10 +166,11 @@ bool WriteTraceReport() {
 
   const auto concrete_rows = ConcreteTraceSnapshot();
   std::ofstream concrete_report(
-      directory / "concrete-submission-trace.tsv",
+      directory / filenames[1],
       std::ios::binary | std::ios::trunc);
   if (!concrete_report) return false;
   concrete_report << "format\twuwa_tfr_concrete_submission_trace_v2\n";
+  concrete_report << "export_timestamp_local\t" << timestamp << "\n";
   concrete_report << "source\twuthering_waves_runtime\n";
   concrete_report << "capture_window_mutation\tnone\n";
   concrete_report << "meaning\tgeometry_exact_pass_route_cpu_queue_submission_observation_only\n";
@@ -239,10 +251,11 @@ bool WriteTraceReport() {
   if (!concrete_report) return false;
 
   std::ofstream ambiguity_report(
-      directory / "lifecycle-ambiguities.tsv",
+      directory / filenames[2],
       std::ios::binary | std::ios::trunc);
   if (!ambiguity_report) return false;
   ambiguity_report << "format\twuwa_tfr_lifecycle_ambiguities_v2\n";
+  ambiguity_report << "export_timestamp_local\t" << timestamp << "\n";
   ambiguity_report << "source\twuthering_waves_runtime\n";
   ambiguity_report << "capture_scope\tnormal_through_full_window_experiment\n";
   ambiguity_report <<

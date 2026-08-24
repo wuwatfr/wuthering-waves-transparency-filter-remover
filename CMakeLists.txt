@@ -59,8 +59,14 @@ target_include_directories(dxil_ir_lexer_tests PRIVATE src)
 add_executable(fade_primitive_audit EXCLUDE_FROM_ALL
   tools/fade_primitive_audit.cpp
   src/fade_primitive_detector.cpp
-  src/dxil_ir_lexer.cpp)
+  src/dxil_ir_lexer.cpp
+  src/trace_submission_presence.cpp)
 target_include_directories(fade_primitive_audit PRIVATE src)
+
+add_executable(trace_submission_presence_tests
+  tests/test_trace_submission_presence.cpp
+  src/trace_submission_presence.cpp)
+target_include_directories(trace_submission_presence_tests PRIVATE src)
 
 add_executable(pre_fade_fmin_audit EXCLUDE_FROM_ALL
   tools/pre_fade_fmin_audit.cpp
@@ -148,6 +154,7 @@ add_test(NAME manual_capture_state_tests COMMAND manual_capture_state_tests)
 add_test(NAME fade_control_membership_tests COMMAND fade_control_membership_tests)
 add_test(NAME resource_lifecycle_state_tests COMMAND resource_lifecycle_state_tests)
 add_test(NAME single_flight_cache_tests COMMAND single_flight_cache_tests)
+add_test(NAME trace_submission_presence_tests COMMAND trace_submission_presence_tests)
 add_test(NAME memory_telemetry_tests COMMAND memory_telemetry_tests
   "${CMAKE_SOURCE_DIR}/src/production/production_module.cpp" "${CMAKE_SOURCE_DIR}/WuwaTFR.ini")
 

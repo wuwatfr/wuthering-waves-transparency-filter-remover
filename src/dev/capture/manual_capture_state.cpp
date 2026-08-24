@@ -131,4 +131,26 @@ std::string AllocateExportFilename(const std::string& stem,
   return candidate;
 }
 
+std::vector<std::string> AllocateExportFilenameGroup(
+    const std::vector<std::string>& stems, const std::string& extension,
+    const std::function<bool(const std::string&)>& exists) {
+  const auto group_is_free = [&](const std::string& suffix) {
+    for (const auto& stem : stems) {
+      if (exists(stem + suffix + extension)) return false;
+    }
+    return true;
+  };
+  std::string suffix;
+  if (!group_is_free(suffix)) {
+    for (int attempt = 1; attempt <= kMaxExportFilenameAttempts; ++attempt) {
+      suffix = "-" + std::to_string(attempt);
+      if (group_is_free(suffix)) break;
+    }
+  }
+  std::vector<std::string> filenames;
+  filenames.reserve(stems.size());
+  for (const auto& stem : stems) filenames.push_back(stem + suffix + extension);
+  return filenames;
+}
+
 }
