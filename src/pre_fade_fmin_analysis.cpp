@@ -274,8 +274,9 @@ bool ParseCBufferLoadLegacy(std::string_view rhs, CBufferLoadLegacy& out) {
 }
 
 // The byte-addressed form, dx.op.cbufferLoad.f32. Same split as the legacy
-// form: structure (return type, intrinsic, opcode, SSA handle) is required;
-// the literal byte offset is diagnostic-only.
+// form: structure (return type, intrinsic, opcode, SSA handle, and the exact
+// operand arity DXC's validator requires) is proof; the literal byte offset
+// is diagnostic-only.
 struct CBufferLoadByte {
   std::string_view handle;
   bool byte_offset_resolved = false;
@@ -302,16 +303,21 @@ bool ParseCBufferLoadByte(std::string_view rhs, CBufferLoadByte& out) {
   while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
     ++cursor;
   start = cursor;
-  // dx.op.cbufferLoad takes (opcode, handle, byteOffset, alignment); stop at
-  // the alignment operand when one is present, otherwise at the closing paren.
+  // dx.op.cbufferLoad is exactly (opcode, handle, byteOffset, alignment) --
+  // DxilInst_CBufferLoad::isArgumentListValid() requires all four -- so the
+  // alignment operand must be there. Any other arity is not this intrinsic.
   while (cursor < rhs.size() && rhs[cursor] != ')' && rhs[cursor] != ',') ++cursor;
-  if (cursor == rhs.size()) return false;  // no closing parenthesis
+  if (cursor == rhs.size() || rhs[cursor] != ',') return false;
   const std::string_view offset_text = Trim(rhs.substr(start, cursor - start));
   if (!IsWellFormedIndexOperand(offset_text)) return false;
-  if (rhs[cursor] == ',') {
-    while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
-    if (cursor == rhs.size()) return false;
-  }
+  ++cursor;
+  if (!ConsumeToken(rhs, cursor, "i32")) return false;
+  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
+    ++cursor;
+  start = cursor;
+  while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
+  if (cursor == rhs.size()) return false;  // no closing parenthesis
+  if (!IsWellFormedIndexOperand(Trim(rhs.substr(start, cursor - start)))) return false;
   if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
   out.byte_offset_resolved = ParseDecimalU32(offset_text, out.byte_offset);
   return true;

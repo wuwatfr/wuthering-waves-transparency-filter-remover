@@ -240,6 +240,17 @@ int main() {
     CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
   }
 
+  // dx.op.cbufferLoad is exactly (opcode, handle, byteOffset, alignment);
+  // DXC's own validator rejects any other arity, so neither may this parser
+  // accept one.
+  {
+    const auto analysis = AnalyzeOnly(BuildIr(
+        "%opA0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 648)\n"
+        "%opB0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 652)\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::NoQualifyingCandidate);
+  }
+
   // An extraction from an unrelated aggregate type is not a CBV scalar load.
   {
     const auto analysis = AnalyzeOnly(BuildIr(
