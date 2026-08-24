@@ -5,15 +5,19 @@
 // `<hash>.original.ll` pixel shaders (the format written by Dev's capture
 // tooling, dev/dev_inspection.cpp's WriteCapture), and reports the canonical
 // pre-Fade FMin analysis (pre_fade_fmin_analysis.hpp) for every already
-// v1-verified Fade Primitive instance found. Never linked into either addon
-// target; Production and Dev runtime behavior do not depend on this tool.
+// v1-verified Fade Primitive instance found, plus the end-to-end outcome of
+// the canonical Production patch (target_dither_bypass.hpp) for the shader.
+// Never linked into either addon target; Production and Dev runtime behavior
+// do not depend on this tool.
 //
 // Intended for regression analysis after a Wuthering Waves update: verified
-// Fade Primitive population, qualifying pre-Fade FMin coverage, adjacency
-// distribution, and any new fail-closed/outlier shapes.
+// Fade Primitive population, qualifying pre-Fade FMin coverage, ambiguity and
+// shared-rewrite-range outliers, adjacency distribution, and any new
+// fail-closed shapes.
 
 #include "fade_primitive_detector.hpp"
 #include "pre_fade_fmin_analysis.hpp"
+#include "target_dither_bypass.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -22,6 +26,8 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -61,8 +67,17 @@ int main(int argc, char** argv) {
   std::size_t shaders_with_primitive = 0;
   std::size_t verified_instances = 0;
   std::size_t qualifying_instances = 0;
+  std::size_t instances_with_multiple_candidates = 0;
+  std::size_t largest_candidate_count = 0;
+  std::size_t shaders_with_shared_rewrite_range = 0;
+  std::size_t shaders_patched = 0;
   std::map<std::string, std::size_t> adjacency_distribution;
+  std::map<std::string, std::size_t> status_distribution;
   std::map<std::string, std::size_t> fail_reason_distribution;
+  std::map<std::string, std::size_t> patch_failure_distribution;
+  std::vector<std::string> shared_rewrite_range_shaders;
+  std::vector<std::string> multiple_candidate_shaders;
+  std::vector<std::string> patch_failure_shaders;
 
   std::ostringstream instance_rows;
   for (const auto& entry : std::filesystem::directory_iterator(directory)) {
@@ -76,13 +91,28 @@ int main(int argc, char** argv) {
     const wuwa_tfr::FadePrimitiveDiagnostic diagnostic = wuwa_tfr::AnalyzeFadePrimitiveV1(ir);
     if (diagnostic.instances.empty()) continue;
     ++shaders_with_primitive;
+
+    // Every operand-1 rewrite range this shader's instances resolve to; two
+    // instances landing on the same range is the multi-instance interference
+    // case Production rejects, so it is reported explicitly.
+    std::map<std::pair<std::size_t, std::size_t>, std::size_t> rewrite_ranges;
     for (const wuwa_tfr::FadePrimitiveInstance& instance : diagnostic.instances) {
       ++verified_instances;
-      const wuwa_tfr::PreFadeFMinAnalysis analysis =
+      wuwa_tfr::PreFadeFMinAnalysis analysis =
           wuwa_tfr::AnalyzePreFadeFMinForInstance(ir, instance);
+      // Audit-only enrichment, the same call Dev makes; Production's patch
+      // path deliberately does not walk module metadata for this.
+      wuwa_tfr::ResolvePreFadeCbvRegisters(ir, instance, analysis);
+      ++status_distribution[wuwa_tfr::PreFadeFMinStatusName(analysis.status)];
+      if (wuwa_tfr::PreFadeFMinAnalysisIsStructurallyComplete(analysis)) {
+        largest_candidate_count =
+            std::max(largest_candidate_count, analysis.qualifying_fmin_count);
+        if (analysis.qualifying_fmin_count > 1) ++instances_with_multiple_candidates;
+      }
       if (analysis.success) {
         ++qualifying_instances;
         ++adjacency_distribution[AdjacencyName(analysis.adjacency)];
+        ++rewrite_ranges[{analysis.operand_one.source_start, analysis.operand_one.source_end}];
       } else {
         ++fail_reason_distribution[analysis.error];
       }
@@ -90,10 +120,35 @@ int main(int argc, char** argv) {
         instance_rows << hash << "\t" << instance.function_identity << "\t"
             << wuwa_tfr::FadePrimitiveConsumerName(instance.consumer) << "\t"
             << (analysis.success ? "yes" : "no") << "\t"
+            << wuwa_tfr::PreFadeFMinStatusName(analysis.status) << "\t"
             << analysis.qualifying_fmin_count << "\t"
             << AdjacencyName(analysis.adjacency) << "\t"
+            << (analysis.operand_one.row_resolved ? "yes" : "no") << "\t"
+            << (analysis.operand_one.component_resolved ? "yes" : "no") << "\t"
+            << (analysis.operand_one.byte_offset_resolved ? "yes" : "no") << "\t"
+            << (analysis.operand_one.register_resolved ? "yes" : "no") << "\t"
+            << analysis.operand_one.cbuffer_space << "\t"
+            << analysis.operand_one.cbuffer_register << "\t"
             << TsvEscape(analysis.error) << "\n";
       }
+    }
+    bool shared_range = false;
+    for (const auto& [range, count] : rewrite_ranges)
+      if (count > 1) shared_range = true;
+    if (shared_range) {
+      ++shaders_with_shared_rewrite_range;
+      shared_rewrite_range_shaders.push_back(hash);
+    }
+
+    // End-to-end: exactly what Production does, including the strict
+    // post-patch re-verification.
+    const wuwa_tfr::TargetDitherBypassResult patched =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir);
+    if (patched.success) {
+      ++shaders_patched;
+    } else {
+      ++patch_failure_distribution[patched.error];
+      if (patch_failure_shaders.size() < 32) patch_failure_shaders.push_back(hash);
     }
   }
 
@@ -102,15 +157,39 @@ int main(int argc, char** argv) {
   std::cout << "shaders_with_verified_primitive\t" << shaders_with_primitive << "\n";
   std::cout << "verified_fade_primitive_instances\t" << verified_instances << "\n";
   std::cout << "qualifying_pre_fade_fmin_instances\t" << qualifying_instances << "\n";
+  std::cout << "instances_with_more_than_one_qualifying_candidate\t"
+      << instances_with_multiple_candidates << "\n";
+  std::cout << "largest_qualifying_candidate_count\t" << largest_candidate_count << "\n";
+  std::cout << "shaders_with_two_instances_sharing_a_rewrite_range\t"
+      << shaders_with_shared_rewrite_range << "\n";
+  std::cout << "shaders_production_patch_succeeded\t" << shaders_patched << "\n";
+  std::cout << "analysis_status_distribution\n";
+  for (const auto& [name, count] : status_distribution)
+    std::cout << name << "\t" << count << "\n";
   std::cout << "adjacency_distribution\n";
   for (const auto& [name, count] : adjacency_distribution)
     std::cout << name << "\t" << count << "\n";
   std::cout << "fail_closed_reason_distribution\n";
   for (const auto& [reason, count] : fail_reason_distribution)
     std::cout << reason << "\t" << count << "\n";
+  std::cout << "production_patch_failure_distribution\n";
+  for (const auto& [reason, count] : patch_failure_distribution)
+    std::cout << reason << "\t" << count << "\n";
+  if (!shared_rewrite_range_shaders.empty()) {
+    std::cout << "shaders_sharing_a_rewrite_range\n";
+    for (const std::string& hash : shared_rewrite_range_shaders)
+      std::cout << hash << "\n";
+  }
+  if (!patch_failure_shaders.empty()) {
+    std::cout << "production_patch_failure_examples\n";
+    for (const std::string& hash : patch_failure_shaders) std::cout << hash << "\n";
+  }
   if (list_instances) {
     std::cout << "instances\n";
-    std::cout << "hash\tfunction\tconsumer\tqualified\tqualifying_fmin_count\tadjacency\terror\n";
+    std::cout << "hash\tfunction\tconsumer\tqualified\tstatus\tqualifying_fmin_count"
+        "\tadjacency\toperand1_row_resolved\toperand1_component_resolved"
+        "\toperand1_byte_offset_resolved\toperand1_register_resolved"
+        "\toperand1_cbuffer_space\toperand1_cbuffer_register\terror\n";
     std::cout << instance_rows.str();
   }
   return 0;

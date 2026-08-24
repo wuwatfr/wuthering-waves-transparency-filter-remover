@@ -178,9 +178,13 @@ void InspectPixelShader(const reshade::api::shader_desc& descriptor) {
     record.fade_control = AnalyzeFadeControlSources(
         inspection.original_ir, record.fade_primitive);
     record.pre_fade_fmin.reserve(record.fade_primitive.instances.size());
-    for (const auto& instance : record.fade_primitive.instances)
-      record.pre_fade_fmin.push_back(
-          wuwa_tfr::AnalyzePreFadeFMinForInstance(inspection.original_ir, instance));
+    for (const auto& instance : record.fade_primitive.instances) {
+      auto analysis =
+          wuwa_tfr::AnalyzePreFadeFMinForInstance(inspection.original_ir, instance);
+      // Dev-only enrichment; Production's patch path never pays for this.
+      wuwa_tfr::ResolvePreFadeCbvRegisters(inspection.original_ir, instance, analysis);
+      record.pre_fade_fmin.push_back(std::move(analysis));
+    }
     if (record.dither.discard_calls != 0)
       g_discard_shader_count.fetch_add(1, std::memory_order_relaxed);
     if (record.dither.classification ==

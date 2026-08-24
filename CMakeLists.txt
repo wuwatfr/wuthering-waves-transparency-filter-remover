@@ -58,8 +58,16 @@ target_include_directories(fade_primitive_audit PRIVATE src)
 add_executable(pre_fade_fmin_audit EXCLUDE_FROM_ALL
   tools/pre_fade_fmin_audit.cpp
   src/fade_primitive_detector.cpp
-  src/pre_fade_fmin_analysis.cpp)
+  src/pre_fade_fmin_analysis.cpp
+  src/target_dither_bypass.cpp)
 target_include_directories(pre_fade_fmin_audit PRIVATE src)
+
+add_executable(pre_fade_fmin_analysis_tests
+  tests/test_pre_fade_fmin_analysis.cpp
+  src/pre_fade_fmin_analysis.cpp
+  src/target_dither_bypass.cpp
+  src/fade_primitive_detector.cpp)
+target_include_directories(pre_fade_fmin_analysis_tests PRIVATE src)
 
 add_executable(target_dither_bypass_tests
   tests/test_target_dither_bypass.cpp
@@ -113,6 +121,7 @@ add_test(NAME dxc_validation_policy_tests COMMAND dxc_validation_policy_tests)
 add_test(NAME device_activity_state_tests COMMAND device_activity_state_tests)
 add_test(NAME dxil_dither_diagnostic_tests COMMAND dxil_dither_diagnostic_tests)
 add_test(NAME fade_primitive_detector_tests COMMAND fade_primitive_detector_tests)
+add_test(NAME pre_fade_fmin_analysis_tests COMMAND pre_fade_fmin_analysis_tests)
 add_test(NAME target_dither_bypass_tests COMMAND target_dither_bypass_tests)
 add_test(NAME fade_control_analysis_tests COMMAND fade_control_analysis_tests)
 add_test(NAME fade_control_state_tests COMMAND fade_control_state_tests)

@@ -36,14 +36,24 @@ struct TargetDitherBypassResult {
 // are left byte-identical.
 //
 // The caller must separately restrict the shader set; this function changes
-// every and only every v1-verified instance's qualifying FMin in one shader,
-// then verifies structurally that none remain resolvable post-patch.
+// every and only every v1-verified instance's qualifying FMin in one shader.
+//
+// Post-patch it then proves, for every instance -- matched back by stable
+// identity (function, merge SSA name, consumer), never by vector order or by
+// byte offset -- all of: the instance is still present and classified
+// identically; the canonical analysis still re-derives its enabled arm, still
+// uniquely locates and parses its function, and still completes its backward
+// slice; the qualifying candidate count is now exactly zero; and the FMin
+// that was targeted still exists with operand 1 now the literal and operand 2
+// byte-identical. An analysis that merely *fails* post-patch is never
+// accepted as evidence: it proves nothing in either direction.
 //
 // Fails closed (returns success == false, no IR emitted) on: no verified
-// instance, a non-unique phi source identity, an unsupported consumer, a
+// instance, a non-unique instance source identity, an unsupported consumer, a
 // missing/ambiguous/unresolvable qualifying FMin, an incomplete backward
-// slice, a rewrite target that changed before patching, or a post-patch
-// structural re-verification failure.
+// slice, two instances sharing one rewrite range, a rewrite target that
+// changed before patching, or any part of the post-patch proof above not
+// holding.
 TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
     const std::string& original_llvm_ir);
 

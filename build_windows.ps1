@@ -139,6 +139,7 @@ $testTargets = @(
     'device_activity_state_tests',
     'dxil_dither_diagnostic_tests',
     'fade_primitive_detector_tests',
+    'pre_fade_fmin_analysis_tests',
     'target_dither_bypass_tests',
     'fade_control_analysis_tests',
     'fade_control_state_tests',

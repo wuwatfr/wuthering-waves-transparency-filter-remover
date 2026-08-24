@@ -188,19 +188,6 @@ Slice BackwardSlice(const ParsedFunction& function, std::string_view root) {
   return slice;
 }
 
-bool ParseExtractValueAggregate(std::string_view rhs, std::string_view& aggregate) {
-  if (!rhs.starts_with("extractvalue")) return false;
-  const std::size_t comma = rhs.rfind(',');
-  if (comma == std::string_view::npos) return false;
-  const std::string_view before_index = Trim(rhs.substr(0, comma));
-  const std::size_t agg_start = before_index.find_last_of(" \t");
-  if (agg_start == std::string_view::npos) return false;
-  const std::string_view candidate = before_index.substr(agg_start + 1);
-  if (!IsSsaValue(candidate)) return false;
-  aggregate = candidate;
-  return true;
-}
-
 bool ConsumeToken(std::string_view text, std::size_t& cursor, std::string_view token) {
   while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor])) != 0)
     ++cursor;
@@ -209,8 +196,50 @@ bool ConsumeToken(std::string_view text, std::size_t& cursor, std::string_view t
   return true;
 }
 
+// Everything a well-formed call instruction may carry after its closing
+// parenthesis: nothing, an attribute group (#0), or a metadata attachment
+// list (, !dbg !5). Line comments are already stripped upstream. Anything
+// else is malformed trailing syntax and must fail closed rather than be
+// silently ignored.
+bool IsWellFormedCallSuffix(std::string_view rest) noexcept {
+  rest = Trim(rest);
+  return rest.empty() || rest.front() == '#' || rest.front() == ',' || rest.front() == '!';
+}
+
+// Parses a decimal literal, unsigned and bounded to 32 bits. Used only for
+// diagnostic coordinates -- a false return leaves the coordinate unavailable,
+// it never rejects an otherwise structurally valid source.
+bool ParseDecimalU32(std::string_view text, std::uint32_t& value) noexcept {
+  if (text.empty()) return false;
+  std::uint64_t parsed = 0;
+  for (char c : text) {
+    if (std::isdigit(static_cast<unsigned char>(c)) == 0) return false;
+    parsed = parsed * 10 + static_cast<unsigned>(c - '0');
+    if (parsed > 0xFFFFFFFFull) return false;
+  }
+  value = static_cast<std::uint32_t>(parsed);
+  return true;
+}
+
+// Structural validation of a constant-buffer index operand: it must be a
+// well-formed i32 operand -- either a decimal literal or an SSA value, since
+// a dynamically indexed row/offset is still a direct scalar CBV load.
+// Whether its *value* is statically known is a separate, diagnostic-only
+// question answered by ParseDecimalU32.
+bool IsWellFormedIndexOperand(std::string_view text) noexcept {
+  if (text.empty()) return false;
+  std::uint32_t ignored = 0;
+  return ParseDecimalU32(text, ignored) || IsSsaValue(text);
+}
+
+// The structural half of a dx.op.cbufferLoadLegacy.f32 call: exact return
+// type, exact intrinsic name, exact opcode, and an SSA %dx.types.Handle. The
+// row is validated only as a well-formed i32 operand; its literal *value* is
+// diagnostic-only and may legitimately be unavailable (a dynamic row index),
+// which must not disqualify the load.
 struct CBufferLoadLegacy {
   std::string_view handle;
+  bool row_resolved = false;
   std::uint32_t row = 0;
 };
 
@@ -231,26 +260,25 @@ bool ParseCBufferLoadLegacy(std::string_view rhs, CBufferLoadLegacy& out) {
   if (!IsSsaValue(handle) || cursor == rhs.size() || rhs[cursor] != ',') return false;
   out.handle = handle;
   ++cursor;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
   if (!ConsumeToken(rhs, cursor, "i32")) return false;
   while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
     ++cursor;
   start = cursor;
   while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
-  std::uint64_t row = 0;
+  if (cursor == rhs.size()) return false;  // no closing parenthesis
   const std::string_view row_text = Trim(rhs.substr(start, cursor - start));
-  for (char c : row_text) {
-    if (std::isdigit(static_cast<unsigned char>(c)) == 0) return false;
-    row = row * 10 + static_cast<unsigned>(c - '0');
-  }
-  if (row_text.empty() || row > 0xFFFFFFFFull) return false;
-  out.row = static_cast<std::uint32_t>(row);
+  if (!IsWellFormedIndexOperand(row_text)) return false;
+  if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
+  out.row_resolved = ParseDecimalU32(row_text, out.row);
   return true;
 }
 
+// The byte-addressed form, dx.op.cbufferLoad.f32. Same split as the legacy
+// form: structure (return type, intrinsic, opcode, SSA handle) is required;
+// the literal byte offset is diagnostic-only.
 struct CBufferLoadByte {
   std::string_view handle;
+  bool byte_offset_resolved = false;
   std::uint32_t byte_offset = 0;
 };
 
@@ -270,21 +298,39 @@ bool ParseCBufferLoadByte(std::string_view rhs, CBufferLoadByte& out) {
   if (!IsSsaValue(handle) || cursor == rhs.size() || rhs[cursor] != ',') return false;
   out.handle = handle;
   ++cursor;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
   if (!ConsumeToken(rhs, cursor, "i32")) return false;
   while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
     ++cursor;
   start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
-  std::uint64_t offset = 0;
+  // dx.op.cbufferLoad takes (opcode, handle, byteOffset, alignment); stop at
+  // the alignment operand when one is present, otherwise at the closing paren.
+  while (cursor < rhs.size() && rhs[cursor] != ')' && rhs[cursor] != ',') ++cursor;
+  if (cursor == rhs.size()) return false;  // no closing parenthesis
   const std::string_view offset_text = Trim(rhs.substr(start, cursor - start));
-  for (char c : offset_text) {
-    if (std::isdigit(static_cast<unsigned char>(c)) == 0) return false;
-    offset = offset * 10 + static_cast<unsigned>(c - '0');
+  if (!IsWellFormedIndexOperand(offset_text)) return false;
+  if (rhs[cursor] == ',') {
+    while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
+    if (cursor == rhs.size()) return false;
   }
-  if (offset_text.empty() || offset > 0xFFFFFFFFull) return false;
-  out.byte_offset = static_cast<std::uint32_t>(offset);
+  if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
+  out.byte_offset_resolved = ParseDecimalU32(offset_text, out.byte_offset);
+  return true;
+}
+
+// `extractvalue %dx.types.CBufRet.f32 %agg, <component>` -- the aggregate
+// operand only. The opcode token and the aggregate type are matched exactly,
+// so neither a longer identifier that merely starts with "extractvalue" nor
+// an extraction from some other aggregate type can be mistaken for one.
+bool ParseExtractValueAggregate(std::string_view rhs, std::string_view& aggregate) {
+  std::size_t cursor = 0;
+  if (!ConsumeToken(rhs, cursor, "extractvalue ") ||
+      !ConsumeToken(rhs, cursor, "%dx.types.CBufRet.f32 "))
+    return false;
+  const std::size_t comma = rhs.rfind(',');
+  if (comma == std::string_view::npos || comma < cursor) return false;
+  const std::string_view candidate = Trim(rhs.substr(cursor, comma - cursor));
+  if (!IsSsaValue(candidate)) return false;
+  aggregate = candidate;
   return true;
 }
 
@@ -306,6 +352,7 @@ bool ResolveDirectOrigin(const ParsedFunction& function, std::string_view operan
     source.resolved = true;
     source.handle_value = std::string(legacy.handle);
     source.legacy_form = true;
+    source.row_resolved = legacy.row_resolved;
     source.row = legacy.row;
     // The extractvalue's own component index is filled in by the caller,
     // which has the operand's own (not the aggregate's) definition in hand.
@@ -316,23 +363,21 @@ bool ResolveDirectOrigin(const ParsedFunction& function, std::string_view operan
     source.resolved = true;
     source.handle_value = std::string(byte_form.handle);
     source.legacy_form = false;
+    source.byte_offset_resolved = byte_form.byte_offset_resolved;
     source.byte_offset = byte_form.byte_offset;
     return true;
   }
   return false;
 }
 
+// Diagnostic-only: the extractvalue's component index. A false return leaves
+// the component unavailable; it never disqualifies the source.
 bool ParseExtractValueComponent(std::string_view rhs, std::uint32_t& component) {
   const std::size_t comma = rhs.rfind(',');
   if (comma == std::string_view::npos) return false;
-  const std::string_view index_text = Trim(rhs.substr(comma + 1));
-  std::uint64_t value = 0;
-  for (char c : index_text) {
-    if (std::isdigit(static_cast<unsigned char>(c)) == 0) return false;
-    value = value * 10 + static_cast<unsigned>(c - '0');
-  }
-  if (index_text.empty() || value > 3) return false;
-  component = static_cast<std::uint32_t>(value);
+  std::uint32_t value = 0;
+  if (!ParseDecimalU32(Trim(rhs.substr(comma + 1)), value) || value > 3) return false;
+  component = value;
   return true;
 }
 
@@ -359,8 +404,14 @@ bool ParseFMinOperands(std::string_view rhs, std::string_view& operand_a,
   start = cursor;
   while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
   operand_b = Trim(rhs.substr(start, cursor - start));
-  return !operand_a.empty() && !operand_b.empty() && IsSsaValue(operand_a) &&
-      cursor < rhs.size() && rhs[cursor] == ')';
+  if (cursor == rhs.size() || rhs[cursor] != ')') return false;
+  if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
+  // Deliberately no SSA test here: this parses the instruction, it does not
+  // judge the operands. Requiring a *direct scalar CBV load* -- which implies
+  // an SSA operand -- is ResolveDirectOrigin's job, and post-patch
+  // verification has to be able to read back an FMin whose operand 1 is the
+  // rewritten literal.
+  return !operand_a.empty() && !operand_b.empty();
 }
 
 // ---------- best-effort, diagnostic-only CBV space/register resolution ----------
@@ -670,20 +721,25 @@ std::vector<FMinCandidate> FindQualifyingFMinCandidates(
         !ResolveDirectOrigin(function, operand_b, source_b) ||
         source_a.handle_value != source_b.handle_value)
       continue;
-    // Component for the legacy form: located precisely from the operand's
-    // own extractvalue instruction (ResolveDirectOrigin only captured the
-    // aggregate's row so far).
+    // Everything above this point is the Production proof: a direct scalar
+    // CBV load per operand, and one shared CBV handle. Everything below is
+    // diagnostic enrichment, and none of it can disqualify a candidate --
+    // each coordinate simply stays unavailable when it cannot be derived.
     if (source_a.legacy_form) {
       const FunctionLine* definition = Definition(function, operand_a);
       std::uint32_t component = 0;
-      if (definition && ParseExtractValueComponent(definition->rhs, component))
+      if (definition && ParseExtractValueComponent(definition->rhs, component)) {
+        source_a.component_resolved = true;
         source_a.component = component;
+      }
     }
     if (source_b.legacy_form) {
       const FunctionLine* definition = Definition(function, operand_b);
       std::uint32_t component = 0;
-      if (definition && ParseExtractValueComponent(definition->rhs, component))
+      if (definition && ParseExtractValueComponent(definition->rhs, component)) {
+        source_b.component_resolved = true;
         source_b.component = component;
+      }
     }
     FMinCandidate candidate;
     candidate.lhs = line.lhs;
@@ -698,36 +754,135 @@ std::vector<FMinCandidate> FindQualifyingFMinCandidates(
 
 }  // namespace
 
+const char* PreFadeFMinStatusName(PreFadeFMinStatus status) noexcept {
+  switch (status) {
+    case PreFadeFMinStatus::Matched: return "matched";
+    case PreFadeFMinStatus::NoQualifyingCandidate: return "no_qualifying_candidate";
+    case PreFadeFMinStatus::AmbiguousCandidates: return "ambiguous_candidates";
+    case PreFadeFMinStatus::InvalidInstanceIdentity: return "invalid_instance_identity";
+    case PreFadeFMinStatus::FunctionNotUniquelyLocated:
+      return "function_not_uniquely_located";
+    case PreFadeFMinStatus::FunctionNotParsable: return "function_not_parsable";
+    case PreFadeFMinStatus::IncompleteBackwardSlice: return "incomplete_backward_slice";
+  }
+  return "unknown";
+}
+
+bool PreFadeFMinAnalysisIsStructurallyComplete(
+    const PreFadeFMinAnalysis& analysis) noexcept {
+  // Both the per-stage flags and the status are required to agree: a caller
+  // must not be able to satisfy this by any single field being stale.
+  return analysis.instance_identity_verified && analysis.function_located &&
+      analysis.function_parsed && analysis.backward_slice_complete &&
+      (analysis.status == PreFadeFMinStatus::Matched ||
+          analysis.status == PreFadeFMinStatus::NoQualifyingCandidate ||
+          analysis.status == PreFadeFMinStatus::AmbiguousCandidates);
+}
+
+bool PreFadeFMinProvesNoQualifyingCandidate(
+    const PreFadeFMinAnalysis& analysis) noexcept {
+  return PreFadeFMinAnalysisIsStructurallyComplete(analysis) &&
+      analysis.status == PreFadeFMinStatus::NoQualifyingCandidate &&
+      analysis.qualifying_fmin_count == 0 && !analysis.success;
+}
+
+void ResolvePreFadeCbvRegisters(const std::string& llvm_ir,
+    const FadePrimitiveInstance& instance, PreFadeFMinAnalysis& analysis) {
+  if (analysis.status != PreFadeFMinStatus::Matched) return;
+  std::size_t block_start = 0, block_end = 0;
+  std::string error;
+  if (!FindUniqueFunctionBlock(
+          llvm_ir, instance.function_identity, block_start, block_end, error))
+    return;
+  const ParsedFunction function = ParseFunctionBlock(llvm_ir, block_start, block_end);
+  if (!function.complete) return;
+  ResolveRegisterBestEffort(function, llvm_ir, analysis.operand_one);
+  ResolveRegisterBestEffort(function, llvm_ir, analysis.operand_two);
+}
+
+bool VerifyPreFadeFMinOperandOneRewritten(const std::string& patched_llvm_ir,
+    const FadePrimitiveInstance& patched_instance, const PreFadeFMinAnalysis& matched,
+    std::string& error) {
+  if (matched.status != PreFadeFMinStatus::Matched || matched.fmin_result_identity.empty() ||
+      matched.operand_two.source_text.empty()) {
+    error = "rewrite proof requires a matched pre-patch analysis";
+    return false;
+  }
+  std::size_t block_start = 0, block_end = 0;
+  if (!FindUniqueFunctionBlock(patched_llvm_ir, patched_instance.function_identity,
+          block_start, block_end, error))
+    return false;
+  const ParsedFunction function = ParseFunctionBlock(patched_llvm_ir, block_start, block_end);
+  if (!function.complete) {
+    error = "patched function has duplicate SSA definitions";
+    return false;
+  }
+  const FunctionLine* definition = Definition(function, matched.fmin_result_identity);
+  if (definition == nullptr) {
+    error = "the rewritten pre-Fade FMin no longer exists after the patch";
+    return false;
+  }
+  std::string_view operand_a, operand_b;
+  if (!ParseFMinOperands(definition->rhs, operand_a, operand_b)) {
+    error = "the rewritten pre-Fade FMin is no longer a well-formed FMin";
+    return false;
+  }
+  if (operand_a != kPreFadeRewriteLiteral) {
+    error = "the rewritten pre-Fade FMin's operand 1 is not the expected literal";
+    return false;
+  }
+  if (operand_b != matched.operand_two.source_text) {
+    error = "the rewritten pre-Fade FMin's operand 2 changed";
+    return false;
+  }
+  return true;
+}
+
 PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
     const std::string& llvm_ir, const FadePrimitiveInstance& instance) {
   PreFadeFMinAnalysis result;
 
   std::string_view enabled_value;
-  if (!ReDeriveEnabledArmValue(llvm_ir, instance, enabled_value, result.error)) return result;
+  if (!ReDeriveEnabledArmValue(llvm_ir, instance, enabled_value, result.error)) {
+    result.status = PreFadeFMinStatus::InvalidInstanceIdentity;
+    return result;
+  }
+  result.instance_identity_verified = true;
 
   std::size_t block_start = 0, block_end = 0;
   if (!FindUniqueFunctionBlock(
-          llvm_ir, instance.function_identity, block_start, block_end, result.error))
+          llvm_ir, instance.function_identity, block_start, block_end, result.error)) {
+    result.status = PreFadeFMinStatus::FunctionNotUniquelyLocated;
     return result;
+  }
+  result.function_located = true;
+
   const ParsedFunction function = ParseFunctionBlock(llvm_ir, block_start, block_end);
   if (!function.complete) {
+    result.status = PreFadeFMinStatus::FunctionNotParsable;
     result.error = "verified primitive function has duplicate SSA definitions";
     return result;
   }
+  result.function_parsed = true;
 
   const Slice slice = BackwardSlice(function, enabled_value);
   result.backward_slice_complete = slice.complete;
   if (!slice.complete) {
+    result.status = PreFadeFMinStatus::IncompleteBackwardSlice;
     result.error = "verified primitive backward slice is incomplete";
     return result;
   }
 
   std::vector<FMinCandidate> candidates = FindQualifyingFMinCandidates(function, slice);
   result.qualifying_fmin_count = candidates.size();
+  if (candidates.empty()) {
+    result.status = PreFadeFMinStatus::NoQualifyingCandidate;
+    result.error = "no qualifying pre-Fade FMin found in the verified backward slice";
+    return result;
+  }
   if (candidates.size() != 1) {
-    result.error = candidates.empty()
-        ? "no qualifying pre-Fade FMin found in the verified backward slice"
-        : "multiple qualifying pre-Fade FMin candidates; ambiguous";
+    result.status = PreFadeFMinStatus::AmbiguousCandidates;
+    result.error = "multiple qualifying pre-Fade FMin candidates; ambiguous";
     return result;
   }
 
@@ -742,15 +897,18 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
   result.operand_two.source_end = result.operand_two.source_start + candidate.operand_b.size();
   result.operand_two.source_text = std::string(candidate.operand_b);
 
-  ResolveRegisterBestEffort(function, llvm_ir, result.operand_one);
-  ResolveRegisterBestEffort(function, llvm_ir, result.operand_two);
-
   // Diagnostic-only, byte-precise adjacency classification: adjacent means
   // exactly one float (4 bytes) apart in the flattened constant-buffer
   // layout, whether that stays within one legacy row or crosses a 16-byte
   // row boundary; anything else -- including same-row but non-adjacent
   // components -- is NonAdjacent.
-  if (result.operand_one.legacy_form && result.operand_two.legacy_form) {
+  const bool legacy_coordinates_available = result.operand_one.row_resolved &&
+      result.operand_one.component_resolved && result.operand_two.row_resolved &&
+      result.operand_two.component_resolved;
+  const bool byte_coordinates_available =
+      result.operand_one.byte_offset_resolved && result.operand_two.byte_offset_resolved;
+  if (result.operand_one.legacy_form && result.operand_two.legacy_form &&
+      legacy_coordinates_available) {
     const std::int64_t byte_one =
         static_cast<std::int64_t>(result.operand_one.row) * 16 +
         static_cast<std::int64_t>(result.operand_one.component) * 4;
@@ -765,7 +923,8 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
           ? PreFadeAdjacency::SameRow
           : PreFadeAdjacency::CrossRow;
     }
-  } else if (!result.operand_one.legacy_form && !result.operand_two.legacy_form) {
+  } else if (!result.operand_one.legacy_form && !result.operand_two.legacy_form &&
+      byte_coordinates_available) {
     const std::int64_t diff = static_cast<std::int64_t>(result.operand_two.byte_offset) -
         static_cast<std::int64_t>(result.operand_one.byte_offset);
     result.adjacency = (diff == 4 || diff == -4)
@@ -775,6 +934,7 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
     result.adjacency = PreFadeAdjacency::Unknown;
   }
 
+  result.status = PreFadeFMinStatus::Matched;
   result.success = true;
   return result;
 }

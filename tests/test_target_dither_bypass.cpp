@@ -395,6 +395,58 @@ entry:
     CHECK(result.error.find("ambiguous") != std::string::npos);
   }
 
+  // ---- fail-closed: two verified instances sharing one rewrite range ----
+  // Both phis take their enabled value from the same expression, so both
+  // resolve to the same operand-1 byte range. Rewriting it twice would mean
+  // the second rewrite operating on text the first already replaced, so this
+  // is rejected up front rather than being caught as a stale-text mismatch.
+  {
+    std::string shared = all_instances_ir;
+    const std::string second_phi =
+        "%d1 = phi float [ %computed1, %on1 ], [ 1.000000e+00, %entry1 ]";
+    const std::string shared_phi =
+        "%d1 = phi float [ %computed0, %on1 ], [ 1.000000e+00, %entry1 ]";
+    const std::size_t at = shared.find(second_phi);
+    CHECK(at != std::string::npos);
+    shared.replace(at, second_phi.size(), shared_phi);
+    const auto diagnostic = wuwa_tfr::AnalyzeFadePrimitiveV1(shared);
+    CHECK(diagnostic.instances.size() == 2);
+    const auto result =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(shared);
+    CHECK(!result.success);
+    CHECK(result.patched_instance_count == 0);
+    CHECK(result.llvm_ir.empty());
+    CHECK(result.error.find("share a pre-Fade rewrite range") != std::string::npos);
+  }
+
+  // ---- post-patch: the verified primitive itself survives byte-identically ----
+  // The retired identity-phi patch removed the primitive; this one must not.
+  // Every instance must still be verifiable, with the same function, merge SSA
+  // name and consumer, and every phi line must be unchanged.
+  {
+    const auto before = wuwa_tfr::AnalyzeFadePrimitiveV1(all_instances_ir);
+    const auto after = wuwa_tfr::AnalyzeFadePrimitiveV1(all_instances.llvm_ir);
+    CHECK(before.instances.size() == 2);
+    CHECK(after.instances.size() == before.instances.size());
+    for (std::size_t i = 0; i < before.instances.size(); ++i) {
+      CHECK(before.instances[i].function_identity == after.instances[i].function_identity);
+      CHECK(before.instances[i].merge_value == after.instances[i].merge_value);
+      CHECK(before.instances[i].consumer == after.instances[i].consumer);
+      const std::string original_phi = all_instances_ir.substr(
+          before.instances[i].phi_start,
+          before.instances[i].phi_end - before.instances[i].phi_start);
+      const std::string patched_phi = all_instances.llvm_ir.substr(
+          after.instances[i].phi_start,
+          after.instances[i].phi_end - after.instances[i].phi_start);
+      CHECK(original_phi == patched_phi);
+    }
+    // Exactly the two operand-1 tokens changed and nothing else: the patched
+    // IR is the original with those two substitutions and no other edit.
+    CHECK(all_instances.llvm_ir.size() ==
+        all_instances_ir.size() + 2 * (std::string("1.000000e+00").size() -
+            std::string("%opA0").size()));
+  }
+
   // ---- fail-closed: incomplete backward slice ----
   {
     std::string incomplete = all_instances_ir;
