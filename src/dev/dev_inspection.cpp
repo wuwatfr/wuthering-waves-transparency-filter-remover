@@ -18,10 +18,6 @@ namespace wuwa_tfr::dev {
 
 namespace {
 
-// Same stable identity target_dither_bypass.cpp's own instance matching
-// uses (function, merge SSA name, consumer): enough to re-associate a
-// PreFadeFMinEvidence entry with the FadePrimitiveInstance it belongs to
-// without relying on either vector's index or ordering.
 bool SameFadePrimitiveInstance(const wuwa_tfr::FadePrimitiveInstance& left,
     const wuwa_tfr::FadePrimitiveInstance& right) noexcept {
   return left.function_identity == right.function_identity &&
@@ -52,9 +48,6 @@ bool WriteShaderDump(
   std::ofstream metadata(metadata_path, std::ios::binary | std::ios::trunc);
   if (!metadata) return false;
   metadata << "format=wuwa_tfr_capture_v1\n";
-  // The canonical runtime's own pipeline-initialization path, not this
-  // module's former create_pipeline hook -- see dev_inspection.hpp's module
-  // comment.
   metadata << "source=wuthering_waves_runtime_init_pipeline\n";
   metadata << "stage=original_pixel_shader\n";
   metadata << "selection=all_unique_dxil_when_dump_enabled\n";
@@ -95,11 +88,6 @@ bool EnvFlag(const wchar_t* name) {
       value == L"on";
 }
 
-// The Dev-owned observer: every override reads only what the canonical
-// runtime already computed and passed in. Nothing here re-derives a DXIL
-// disassembly, re-runs AnalyzeFadePrimitiveV1()/AnalyzePreFadeFMinForInstance
-// itself, or retains original_ir past the call -- everything this class
-// keeps is a value copied out of the observation before it returns.
 class InspectionObserverImpl final : public wuwa_tfr::FadePrimitiveRuntimeObserver {
  public:
   void OnShaderPrepared(const ShaderPreparationObservation& observation) override {
@@ -122,10 +110,6 @@ class InspectionObserverImpl final : public wuwa_tfr::FadePrimitiveRuntimeObserv
     for (const auto& instance : observation.fade_primitive.instances) {
       FadeInstanceObservation entry;
       entry.instance = instance;
-      // Associated by stable identity, never by a shared vector index:
-      // pre_fade_evidence may be a strict prefix of fade_primitive.instances
-      // (TargetDitherBypassResult::instance_evidence's own documented
-      // semantics), so the two vectors are not guaranteed the same length.
       for (const auto& evidence : observation.pre_fade_evidence) {
         if (SameFadePrimitiveInstance(evidence.instance, instance)) {
           entry.pre_fade = evidence.analysis;
@@ -135,18 +119,10 @@ class InspectionObserverImpl final : public wuwa_tfr::FadePrimitiveRuntimeObserv
       record.fade_instances.push_back(std::move(entry));
     }
 
-    // Genuinely Dev-only analysis, synchronous, on the observation's own
-    // original_ir -- never retained beyond this scope.
     if (observation.inspection_succeeded && observation.original_ir) {
       const std::string& original_ir = *observation.original_ir;
       record.dither = wuwa_tfr::AnalyzeSpatialDitherDiagnostic(original_ir);
 
-      // Diagnostic-only (space, register) enrichment of canonical evidence
-      // the matcher itself already extracted -- never a second Fade
-      // Primitive/gate/pre-Fade analysis pass, and never influences
-      // fade_instances' presence/absence or patch eligibility above. The
-      // shared !dx.resources walk (pre_fade_fmin_analysis.hpp's
-      // ResolveCbvRangeId) is the single implementation both calls use.
       for (auto& fade_instance : record.fade_instances) {
         wuwa_tfr::ResolveGatePredicateCbvRegister(
             original_ir, fade_instance.instance.gate_predicate);
@@ -179,12 +155,6 @@ class InspectionObserverImpl final : public wuwa_tfr::FadePrimitiveRuntimeObserv
         g_dumped_shaders.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // The canonical runtime's own single-flight shader cache guarantees
-    // this fires at most once per unique hash, so this lock only has to
-    // protect g_inspections itself from concurrent insertion of different
-    // hashes (and from concurrent readers) -- not from two callers racing
-    // to build the record for the same hash, which cannot happen. Every
-    // Dev-only analysis above therefore runs outside the lock.
     std::lock_guard lock(g_inspection_mutex);
     g_inspections.emplace(observation.original_shader_hash, std::move(record));
   }
@@ -195,7 +165,7 @@ class InspectionObserverImpl final : public wuwa_tfr::FadePrimitiveRuntimeObserv
   }
 };
 
-}  // namespace
+}
 
 std::mutex g_inspection_mutex;
 std::unordered_map<std::uint64_t, InspectionRecord> g_inspections;
@@ -221,4 +191,4 @@ void InitializeInspectionConfig() {
   g_dump_path = ConfigPathValue(L"DumpPath");
 }
 
-}  // namespace wuwa_tfr::dev
+}

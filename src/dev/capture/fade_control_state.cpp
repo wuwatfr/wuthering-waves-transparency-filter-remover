@@ -91,4 +91,4 @@ FadeControlSnapshot FadeControlAccumulator::Stop() {
   return last_result_;
 }
 
-}  // namespace wuwa_tfr::dev
+}

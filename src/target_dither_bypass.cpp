@@ -24,12 +24,6 @@ bool IsProductionConsumer(FadePrimitiveConsumer consumer) noexcept {
       consumer == FadePrimitiveConsumer::DiscardAndSvTargetAlpha;
 }
 
-// A verified instance's stable identity: the enclosing function, the merge
-// phi's function-local SSA name, and the classified consumer. None of the
-// three is moved or renamed by an operand rewrite, so the same instance can
-// be found again in the patched IR without relying on detector vector
-// ordering or on absolute byte offsets -- both of which do shift, since the
-// replacement literal has a different length than the SSA name it replaces.
 std::string InstanceIdentityKey(const FadePrimitiveInstance& instance) {
   std::string key = instance.function_identity;
   key.push_back('\0');
@@ -47,7 +41,7 @@ struct PendingRewrite {
   PreFadeFMinAnalysis analysis;
 };
 
-} // namespace
+}
 
 TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
     const std::string& original_llvm_ir) {
@@ -83,13 +77,6 @@ TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
       return result;
     }
     ++result.qualifying_instance_count;
-    // Evidence is appended here, before `analysis` is moved into the
-    // rewrite below, so every early `return result;` from this point on
-    // (including every one still ahead in this function) preserves exactly
-    // the prefix of instances that reached a Matched analysis -- see
-    // TargetDitherBypassResult::instance_evidence's own documented
-    // semantics. No extra analysis pass: this is a copy of the analysis
-    // this loop already computed.
     result.instance_evidence.push_back(PreFadeFMinEvidence{instance, analysis});
 
     PendingRewrite rewrite;
@@ -101,15 +88,10 @@ TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
     rewrites.push_back(std::move(rewrite));
   }
 
-  // Descending, so each replacement's own offsets are still valid when it is
-  // applied: every rewrite still pending sits strictly before it in the text.
   std::sort(rewrites.begin(), rewrites.end(),
       [](const PendingRewrite& left, const PendingRewrite& right) {
         return left.start > right.start;
       });
-  // Two verified instances resolving to one rewrite range would mean the
-  // second rewrite operates on text the first already replaced. Reject that
-  // explicitly rather than leaving it to be caught as a stale-text mismatch.
   for (std::size_t i = 1; i < rewrites.size(); ++i) {
     if (rewrites[i].end > rewrites[i - 1].start) {
       result.error = "verified primitive instances share a pre-Fade rewrite range";
@@ -130,23 +112,6 @@ TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         rewrite.start, rewrite.end - rewrite.start, kPreFadeRewriteLiteral);
   }
 
-  // ---- post-patch structural re-verification ----
-  //
-  // Every one of these must hold; nothing here is inferred from an analysis
-  // merely failing, because a parser failure, an invalid source identity or
-  // an incomplete slice is evidence of nothing at all.
-  //
-  //  1. the same set of verified instances is still present, matched by
-  //     stable identity (function, merge SSA name, consumer) rather than by
-  //     vector position or byte offset, proving nothing downstream moved and
-  //     that no other structural collapse was triggered;
-  //  2. for each of them the canonical analysis still re-derives the enabled
-  //     arm, still locates and parses the function, still completes the
-  //     backward slice, and now finds exactly zero qualifying candidates;
-  //  3. and, positively, the FMin that was targeted is still there with
-  //     operand 1 now the literal and operand 2 byte-identical -- so a
-  //     rewrite that had landed somewhere else could not pass by emptying the
-  //     candidate set as a side effect.
   const FadePrimitiveDiagnostic post_patch_diagnostic =
       AnalyzeFadePrimitiveV1(patched_llvm_ir);
   if (post_patch_diagnostic.instances.size() != diagnostic.instances.size()) {
@@ -199,4 +164,4 @@ TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
   return result;
 }
 
-} // namespace wuwa_tfr
+}

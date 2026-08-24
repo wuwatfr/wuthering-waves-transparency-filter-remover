@@ -21,9 +21,6 @@ void ManualCaptureAccumulator::Start(std::uint64_t session_id,
 
 namespace {
 
-// `already_observed` reflects the record's state *before* this Draw's
-// observation is folded in, so the first observation of a binding kind
-// seeds first/last without tripping `changed`.
 void UpdateBindingSummary(ManualCaptureBindingSummary& summary,
     bool already_observed, std::uint64_t fingerprint) {
   if (!already_observed) {
@@ -36,7 +33,7 @@ void UpdateBindingSummary(ManualCaptureBindingSummary& summary,
   summary.last_fingerprint = fingerprint;
 }
 
-}  // namespace
+}
 
 void ManualCaptureAccumulator::Accumulate(const ManualCaptureRecordKey& key,
     const ManualCapturePipelineInfo& pipeline, std::uint64_t commands,
@@ -63,8 +60,6 @@ void ManualCaptureAccumulator::Accumulate(const ManualCaptureRecordKey& key,
   ++record.submissions;
   record.last_frame = frame;
 
-  // Bit meanings match dev/trace/trace_events.cpp's own observed_bindings
-  // usage: 0x1 root constants, 0x2 pushed CBVs, 0x4 descriptor tables.
   if ((binding.observed_bindings & 0x1) != 0) {
     UpdateBindingSummary(record.root_constants,
         (record.observed_bindings & 0x1) != 0,
@@ -136,4 +131,4 @@ std::string AllocateExportFilename(const std::string& stem,
   return candidate;
 }
 
-}  // namespace wuwa_tfr::dev
+}

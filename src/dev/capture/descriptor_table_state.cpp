@@ -14,8 +14,7 @@ std::optional<DescriptorCbvSlot> ResolveDescriptorTableCbvSlot(
     if (register_index < range.register_index) continue;
     const std::uint32_t offset = register_index - range.register_index;
     if (offset >= range.count) continue;
-    if (match) return std::nullopt;  // A second range also claims this
-                                      // register: ambiguous, fail closed.
+    if (match) return std::nullopt;
     match = DescriptorCbvSlot{range.param_index, range.binding_start + offset};
   }
   return match;
@@ -58,4 +57,4 @@ std::optional<DescriptorSlotContent> FindDescriptorTableSlot(
                             : std::optional<DescriptorSlotContent>(it->second);
 }
 
-}  // namespace wuwa_tfr::dev
+}

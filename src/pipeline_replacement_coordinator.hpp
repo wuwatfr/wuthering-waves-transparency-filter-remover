@@ -10,9 +10,6 @@
 
 namespace wuwa_tfr {
 
-// Production callback seam. FadePrimitiveRuntime invokes these methods
-// directly from OnInitPipeline, OnBindPipeline, OnDestroyPipeline, and
-// OnDestroyDevice; portable tests exercise that exact coordinator path.
 template <typename Owner, typename Pipeline>
 class PipelineReplacementCoordinator {
  public:
@@ -52,4 +49,4 @@ class PipelineReplacementCoordinator {
   State state_;
 };
 
-} // namespace wuwa_tfr
+}

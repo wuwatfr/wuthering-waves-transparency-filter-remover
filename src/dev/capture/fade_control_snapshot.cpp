@@ -13,13 +13,9 @@ FadeControlSnapshotWindow ResolveFadeControlSnapshotWindow(
     std::uint64_t mapped_end) noexcept {
   if (mapped_end <= mapped_start) return {};
 
-  // Clamp the low end in vector units first, so an unsigned underflow can
-  // never occur regardless of how small predicate_vector is.
   const std::uint32_t window_start_vector =
       predicate_vector > radius_vectors ? predicate_vector - radius_vectors
                                          : 0;
-  // +1 makes this an exclusive end covering the full [predicate_vector +
-  // radius_vectors] row.
   const std::uint64_t window_end_vector =
       static_cast<std::uint64_t>(predicate_vector) + radius_vectors + 1;
 
@@ -32,8 +28,6 @@ FadeControlSnapshotWindow ResolveFadeControlSnapshotWindow(
   if (effective_end <= effective_start) return {};
 
   std::uint64_t size = effective_end - effective_start;
-  // Defensive regardless of the radius_vectors argument actually passed --
-  // the caller's fixed-size raw_bytes storage must never be overrun.
   if (size > kMaxFadeControlSnapshotBytes) size = kMaxFadeControlSnapshotBytes;
 
   FadeControlSnapshotWindow window;
@@ -77,4 +71,4 @@ FadeControlSnapshotSet FadeControlSnapshotAccumulator::Stop() {
   return last_result_;
 }
 
-}  // namespace wuwa_tfr::dev
+}
