@@ -3,6 +3,8 @@
 
 #include "pre_fade_fmin_analysis.hpp"
 
+#include "dxil_ir_lexer.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -16,60 +18,9 @@
 namespace wuwa_tfr {
 namespace {
 
+using namespace wuwa_tfr::dxil_ir;
+
 constexpr std::size_t kBackwardSliceLimit = 1024;
-
-bool IsSsaCharacter(char value) noexcept {
-  return std::isalnum(static_cast<unsigned char>(value)) != 0 ||
-      value == '_' || value == '.' || value == '$' || value == '-';
-}
-
-bool IsSsaValue(std::string_view value) noexcept {
-  if (value.size() < 2 || value.front() != '%') return false;
-  for (std::size_t index = 1; index < value.size(); ++index)
-    if (!IsSsaCharacter(value[index])) return false;
-  return true;
-}
-
-std::string_view Trim(std::string_view text) {
-  const std::size_t first = text.find_first_not_of(" \t\r");
-  if (first == std::string_view::npos) return {};
-  const std::size_t last = text.find_last_not_of(" \t\r");
-  return text.substr(first, last - first + 1);
-}
-
-std::string_view StripComment(std::string_view line) noexcept {
-  bool quoted = false;
-  for (std::size_t index = 0; index < line.size(); ++index) {
-    if (quoted && line[index] == '\\' && index + 1 < line.size()) { ++index; continue; }
-    if (line[index] == '"') quoted = !quoted;
-    if (!quoted && line[index] == ';') return line.substr(0, index);
-  }
-  return line;
-}
-
-std::vector<std::string_view> SsaValues(std::string_view text) {
-  std::vector<std::string_view> values;
-  for (std::size_t index = 0; index < text.size(); ++index) {
-    if (text[index] != '%' || index + 1 == text.size() ||
-        !IsSsaCharacter(text[index + 1])) continue;
-    const std::size_t first = index++;
-    while (index < text.size() && IsSsaCharacter(text[index])) ++index;
-    values.emplace_back(text.substr(first, index - first));
-    if (index == text.size()) break;
-    --index;
-  }
-  return values;
-}
-
-std::string FunctionIdentity(std::string_view header) {
-  const std::size_t at = header.find('@');
-  const std::size_t open = at == std::string_view::npos ? at : header.find('(', at);
-  if (at == std::string_view::npos || open == std::string_view::npos || open == at + 1)
-    return {};
-  for (std::size_t index = at + 1; index < open; ++index)
-    if (!IsSsaCharacter(header[index])) return {};
-  return std::string(header.substr(at, open - at));
-}
 
 std::size_t AbsoluteOffset(const std::string& text, std::string_view view) noexcept {
   return static_cast<std::size_t>(view.data() - text.data());
@@ -94,8 +45,8 @@ bool FindUniqueFunctionBlock(const std::string& text, std::string_view identity,
   for (std::size_t start = 0; start <= text.size();) {
     const std::size_t newline = text.find('\n', start);
     const std::size_t end = newline == std::string::npos ? text.size() : newline;
-    const std::string_view line = Trim(StripComment(
-        std::string_view(text).substr(start, end - start)));
+    const std::string_view line = Trim(SplitCodeAndComment(
+        std::string_view(text).substr(start, end - start)).code);
     if (depth == 0) {
       if (line.starts_with("define ") && FunctionIdentity(line) == identity) {
         if (found) {
@@ -129,7 +80,7 @@ ParsedFunction ParseFunctionBlock(
     const std::size_t end = (newline == std::string::npos || newline > block_end)
         ? block_end : newline;
     const std::string_view raw(text.data() + start, end - start);
-    const std::string_view code = Trim(StripComment(raw));
+    const std::string_view code = Trim(SplitCodeAndComment(raw).code);
     if (!header_skipped) {
       header_skipped = true;
     } else if (!code.empty() && code != "}") {
@@ -183,172 +134,6 @@ Slice BackwardSlice(const ParsedFunction& function, std::string_view root) {
   return slice;
 }
 
-bool ConsumeToken(std::string_view text, std::size_t& cursor, std::string_view token) {
-  while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor])) != 0)
-    ++cursor;
-  if (!text.substr(cursor).starts_with(token)) return false;
-  cursor += token.size();
-  return true;
-}
-
-bool HasOnlyMetadataAttachments(std::string_view trailing) noexcept {
-  std::size_t cursor = 0;
-  while (cursor < trailing.size()) {
-    if (trailing[cursor] != ',') return false;
-    ++cursor;
-    while (cursor < trailing.size() &&
-        std::isspace(static_cast<unsigned char>(trailing[cursor])) != 0)
-      ++cursor;
-
-    if (cursor == trailing.size() || trailing[cursor] != '!') return false;
-    const std::size_t name_start = ++cursor;
-    while (cursor < trailing.size() && IsSsaCharacter(trailing[cursor])) ++cursor;
-    if (cursor == name_start || cursor == trailing.size() ||
-        std::isspace(static_cast<unsigned char>(trailing[cursor])) == 0)
-      return false;
-    while (cursor < trailing.size() &&
-        std::isspace(static_cast<unsigned char>(trailing[cursor])) != 0)
-      ++cursor;
-
-    if (cursor == trailing.size() || trailing[cursor] != '!') return false;
-    const std::size_t reference_start = ++cursor;
-    while (cursor < trailing.size() &&
-        std::isdigit(static_cast<unsigned char>(trailing[cursor])) != 0)
-      ++cursor;
-    if (cursor == reference_start) return false;
-    while (cursor < trailing.size() &&
-        std::isspace(static_cast<unsigned char>(trailing[cursor])) != 0)
-      ++cursor;
-  }
-  return true;
-}
-
-bool IsWellFormedCallSuffix(std::string_view rest) noexcept {
-  rest = Trim(rest);
-  if (rest.empty()) return true;
-  if (rest.front() == '#') {
-    std::size_t cursor = 1;
-    while (cursor < rest.size() &&
-        std::isdigit(static_cast<unsigned char>(rest[cursor])) != 0)
-      ++cursor;
-    if (cursor == 1) return false;
-    rest = Trim(rest.substr(cursor));
-    if (rest.empty()) return true;
-  }
-  return HasOnlyMetadataAttachments(rest);
-}
-
-bool ParseDecimalU32(std::string_view text, std::uint32_t& value) noexcept {
-  if (text.empty()) return false;
-  std::uint64_t parsed = 0;
-  for (char c : text) {
-    if (std::isdigit(static_cast<unsigned char>(c)) == 0) return false;
-    parsed = parsed * 10 + static_cast<unsigned>(c - '0');
-    if (parsed > 0xFFFFFFFFull) return false;
-  }
-  value = static_cast<std::uint32_t>(parsed);
-  return true;
-}
-
-bool IsWellFormedIndexOperand(std::string_view text) noexcept {
-  if (text.empty()) return false;
-  std::uint32_t ignored = 0;
-  return ParseDecimalU32(text, ignored) || IsSsaValue(text);
-}
-
-struct CBufferLoadLegacy {
-  std::string_view handle;
-  bool row_resolved = false;
-  std::uint32_t row = 0;
-};
-
-bool ParseCBufferLoadLegacy(std::string_view rhs, CBufferLoadLegacy& out) {
-  std::size_t cursor = 0;
-  if (!ConsumeToken(rhs, cursor, "call") ||
-      !ConsumeToken(rhs, cursor, "%dx.types.CBufRet.f32") ||
-      !ConsumeToken(rhs, cursor, "@dx.op.cbufferLoadLegacy.f32") ||
-      !ConsumeToken(rhs, cursor, "(") || !ConsumeToken(rhs, cursor, "i32") ||
-      !ConsumeToken(rhs, cursor, "59") || !ConsumeToken(rhs, cursor, ",") ||
-      !ConsumeToken(rhs, cursor, "%dx.types.Handle"))
-    return false;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
-  std::size_t start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ',' && rhs[cursor] != ')') ++cursor;
-  const std::string_view handle = Trim(rhs.substr(start, cursor - start));
-  if (!IsSsaValue(handle) || cursor == rhs.size() || rhs[cursor] != ',') return false;
-  out.handle = handle;
-  ++cursor;
-  if (!ConsumeToken(rhs, cursor, "i32")) return false;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
-  start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
-  if (cursor == rhs.size()) return false;
-  const std::string_view row_text = Trim(rhs.substr(start, cursor - start));
-  if (!IsWellFormedIndexOperand(row_text)) return false;
-  if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
-  out.row_resolved = ParseDecimalU32(row_text, out.row);
-  return true;
-}
-
-struct CBufferLoadByte {
-  std::string_view handle;
-  bool byte_offset_resolved = false;
-  std::uint32_t byte_offset = 0;
-};
-
-bool ParseCBufferLoadByte(std::string_view rhs, CBufferLoadByte& out) {
-  std::size_t cursor = 0;
-  if (!ConsumeToken(rhs, cursor, "call") || !ConsumeToken(rhs, cursor, "float") ||
-      !ConsumeToken(rhs, cursor, "@dx.op.cbufferLoad.f32") ||
-      !ConsumeToken(rhs, cursor, "(") || !ConsumeToken(rhs, cursor, "i32") ||
-      !ConsumeToken(rhs, cursor, "58") || !ConsumeToken(rhs, cursor, ",") ||
-      !ConsumeToken(rhs, cursor, "%dx.types.Handle"))
-    return false;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
-  std::size_t start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ',' && rhs[cursor] != ')') ++cursor;
-  const std::string_view handle = Trim(rhs.substr(start, cursor - start));
-  if (!IsSsaValue(handle) || cursor == rhs.size() || rhs[cursor] != ',') return false;
-  out.handle = handle;
-  ++cursor;
-  if (!ConsumeToken(rhs, cursor, "i32")) return false;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
-  start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ')' && rhs[cursor] != ',') ++cursor;
-  if (cursor == rhs.size() || rhs[cursor] != ',') return false;
-  const std::string_view offset_text = Trim(rhs.substr(start, cursor - start));
-  if (!IsWellFormedIndexOperand(offset_text)) return false;
-  ++cursor;
-  if (!ConsumeToken(rhs, cursor, "i32")) return false;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
-  start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
-  if (cursor == rhs.size()) return false;
-  std::uint32_t alignment = 0;
-  if (!ParseDecimalU32(Trim(rhs.substr(start, cursor - start)), alignment)) return false;
-  if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
-  out.byte_offset_resolved = ParseDecimalU32(offset_text, out.byte_offset);
-  return true;
-}
-
-bool ParseExtractValueAggregate(std::string_view rhs, std::string_view& aggregate) {
-  std::size_t cursor = 0;
-  if (!ConsumeToken(rhs, cursor, "extractvalue ") ||
-      !ConsumeToken(rhs, cursor, "%dx.types.CBufRet.f32 "))
-    return false;
-  const std::size_t comma = rhs.rfind(',');
-  if (comma == std::string_view::npos || comma < cursor) return false;
-  const std::string_view candidate = Trim(rhs.substr(cursor, comma - cursor));
-  if (!IsSsaValue(candidate)) return false;
-  aggregate = candidate;
-  return true;
-}
-
 bool ResolveDirectOrigin(const ParsedFunction& function, std::string_view operand,
     PreFadeOperandSource& source) {
   if (!IsSsaValue(operand)) return false;
@@ -358,8 +143,8 @@ bool ResolveDirectOrigin(const ParsedFunction& function, std::string_view operan
   if (ParseExtractValueAggregate(definition->rhs, aggregate)) {
     const FunctionLine* aggregate_definition = Definition(function, aggregate);
     if (!aggregate_definition) return false;
-    CBufferLoadLegacy legacy;
-    if (!ParseCBufferLoadLegacy(aggregate_definition->rhs, legacy)) return false;
+    CbufferLoadLegacyCall legacy;
+    if (!ParseCbufferLoadLegacyCall(aggregate_definition->rhs, legacy)) return false;
     source.resolved = true;
     source.handle_value = std::string(legacy.handle);
     source.legacy_form = true;
@@ -367,8 +152,8 @@ bool ResolveDirectOrigin(const ParsedFunction& function, std::string_view operan
     source.row = legacy.row;
     return true;
   }
-  CBufferLoadByte byte_form;
-  if (ParseCBufferLoadByte(definition->rhs, byte_form)) {
+  CbufferLoadByteCall byte_form;
+  if (ParseCbufferLoadByteCall(definition->rhs, byte_form)) {
     source.resolved = true;
     source.handle_value = std::string(byte_form.handle);
     source.legacy_form = false;
@@ -377,68 +162,6 @@ bool ResolveDirectOrigin(const ParsedFunction& function, std::string_view operan
     return true;
   }
   return false;
-}
-
-bool ParseExtractValueComponent(std::string_view rhs, std::uint32_t& component) {
-  const std::size_t comma = rhs.rfind(',');
-  if (comma == std::string_view::npos) return false;
-  std::uint32_t value = 0;
-  if (!ParseDecimalU32(Trim(rhs.substr(comma + 1)), value) || value > 3) return false;
-  component = value;
-  return true;
-}
-
-bool ParseFMinOperands(std::string_view rhs, std::string_view& operand_a,
-    std::string_view& operand_b) {
-  std::size_t cursor = 0;
-  if (!ConsumeToken(rhs, cursor, "call") || !ConsumeToken(rhs, cursor, "float") ||
-      !ConsumeToken(rhs, cursor, "@dx.op.binary.f32") ||
-      !ConsumeToken(rhs, cursor, "(") || !ConsumeToken(rhs, cursor, "i32") ||
-      !ConsumeToken(rhs, cursor, "36") || !ConsumeToken(rhs, cursor, ","))
-    return false;
-  if (!ConsumeToken(rhs, cursor, "float")) return false;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
-  std::size_t start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ',') ++cursor;
-  operand_a = Trim(rhs.substr(start, cursor - start));
-  if (cursor == rhs.size() || rhs[cursor] != ',') return false;
-  ++cursor;
-  if (!ConsumeToken(rhs, cursor, "float")) return false;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
-  start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
-  operand_b = Trim(rhs.substr(start, cursor - start));
-  if (cursor == rhs.size() || rhs[cursor] != ')') return false;
-  if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
-  return !operand_a.empty() && !operand_b.empty();
-}
-
-bool ParseCreateHandleRangeId(std::string_view rhs, std::uint32_t& range_id) {
-  std::size_t cursor = 0;
-  if (!ConsumeToken(rhs, cursor, "call") || !ConsumeToken(rhs, cursor, "%dx.types.Handle") ||
-      !ConsumeToken(rhs, cursor, "@dx.op.createHandle") || !ConsumeToken(rhs, cursor, "(") ||
-      !ConsumeToken(rhs, cursor, "i32") || !ConsumeToken(rhs, cursor, "57") ||
-      !ConsumeToken(rhs, cursor, ",") || !ConsumeToken(rhs, cursor, "i8"))
-    return false;
-  while (cursor < rhs.size() && rhs[cursor] != ',') ++cursor;
-  if (cursor == rhs.size()) return false;
-  ++cursor;
-  if (!ConsumeToken(rhs, cursor, "i32")) return false;
-  while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
-    ++cursor;
-  const std::size_t start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ',') ++cursor;
-  const std::string_view id_text = Trim(rhs.substr(start, cursor - start));
-  std::uint64_t value = 0;
-  for (char c : id_text) {
-    if (std::isdigit(static_cast<unsigned char>(c)) == 0) return false;
-    value = value * 10 + static_cast<unsigned>(c - '0');
-  }
-  if (id_text.empty() || value > 0xFFFFFFFFull) return false;
-  range_id = static_cast<std::uint32_t>(value);
-  return true;
 }
 
 bool SplitMetadataFields(std::string_view braced, std::vector<std::string_view>& fields) {
@@ -497,7 +220,7 @@ bool ParseTypedU32(std::string_view field, std::uint32_t& value) {
 
 bool ParseMetadataDefinitionLine(std::string_view line, std::uint32_t& id,
     std::vector<std::string_view>& fields) {
-  line = Trim(StripComment(line));
+  line = Trim(SplitCodeAndComment(line).code);
   if (line.size() < 2 || line.front() != '!' ||
       std::isdigit(static_cast<unsigned char>(line[1])) == 0)
     return false;
@@ -543,9 +266,11 @@ void ResolveRegisterBestEffort(
     const ParsedFunction& function, const std::string& llvm_ir, PreFadeOperandSource& source) {
   const FunctionLine* handle_definition = Definition(function, source.handle_value);
   if (!handle_definition) return;
-  std::uint32_t range_id = 0;
-  if (!ParseCreateHandleRangeId(handle_definition->rhs, range_id)) return;
-  const CbvRegisterBinding binding = ResolveCbvRangeId(llvm_ir, range_id);
+  CreateHandleCall handle_call;
+  if (!ParseCreateHandleCall(handle_definition->rhs, handle_call) ||
+      !handle_call.range_id_resolved)
+    return;
+  const CbvRegisterBinding binding = ResolveCbvRangeId(llvm_ir, handle_call.range_id);
   if (!binding.resolved) return;
   source.register_resolved = true;
   source.cbuffer_space = binding.cbuffer_space;
@@ -728,8 +453,8 @@ CbvRegisterBinding ResolveCbvRangeId(
   for (std::size_t start = 0; start <= llvm_ir.size();) {
     const std::size_t newline = llvm_ir.find('\n', start);
     const std::size_t end = newline == std::string::npos ? llvm_ir.size() : newline;
-    const std::string_view line = Trim(StripComment(
-        std::string_view(llvm_ir.data() + start, end - start)));
+    const std::string_view line = Trim(SplitCodeAndComment(
+        std::string_view(llvm_ir.data() + start, end - start)).code);
     constexpr std::string_view prefix = "!dx.resources = !{";
     if (line.starts_with(prefix) && !line.empty() && line.back() == '}') {
       if (found_resources_line) return {};

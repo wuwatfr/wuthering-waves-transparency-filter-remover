@@ -47,33 +47,43 @@ add_executable(fade_primitive_detector_tests
   tests/test_fade_primitive_detector.cpp
   src/fade_primitive_detector.cpp
   src/pre_fade_fmin_analysis.cpp
-  src/target_dither_bypass.cpp)
+  src/target_dither_bypass.cpp
+  src/dxil_ir_lexer.cpp)
 target_include_directories(fade_primitive_detector_tests PRIVATE src)
+
+add_executable(dxil_ir_lexer_tests
+  tests/test_dxil_ir_lexer.cpp
+  src/dxil_ir_lexer.cpp)
+target_include_directories(dxil_ir_lexer_tests PRIVATE src)
 
 add_executable(fade_primitive_audit EXCLUDE_FROM_ALL
   tools/fade_primitive_audit.cpp
-  src/fade_primitive_detector.cpp)
+  src/fade_primitive_detector.cpp
+  src/dxil_ir_lexer.cpp)
 target_include_directories(fade_primitive_audit PRIVATE src)
 
 add_executable(pre_fade_fmin_audit EXCLUDE_FROM_ALL
   tools/pre_fade_fmin_audit.cpp
   src/fade_primitive_detector.cpp
   src/pre_fade_fmin_analysis.cpp
-  src/target_dither_bypass.cpp)
+  src/target_dither_bypass.cpp
+  src/dxil_ir_lexer.cpp)
 target_include_directories(pre_fade_fmin_audit PRIVATE src)
 
 add_executable(pre_fade_fmin_analysis_tests
   tests/test_pre_fade_fmin_analysis.cpp
   src/pre_fade_fmin_analysis.cpp
   src/target_dither_bypass.cpp
-  src/fade_primitive_detector.cpp)
+  src/fade_primitive_detector.cpp
+  src/dxil_ir_lexer.cpp)
 target_include_directories(pre_fade_fmin_analysis_tests PRIVATE src)
 
 add_executable(target_dither_bypass_tests
   tests/test_target_dither_bypass.cpp
   src/target_dither_bypass.cpp
   src/pre_fade_fmin_analysis.cpp
-  src/fade_primitive_detector.cpp)
+  src/fade_primitive_detector.cpp
+  src/dxil_ir_lexer.cpp)
 target_include_directories(target_dither_bypass_tests PRIVATE src)
 
 add_executable(fade_control_state_tests
@@ -115,6 +125,7 @@ add_test(NAME dxc_validation_policy_tests COMMAND dxc_validation_policy_tests)
 add_test(NAME device_activity_state_tests COMMAND device_activity_state_tests)
 add_test(NAME dxil_dither_diagnostic_tests COMMAND dxil_dither_diagnostic_tests)
 add_test(NAME fade_primitive_detector_tests COMMAND fade_primitive_detector_tests)
+add_test(NAME dxil_ir_lexer_tests COMMAND dxil_ir_lexer_tests)
 add_test(NAME pre_fade_fmin_analysis_tests COMMAND pre_fade_fmin_analysis_tests)
 add_test(NAME target_dither_bypass_tests COMMAND target_dither_bypass_tests)
 add_test(NAME fade_control_state_tests COMMAND fade_control_state_tests)
@@ -138,13 +149,14 @@ if(WIN32)
       set(addon_sources
         src/addon.cpp
         src/dxc_bridge.cpp
+        src/dxil_ir_lexer.cpp
         src/fade_primitive_detector.cpp
+        src/fade_primitive_runtime.cpp
         src/pixel_shader_identity.cpp
         src/pre_fade_fmin_analysis.cpp
         src/target_dither_bypass.cpp)
       if(DEVTOOLS_VALUE)
         list(APPEND addon_sources
-          src/fade_primitive_runtime.cpp
           src/dxil_dither_diagnostic.cpp
           src/dev/capture/descriptor_table_state.cpp
           src/dev/capture/fade_control_runtime.cpp
@@ -164,7 +176,6 @@ if(WIN32)
           )
       else()
         list(APPEND addon_sources
-          src/fade_primitive_runtime.cpp
           src/production/production_module.cpp)
       endif()
       add_library(${TARGET_NAME} MODULE ${addon_sources})
@@ -203,7 +214,8 @@ if(WIN32)
         src/dxc_bridge.cpp
         src/fade_primitive_detector.cpp
         src/pre_fade_fmin_analysis.cpp
-        src/target_dither_bypass.cpp)
+        src/target_dither_bypass.cpp
+        src/dxil_ir_lexer.cpp)
       target_include_directories(complete_dxil_validation_tests PRIVATE
         src "${DXC_INCLUDE_DIR}")
       add_custom_command(TARGET complete_dxil_validation_tests POST_BUILD
