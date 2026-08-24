@@ -175,6 +175,7 @@ $testTargets = @(
     'trace_submission_identity_tests',
     'manual_capture_state_tests',
     'fade_control_membership_tests',
+    'resource_lifecycle_state_tests',
     'single_flight_cache_tests',
     'memory_telemetry_tests',
     'complete_dxil_validation_tests'

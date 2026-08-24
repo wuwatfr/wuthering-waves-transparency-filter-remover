@@ -14,8 +14,6 @@ namespace wuwa_tfr::dev {
 
 std::mutex g_trace_mutex;
 wuwa_tfr::TraceIncarnationIndex<TracePsoIdentity> g_trace_pso_incarnations;
-wuwa_tfr::TraceIncarnationIndex<TraceResourceIdentity>
-    g_trace_resource_incarnations;
 wuwa_tfr::TraceIncarnationIndex<std::uint64_t> g_trace_view_incarnations;
 TracePsoAmbiguityDiagnostics g_trace_pso_lifecycle_ambiguities;
 TraceResourceAmbiguityDiagnostics g_trace_resource_lifecycle_ambiguities;
@@ -112,11 +110,8 @@ ActiveTraceResource ActiveResourceIncarnationLocked(
     DeviceIdentity device,
     resource handle) {
   if (handle.handle == 0) return {};
-  const auto* record = g_trace_resource_incarnations.FindActive(
-      {device, handle.handle});
-  return record
-      ? ActiveTraceResource{record->id, record->identity.dynamic_contents}
-      : ActiveTraceResource{};
+  const auto active = FindActiveResourceLifecycle({device, handle.handle});
+  return {active.incarnation_id, active.dynamic_contents};
 }
 
 std::uint64_t ActiveViewIncarnationLocked(

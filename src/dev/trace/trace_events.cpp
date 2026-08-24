@@ -135,16 +135,15 @@ void OnInitTraceResource(device* owner, const resource_desc& desc,
   std::lock_guard lock(g_trace_mutex);
   const TracePipelineKey key{DeviceKey(owner), handle.handle};
   const TraceResourceIdentity identity = ResourceIdentity(desc, initial_usage);
-  const auto result = g_trace_resource_incarnations.Activate(
-      key, identity);
+  const auto result = ActivateResourceLifecycle(key, identity);
   if (result.rotated_without_destroy && result.previous_identity) {
     g_trace_resource_lifecycle_ambiguities.Record(key,
         *result.previous_identity, identity,
         g_trace_frame_id.load(std::memory_order_relaxed),
         ++g_trace_lifecycle_event_serial);
   }
-  const std::size_t pruned = g_trace_resource_incarnations.PruneTo(
-      kMaxTrackedResourceIncarnations);
+  const std::size_t pruned =
+      PruneResourceLifecycleTo(kMaxTrackedResourceIncarnations);
   if (pruned != 0) {
     g_trace_incarnation_prunes += pruned;
     g_trace_identity_capacity_exceeded = true;
@@ -154,7 +153,7 @@ void OnInitTraceResource(device* owner, const resource_desc& desc,
 void OnDestroyTraceResource(device* owner, resource handle) {
   if (!g_target_process || !owner || handle.handle == 0) return;
   std::lock_guard lock(g_trace_mutex);
-  g_trace_resource_incarnations.Destroy({DeviceKey(owner), handle.handle});
+  DestroyResourceLifecycle({DeviceKey(owner), handle.handle});
 }
 
 void OnInitTraceResourceView(device* owner, resource resource_handle,

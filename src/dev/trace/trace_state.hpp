@@ -17,6 +17,7 @@
 
 #include "addon_shared.hpp"
 #include "dev/capture/fade_control_snapshot.hpp"
+#include "dev/resource_lifecycle_state.hpp"
 #include "trace_submission_identity.hpp"
 
 namespace wuwa_tfr::dev {
@@ -51,15 +52,6 @@ struct TracePsoIdentity {
 
   friend bool operator==(const TracePsoIdentity&, const TracePsoIdentity&) =
       default;
-};
-
-struct TraceResourceIdentity {
-  std::uint64_t fingerprint = 0;
-  bool dynamic_contents = false;
-
-  friend bool operator==(
-      const TraceResourceIdentity&,
-      const TraceResourceIdentity&) = default;
 };
 
 using ConcreteWindowMetrics = wuwa_tfr::TraceSubmissionWindowMetrics;
@@ -329,8 +321,6 @@ using TraceResourceAmbiguityDiagnostics =
 extern std::mutex g_trace_mutex;
 extern wuwa_tfr::TraceIncarnationIndex<TracePsoIdentity>
     g_trace_pso_incarnations;
-extern wuwa_tfr::TraceIncarnationIndex<TraceResourceIdentity>
-    g_trace_resource_incarnations;
 extern wuwa_tfr::TraceIncarnationIndex<std::uint64_t>
     g_trace_view_incarnations;
 extern TracePsoAmbiguityDiagnostics g_trace_pso_lifecycle_ambiguities;

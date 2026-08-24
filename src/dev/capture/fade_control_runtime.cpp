@@ -17,6 +17,7 @@
 #include "dev/capture/manual_capture_state.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
+#include "dev/resource_lifecycle_state.hpp"
 
 using namespace reshade::api;
 
@@ -53,15 +54,6 @@ std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutCbvRangeInfo,
 
 DescriptorSlotTable g_descriptor_table_slots;
 
-wuwa_tfr::TraceIncarnationIndex<int> g_fade_control_resource_incarnations;
-
-std::uint64_t CurrentFadeControlResourceIncarnationLocked(
-    wuwa_tfr::DeviceIdentity device, std::uint64_t resource_handle) {
-  const auto* record = g_fade_control_resource_incarnations.FindActive(
-      {device, resource_handle});
-  return record ? record->id : 0;
-}
-
 struct MappedBufferInfo {
   std::byte* base = nullptr;
   std::uint64_t offset = 0;
@@ -76,14 +68,6 @@ std::unordered_map<wuwa_tfr::TraceLiveHandleKey, MappedBufferInfo,
 bool IsCbvDescriptorType(descriptor_type type) noexcept {
   return type == descriptor_type::constant_buffer ||
       type == descriptor_type::constant_buffer_with_dynamic_offset;
-}
-
-void OnInitFadeControlResource(device* owner, const resource_desc&,
-    const subresource_data*, resource_usage, resource handle) {
-  if (!g_target_process || !owner || handle.handle == 0) return;
-  std::lock_guard lock(g_fade_control_mutex);
-  g_fade_control_resource_incarnations.Activate(
-      {DeviceKey(owner), handle.handle}, 0);
 }
 
 void AppendDescriptorCbvRange(std::uint32_t param_index,
@@ -230,7 +214,6 @@ void OnDestroyFadeControlResource(device* owner, resource resource_handle) {
     const wuwa_tfr::TraceLiveHandleKey key{
         DeviceKey(owner), resource_handle.handle};
     g_mapped_buffers.erase(key);
-    g_fade_control_resource_incarnations.Destroy(key);
     InvalidateDescriptorTableSlotsForResource(
         g_descriptor_table_slots, DeviceKey(owner), resource_handle.handle);
   }
@@ -260,8 +243,8 @@ bool OnUpdateFadeControlDescriptorTables(device* owner, std::uint32_t count,
         SetDescriptorTableSlot(g_descriptor_table_slots, key, std::nullopt);
         continue;
       }
-      const auto incarnation = CurrentFadeControlResourceIncarnationLocked(
-          DeviceKey(owner), ranges[i].buffer.handle);
+      const auto incarnation = FindActiveResourceLifecycle(
+          {DeviceKey(owner), ranges[i].buffer.handle}).incarnation_id;
       SetDescriptorTableSlot(g_descriptor_table_slots, key,
           DescriptorSlotContent{ranges[i].buffer.handle, incarnation,
               ranges[i].offset, ranges[i].size});
@@ -478,8 +461,8 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
         {key, Unavailable(kFadeControlReasonDescriptorUnknown)});
     return true;
   }
-  const auto current_incarnation = CurrentFadeControlResourceIncarnationLocked(
-      trace.device, content->resource_handle);
+  const auto current_incarnation = FindActiveResourceLifecycle(
+      {trace.device, content->resource_handle}).incarnation_id;
   if (!DescriptorSlotContentIsCurrent(*content, current_incarnation)) {
     draw.pending_fade_observations.push_back(
         {key, Unavailable(kFadeControlReasonStaleDescriptorBinding)});
@@ -565,8 +548,6 @@ void RegisterFadeControlRuntimeEvents() {
       OnInitFadeControlPipelineLayout);
   reshade::register_event<reshade::addon_event::destroy_pipeline_layout>(
       OnDestroyFadeControlPipelineLayout);
-  reshade::register_event<reshade::addon_event::init_resource>(
-      OnInitFadeControlResource);
   reshade::register_event<reshade::addon_event::map_buffer_region>(
       OnMapFadeControlBuffer);
   reshade::register_event<reshade::addon_event::unmap_buffer_region>(

@@ -13,10 +13,9 @@ namespace wuwa_tfr::dev {
 
 void OnDestroyDeviceHook(device* owner) {
   const DeviceIdentity device_key = DeviceKey(owner);
+  DestroyResourceLifecycleForDevice(device_key);
   std::lock_guard lock(g_trace_mutex);
   g_trace_pso_incarnations.DestroyWhere(
-      [device_key](const auto& key) { return key.owner == device_key; });
-  g_trace_resource_incarnations.DestroyWhere(
       [device_key](const auto& key) { return key.owner == device_key; });
   g_trace_view_incarnations.DestroyWhere(
       [device_key](const auto& key) { return key.owner == device_key; });
