@@ -49,9 +49,9 @@ bool FindDxilPixelShader(
 }
 
 std::string FadePrimitiveConsumers(
-    const wuwa_tfr::FadePrimitiveDiagnostic& diagnostic) {
+    const std::vector<wuwa_tfr::FadePrimitiveInstance>& instances) {
   std::vector<const char*> names;
-  for (const auto& instance : diagnostic.instances) {
+  for (const auto& instance : instances) {
     const char* name = wuwa_tfr::FadePrimitiveConsumerName(instance.consumer);
     if (std::find(names.begin(), names.end(), name) == names.end())
       names.push_back(name);

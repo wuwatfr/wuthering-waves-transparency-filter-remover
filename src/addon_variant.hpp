@@ -32,8 +32,8 @@ void DrawVariantOverlay();
 void LogVariantStartup();
 
 // Called when the generic bootstrap detects that the last active D3D12
-// device has just been destroyed. Production has nothing to react to; Dev
-// uses this to tear down its shader-inspection DXC instance.
+// device has just been destroyed. Neither variant currently owns any
+// last-device-destroyed teardown state.
 void OnLastDeviceDestroyed();
 
 }  // namespace wuwa_tfr::variant

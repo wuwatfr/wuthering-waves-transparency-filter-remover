@@ -4,6 +4,7 @@
 #include "dev/dev_runtime.hpp"
 
 #include "addon_shared.hpp"
+#include "dev/dev_inspection.hpp"
 
 using namespace reshade::api;
 
@@ -30,6 +31,11 @@ thread_local bool g_dev_runtime_internal_pipeline_event = false;
 
 void InitializeDevRuntime() {
   g_dev_antifade_runtime.set_dxc_runtime_directory(g_addon_directory);
+  // Installed here, alongside set_dxc_runtime_directory, so both pieces of
+  // initialization-time configuration -- and the same "before any device
+  // activates" contract -- live in one place. See
+  // FadePrimitiveRuntime::set_observer()'s own documentation.
+  g_dev_antifade_runtime.set_observer(InspectionObserver());
 }
 
 void OnInitDevRuntimeDevice(device* owner) {

@@ -218,8 +218,8 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
 // DrawFadePrimitiveTargetModes).
 bool IsVerifiedFadePrimitiveShaderLocked(std::uint64_t shader_hash) {
   const auto it = g_inspections.find(shader_hash);
-  return it != g_inspections.end() && it->second.success &&
-      !it->second.fade_primitive.instances.empty();
+  return it != g_inspections.end() && it->second.inspection_succeeded &&
+      !it->second.fade_instances.empty();
 }
 
 }  // namespace

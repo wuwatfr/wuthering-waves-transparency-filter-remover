@@ -35,8 +35,6 @@ void InitializeVariant() {
 }
 
 void RegisterVariantEvents() {
-  reshade::register_event<reshade::addon_event::create_pipeline>(
-      dev::OnCreatePipeline);
   dev::RegisterDevEvents();
   dev::RegisterManualCaptureEvents();
   dev::RegisterFadeControlRuntimeEvents();
@@ -82,8 +80,10 @@ void LogVariantStartup() {
       "; config=" + ConfigPath().string());
 }
 
-void OnLastDeviceDestroyed() {
-  dev::TeardownInspectionOnLastDevice();
-}
+// Dev's shader-inspection state is entirely populated through
+// g_dev_antifade_runtime's observer seam now, with no DXC instance of its
+// own to tear down here; nothing else in Dev owns last-device-destroyed
+// state either.
+void OnLastDeviceDestroyed() {}
 
 }  // namespace wuwa_tfr::variant

@@ -12,11 +12,8 @@
 #include <string>
 #include <utility>
 
-#include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
 #include "addon_shared.hpp"
-
-using namespace reshade::api;
 
 namespace wuwa_tfr::dev {
 
@@ -50,7 +47,17 @@ bool HasDxilChunk(const std::uint8_t* data, std::size_t size) {
   return has_dxil;
 }
 
-bool WriteCapture(
+// Same stable identity target_dither_bypass.cpp's own instance matching
+// uses (function, merge SSA name, consumer): enough to re-associate a
+// PreFadeFMinEvidence entry with the FadePrimitiveInstance it belongs to
+// without relying on either vector's index or ordering.
+bool SameFadePrimitiveInstance(const wuwa_tfr::FadePrimitiveInstance& left,
+    const wuwa_tfr::FadePrimitiveInstance& right) noexcept {
+  return left.function_identity == right.function_identity &&
+      left.merge_value == right.merge_value && left.consumer == right.consumer;
+}
+
+bool WriteShaderDump(
     std::uint64_t hash,
     std::size_t bytecode_size,
     const std::string& original_ir,
@@ -62,7 +69,7 @@ bool WriteCapture(
 
   const std::string base = Hex64(hash);
   const auto ir_path = directory / (base + ".original.ll");
-  const auto metadata_path = directory / (base + ".capture.meta.txt");
+  const auto metadata_path = directory / (base + ".dump.meta.txt");
 
   std::ofstream ir_file(ir_path, std::ios::binary | std::ios::trunc);
   if (!ir_file) return false;
@@ -74,7 +81,10 @@ bool WriteCapture(
   std::ofstream metadata(metadata_path, std::ios::binary | std::ios::trunc);
   if (!metadata) return false;
   metadata << "format=wuwa_tfr_capture_v1\n";
-  metadata << "source=wuthering_waves_runtime_create_pipeline\n";
+  // The canonical runtime's own pipeline-initialization path, not this
+  // module's former create_pipeline hook -- see dev_inspection.hpp's module
+  // comment.
+  metadata << "source=wuthering_waves_runtime_init_pipeline\n";
   metadata << "stage=original_pixel_shader\n";
   metadata << "selection=all_unique_dxil_when_dump_enabled\n";
   metadata << "analysis=independent_spatial_dither_diagnostic_v1\n";
@@ -114,10 +124,98 @@ bool EnvFlag(const wchar_t* name) {
       value == L"on";
 }
 
+// The Dev-owned observer: every override reads only what the canonical
+// runtime already computed and passed in. Nothing here re-derives a DXIL
+// disassembly, re-runs AnalyzeFadePrimitiveV1()/AnalyzePreFadeFMinForInstance
+// itself, or retains original_ir past the call -- everything this class
+// keeps is a value copied out of the observation before it returns.
+class InspectionObserverImpl final : public wuwa_tfr::FadePrimitiveRuntimeObserver {
+ public:
+  void OnShaderPrepared(const ShaderPreparationObservation& observation) override {
+    g_unique_dxil_shaders.fetch_add(1, std::memory_order_relaxed);
+    if (observation.inspection_succeeded)
+      g_disassembly_successes.fetch_add(1, std::memory_order_relaxed);
+    else
+      g_disassembly_failures.fetch_add(1, std::memory_order_relaxed);
+
+    InspectionRecord record;
+    record.inspection_succeeded = observation.inspection_succeeded;
+    record.inspection_error = observation.inspection_error;
+    record.bytecode_size = observation.original_bytecode_size;
+    record.patch_succeeded = observation.patch_succeeded;
+    record.patch_failure = observation.patch_failure;
+    record.prepared_succeeded = observation.prepared_succeeded;
+    record.prepared_failure = observation.prepared_failure;
+
+    record.fade_instances.reserve(observation.fade_primitive.instances.size());
+    for (const auto& instance : observation.fade_primitive.instances) {
+      FadeInstanceObservation entry;
+      entry.instance = instance;
+      // Associated by stable identity, never by a shared vector index:
+      // pre_fade_evidence may be a strict prefix of fade_primitive.instances
+      // (TargetDitherBypassResult::instance_evidence's own documented
+      // semantics), so the two vectors are not guaranteed the same length.
+      for (const auto& evidence : observation.pre_fade_evidence) {
+        if (SameFadePrimitiveInstance(evidence.instance, instance)) {
+          entry.pre_fade = evidence.analysis;
+          break;
+        }
+      }
+      record.fade_instances.push_back(std::move(entry));
+    }
+
+    // Genuinely Dev-only analysis, synchronous, on the observation's own
+    // original_ir -- never retained beyond this scope.
+    if (observation.inspection_succeeded && observation.original_ir) {
+      const std::string& original_ir = *observation.original_ir;
+      record.dither = wuwa_tfr::AnalyzeSpatialDitherDiagnostic(original_ir);
+      // Diagnostic-only; never influences fade_instances or patch
+      // eligibility above.
+      record.fade_control = AnalyzeFadeControlSources(
+          original_ir, observation.fade_primitive);
+
+      if (record.dither.discard_calls != 0)
+        g_discard_shader_count.fetch_add(1, std::memory_order_relaxed);
+      if (record.dither.classification ==
+          wuwa_tfr::SpatialDitherClassification::StrictSpatialDither) {
+        g_strict_spatial_dither_count.fetch_add(1, std::memory_order_relaxed);
+      } else if (record.dither.classification ==
+          wuwa_tfr::SpatialDitherClassification::AmbiguousStrictSpatialDither) {
+        g_ambiguous_spatial_dither_count.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+      if (!observation.fade_primitive.instances.empty()) {
+        g_fade_primitive_shader_count.fetch_add(1, std::memory_order_relaxed);
+        g_fade_primitive_instance_count.fetch_add(
+            observation.fade_primitive.instances.size(),
+            std::memory_order_relaxed);
+      }
+      record.dumped = WriteShaderDump(observation.original_shader_hash,
+          observation.original_bytecode_size, original_ir, record.dither,
+          observation.fade_primitive);
+      if (record.dumped)
+        g_dumped_shaders.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // The canonical runtime's own single-flight shader cache guarantees
+    // this fires at most once per unique hash, so this lock only has to
+    // protect g_inspections itself from concurrent insertion of different
+    // hashes (and from concurrent readers) -- not from two callers racing
+    // to build the record for the same hash, which cannot happen. Every
+    // Dev-only analysis above therefore runs outside the lock.
+    std::lock_guard lock(g_inspection_mutex);
+    g_inspections.emplace(observation.original_shader_hash, std::move(record));
+  }
+
+  void OnPipelineInit(const PipelineInitObservation& observation) override {
+    if (observation.pixel_shader_identified)
+      g_seen_shader_callbacks.fetch_add(1, std::memory_order_relaxed);
+  }
+};
+
 }  // namespace
 
 std::mutex g_inspection_mutex;
-DxcBridge* g_dxc = nullptr;
 std::unordered_map<std::uint64_t, InspectionRecord> g_inspections;
 
 std::atomic<std::uint64_t> g_seen_shader_callbacks{0};
@@ -146,106 +244,15 @@ std::uint64_t Fnv1a64(const void* data, std::size_t size) {
   return hash;
 }
 
-void InspectPixelShader(const reshade::api::shader_desc& descriptor) {
-  g_seen_shader_callbacks.fetch_add(1, std::memory_order_relaxed);
-  const std::uint64_t hash = Fnv1a64(descriptor.code, descriptor.code_size);
-
-  std::lock_guard lock(g_inspection_mutex);
-  if (g_inspections.contains(hash)) return;
-
-  g_unique_dxil_shaders.fetch_add(1, std::memory_order_relaxed);
-  InspectionRecord record;
-  record.bytecode_size = descriptor.code_size;
-
-  if (!g_dxc) g_dxc = new DxcBridge(g_addon_directory);
-  if (!g_dxc->available()) {
-    record.error = g_dxc->init_error();
-    g_disassembly_failures.fetch_add(1, std::memory_order_relaxed);
-    g_inspections.emplace(hash, std::move(record));
-    return;
-  }
-
-  auto inspection =
-      g_dxc->InspectShader(descriptor.code, descriptor.code_size);
-  record.success = inspection.success;
-  record.error = std::move(inspection.error);
-  if (record.success) {
-    g_disassembly_successes.fetch_add(1, std::memory_order_relaxed);
-    record.dither = AnalyzeSpatialDitherDiagnostic(inspection.original_ir);
-    record.fade_primitive = AnalyzeFadePrimitiveV1(inspection.original_ir);
-    // Diagnostic-only; never influences record.fade_primitive or patch
-    // eligibility above.
-    record.fade_control = AnalyzeFadeControlSources(
-        inspection.original_ir, record.fade_primitive);
-    record.pre_fade_fmin.reserve(record.fade_primitive.instances.size());
-    for (const auto& instance : record.fade_primitive.instances) {
-      auto analysis =
-          wuwa_tfr::AnalyzePreFadeFMinForInstance(inspection.original_ir, instance);
-      // Dev-only enrichment; Production's patch path never pays for this.
-      wuwa_tfr::ResolvePreFadeCbvRegisters(inspection.original_ir, instance, analysis);
-      record.pre_fade_fmin.push_back(std::move(analysis));
-    }
-    if (record.dither.discard_calls != 0)
-      g_discard_shader_count.fetch_add(1, std::memory_order_relaxed);
-    if (record.dither.classification ==
-        SpatialDitherClassification::StrictSpatialDither) {
-      g_strict_spatial_dither_count.fetch_add(1, std::memory_order_relaxed);
-    } else if (record.dither.classification ==
-        SpatialDitherClassification::AmbiguousStrictSpatialDither) {
-      g_ambiguous_spatial_dither_count.fetch_add(
-          1, std::memory_order_relaxed);
-    }
-    if (!record.fade_primitive.instances.empty()) {
-      g_fade_primitive_shader_count.fetch_add(1, std::memory_order_relaxed);
-      g_fade_primitive_instance_count.fetch_add(
-          record.fade_primitive.instances.size(), std::memory_order_relaxed);
-    }
-    record.dumped = WriteCapture(
-        hash, descriptor.code_size, inspection.original_ir,
-        record.dither, record.fade_primitive);
-    if (record.dumped)
-      g_dumped_shaders.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    g_disassembly_failures.fetch_add(1, std::memory_order_relaxed);
-  }
-  g_inspections.emplace(hash, std::move(record));
-}
-
-bool OnCreatePipeline(
-    device* owner,
-    pipeline_layout,
-    std::uint32_t subobject_count,
-    const pipeline_subobject* subobjects) {
-  if (g_dev_runtime_internal_pipeline_event) return false;
-  // Dev capture observes the original descriptor only; it never mutates it.
-  if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
-      (!g_diagnostic && !g_dump) || !subobjects)
-    return false;
-
-  auto active = g_device_activity.Acquire(DeviceKey(owner));
-  if (!active) return false;
-
-  for (std::uint32_t i = 0; i < subobject_count; ++i) {
-    if (subobjects[i].type != pipeline_subobject_type::pixel_shader ||
-        !subobjects[i].data)
-      continue;
-    const auto& descriptor =
-        *static_cast<const shader_desc*>(subobjects[i].data);
-    if (LooksLikeDxil(descriptor)) InspectPixelShader(descriptor);
-  }
-  return false;
+wuwa_tfr::FadePrimitiveRuntimeObserver* InspectionObserver() {
+  static InspectionObserverImpl instance;
+  return &instance;
 }
 
 void InitializeInspectionConfig() {
   g_diagnostic = ConfigFlag(L"Diagnostic", EnvFlag(L"WUWA_TFR_DIAGNOSTIC"));
   g_dump = ConfigFlag(L"Dump", EnvFlag(L"WUWA_TFR_DUMP"));
   g_dump_path = ConfigPathValue(L"DumpPath");
-}
-
-void TeardownInspectionOnLastDevice() {
-  std::lock_guard lock(g_inspection_mutex);
-  delete g_dxc;
-  g_dxc = nullptr;
 }
 
 }  // namespace wuwa_tfr::dev

@@ -55,9 +55,11 @@ void OnInitTracePipeline(
     return;
   }
 
-  // All-v1 Dev mode is driven by the frozen structural detector, so every
-  // observed DXIL pixel shader is inspected even when capture dumping is off.
-  InspectPixelShader(*descriptor);
+  // No inspection call needed here: g_dev_antifade_runtime's own
+  // OnInitPipeline (dev/dev_runtime.hpp) already prepares every observed
+  // pixel shader, regardless of Diagnostic/Dump/enabled state, and its
+  // observer (dev/dev_inspection.hpp) populates g_inspections from that same
+  // pass -- this trace observer no longer needs a disassembly of its own.
 
   TracePipelineInfo pipeline_info = DescribeTracePipeline(
       subobject_count, subobjects, shader_hash);

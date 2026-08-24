@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <reshade.hpp>
 
@@ -23,8 +24,8 @@
 
 namespace wuwa_tfr::dev {
 
-// Read only by DrawTraceOverlay; written only by InspectPixelShader
-// (dev/dev_inspection.*).
+// Read only by DrawTraceOverlay; written only by the Dev inspection
+// observer's OnShaderPrepared() (dev/dev_inspection.*).
 extern std::atomic<std::uint64_t> g_discard_shader_count;
 extern std::atomic<std::uint64_t> g_strict_spatial_dither_count;
 extern std::atomic<std::uint64_t> g_ambiguous_spatial_dither_count;
@@ -41,9 +42,9 @@ bool FindDxilPixelShader(
     std::uint64_t& shader_hash);
 
 // Comma-separated, de-duplicated list of a verified Fade Primitive v1
-// diagnostic's consumer kinds, for display only.
+// instance list's consumer kinds, for display only.
 std::string FadePrimitiveConsumers(
-    const wuwa_tfr::FadePrimitiveDiagnostic& diagnostic);
+    const std::vector<wuwa_tfr::FadePrimitiveInstance>& instances);
 
 // Set from the Dev variant's InitializeVariant() (WuwaTFR.ini's DumpPath).
 // Read by both the shader-capture subsystem and the trace TSV exporters.
