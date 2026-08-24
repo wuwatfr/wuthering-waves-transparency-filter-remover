@@ -14,6 +14,7 @@ using wuwa_tfr::dev::ManualCaptureAccumulator;
 using wuwa_tfr::dev::ManualCaptureBindingObservation;
 using wuwa_tfr::dev::ManualCapturePipelineInfo;
 using wuwa_tfr::dev::ManualCaptureRecordKey;
+using wuwa_tfr::dev::ManualCaptureSessionToken;
 using wuwa_tfr::dev::ManualCaptureShaderFilter;
 using wuwa_tfr::dev::ManualCaptureState;
 using wuwa_tfr::dev::kMaxExportFilenameAttempts;
@@ -260,6 +261,22 @@ int main() {
     accumulator.Clear();
     CHECK(accumulator.state() == ManualCaptureState::Idle);
     CHECK(accumulator.Summary().record_count == 0);
+  }
+
+  // ManualCaptureSessionToken: the one shared, lock-free "is a manual
+  // capture session live, and which one" signal other channels (fade-value,
+  // fade-snapshot) participate in the session through. 0 while idle;
+  // Start() makes it that session's id; Stop() always returns it to 0,
+  // never leaking the previous session's id into a later idle window.
+  {
+    ManualCaptureSessionToken token;
+    CHECK(token.value() == 0);
+    token.Start(1);
+    CHECK(token.value() == 1);
+    token.Start(2);  // a later session's id fully replaces the earlier one
+    CHECK(token.value() == 2);
+    token.Stop();
+    CHECK(token.value() == 0);
   }
 
   // AllocateExportFilename: no collision returns the bare stem+extension.

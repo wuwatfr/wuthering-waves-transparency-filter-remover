@@ -3,7 +3,6 @@
 
 #include "dev/capture/manual_capture.hpp"
 
-#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -30,16 +29,17 @@ namespace {
 // All state below is either protected by g_trace_mutex (see
 // dev/trace/trace_state.hpp, reused here per the task's concurrency
 // guidance) or only ever touched from the ImGui render thread, matching how
-// dev/trace/trace_report.cpp's g_trace_ui_status is handled.
+// dev/trace/trace_report.cpp's g_trace_ui_status is handled. The one
+// exception is g_manual_capture_session_token (manual_capture_state.hpp),
+// which is intentionally its own lock-free atomic so this file's hot path
+// -- and every other participating channel's -- costs nothing when idle;
+// it is set/cleared here in lockstep with g_manual_capture.Start()/Stop()
+// and re-checked under the lock (via g_manual_capture.state()) before any
+// state mutation.
 ManualCaptureAccumulator g_manual_capture;
 std::uint64_t g_manual_capture_generation = 0;
 std::uint64_t g_manual_capture_frame_counter = 0;
 std::uintptr_t g_manual_capture_swapchain = 0;
-
-// Fast unlocked check so an idle manual capture costs nothing on the hot
-// execute_command_list/present path; re-checked under the lock before any
-// state mutation.
-std::atomic<bool> g_manual_capture_active{false};
 
 std::string g_manual_capture_status = "idle";
 std::string g_manual_capture_last_export;
@@ -225,8 +225,7 @@ bool IsVerifiedFadePrimitiveShaderLocked(std::uint64_t shader_hash) {
 }  // namespace
 
 void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
-  if (!g_manual_capture_active.load(std::memory_order_acquire) || !cmd_list)
-    return;
+  if (g_manual_capture_session_token.value() == 0 || !cmd_list) return;
   const auto* trace = cmd_list->get_private_data<CommandListTrace>();
   if (!trace ||
       (trace->recorded_draws.empty() &&
@@ -286,7 +285,7 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
 
 void OnManualCapturePresent(command_queue*, swapchain* presented_swapchain,
     const rect*, const rect*, std::uint32_t, const rect*) {
-  if (!g_manual_capture_active.load(std::memory_order_acquire)) return;
+  if (g_manual_capture_session_token.value() == 0) return;
 
   std::lock_guard lock(g_trace_mutex);
   if (g_manual_capture.state() != ManualCaptureState::Capturing) return;
@@ -322,11 +321,13 @@ void StartManualCapture() {
   g_manual_capture_frame_counter = 0;
   g_manual_capture_swapchain = 0;
   g_manual_capture.Start(g_manual_capture_generation, 0, filter_mode);
-  g_manual_capture_active.store(true, std::memory_order_release);
+  g_manual_capture_session_token.Start(g_manual_capture_generation);
   g_manual_capture_status = "capturing";
-  // Independent lifecycle/mutex from the route accumulation above (see
-  // fade_control_runtime.hpp); tied to the same session id purely for
-  // human correlation across the two exported TSVs.
+  // Fade control has its own mutex/accumulators (see
+  // fade_control_runtime.hpp) but no independent session lifecycle of its
+  // own: it participates in this same session via
+  // g_manual_capture_session_token above, and is simply told here whether
+  // it was opted into this particular one.
   StartFadeControlCapture(g_manual_capture_generation, fade_control_enabled);
 }
 
@@ -337,7 +338,7 @@ bool StopAndExportManualCapture() {
     if (g_manual_capture.state() != ManualCaptureState::Capturing)
       return false;
     snapshot = g_manual_capture.Stop(g_manual_capture_frame_counter);
-    g_manual_capture_active.store(false, std::memory_order_release);
+    g_manual_capture_session_token.Stop();
   }
   const bool fade_control_was_enabled = StopFadeControlCapture();
 

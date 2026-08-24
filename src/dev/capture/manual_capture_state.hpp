@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -45,6 +46,39 @@ enum class ManualCaptureState : std::uint8_t {
   Capturing,
   Captured,
 };
+
+// The one shared, lock-free "is a manual capture session currently live,
+// and which one" signal every participating channel's Draw-time hot path
+// reads, instead of tracking its own independent copy of that fact. 0 while
+// idle/captured; the live session's id (always nonzero -- see
+// dev/capture/manual_capture.cpp's g_manual_capture_generation) while
+// capturing. This mirrors only the "capturing + session id" half of
+// ManualCaptureAccumulator's fuller session state (which also tracks the
+// idle/capturing/captured distinction and the start/stop frame boundary,
+// and remains the authoritative source of all of that) -- just the part
+// cheap enough to poll on a hot path without acquiring g_trace_mutex or any
+// channel-local mutex.
+//
+// Only dev/capture/manual_capture.cpp's StartManualCapture/
+// StopAndExportManualCapture ever call Start/Stop, in lockstep with the
+// exact same two calls to ManualCaptureAccumulator::Start/Stop -- every
+// other consumer (e.g. dev/capture/fade_control_runtime.cpp's
+// SampleFadeControlValuesOnDraw) is read-only via value().
+class ManualCaptureSessionToken {
+ public:
+  std::uint64_t value() const noexcept {
+    return value_.load(std::memory_order_acquire);
+  }
+  void Start(std::uint64_t session_id) noexcept {
+    value_.store(session_id, std::memory_order_release);
+  }
+  void Stop() noexcept { value_.store(0, std::memory_order_release); }
+
+ private:
+  std::atomic<std::uint64_t> value_{0};
+};
+
+extern ManualCaptureSessionToken g_manual_capture_session_token;
 
 // Same order of magnitude as dev/trace/trace_state.hpp's
 // kMaxConcreteTraceRecords; a manual session is a single bounded
@@ -147,6 +181,14 @@ struct ManualCaptureSummary {
       ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly;
 };
 
+// The one authoritative manual-capture session state: idle/capturing/
+// captured, the session id, and the start/stop frame boundary, alongside
+// this channel's own Draw/Route records. The FadeValue and FadeSnapshot
+// channels (dev/capture/fade_control_runtime.*) do not track a separate
+// copy of "is a session active" or "which session" -- they participate in
+// this same session via the shared, lock-free ManualCaptureSessionToken
+// above, driven by the exact same Start()/Stop() calls as this class.
+//
 // Not internally synchronized: the caller (dev/capture/manual_capture.cpp)
 // serializes all access under the existing trace's g_trace_mutex, the same
 // pattern the rest of dev/trace/trace_state.hpp's globals use. This keeps

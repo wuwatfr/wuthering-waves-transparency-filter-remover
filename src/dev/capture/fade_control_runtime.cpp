@@ -35,8 +35,14 @@ FadeControlAccumulator g_fade_control_accumulator;
 FadeControlSnapshotAccumulator g_fade_control_snapshot_accumulator;
 bool g_fade_control_session_enabled = false;
 
-// Fast unlocked check so the Draw-time hook costs nothing when inactive.
-std::atomic<bool> g_fade_control_active{false};
+// Fast unlocked check so the Draw-time hook costs nothing when this
+// session didn't opt into tracing -- combined on the hot path with the
+// shared g_manual_capture_session_token (manual_capture_state.hpp) for
+// "is a session even running", so this flag only ever needs to answer "did
+// the current session want tracing". Set once per session, at Start; never
+// touched at Stop -- once the shared token goes to 0, the hot path is
+// already a no-op regardless of this value.
+std::atomic<bool> g_fade_control_enabled_for_session{false};
 
 // UI-thread-only; never touched off that thread.
 bool g_fade_control_pending_enabled = true;
@@ -677,16 +683,15 @@ void SetFadeControlCapturePending(bool enabled) {
 void StartFadeControlCapture(std::uint64_t session_id, bool enabled) {
   std::lock_guard lock(g_fade_control_mutex);
   g_fade_control_session_enabled = enabled;
+  g_fade_control_enabled_for_session.store(enabled, std::memory_order_release);
   if (enabled) {
     g_fade_control_accumulator.Start(session_id);
     g_fade_control_snapshot_accumulator.Start(session_id);
   }
-  g_fade_control_active.store(enabled, std::memory_order_release);
 }
 
 bool StopFadeControlCapture() {
   std::lock_guard lock(g_fade_control_mutex);
-  g_fade_control_active.store(false, std::memory_order_release);
   if (!g_fade_control_session_enabled) return false;
   g_fade_control_accumulator.Stop();
   g_fade_control_snapshot_accumulator.Stop();
@@ -972,7 +977,9 @@ bool WriteFadeControlSnapshotExport(
 void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route,
     const TracePipelineInfo& pipeline) {
-  if (!g_fade_control_active.load(std::memory_order_acquire)) return;
+  if (g_manual_capture_session_token.value() == 0) return;
+  if (!g_fade_control_enabled_for_session.load(std::memory_order_acquire))
+    return;
 
   // Lookup only: the DXIL analysis was already performed once, at pipeline
   // inspection time (dev/dev_inspection.cpp). g_inspection_mutex is taken

@@ -28,12 +28,26 @@
 // any other lock, and never nests it inside g_fade_control_mutex or
 // g_trace_mutex -- see that function's definition for the exact ordering.
 //
+// Session lifecycle: this module owns no independent "is a session active"
+// state of its own. It participates in the one authoritative manual-capture
+// session (dev/capture/manual_capture_state.hpp's ManualCaptureAccumulator,
+// driven by dev/capture/manual_capture.cpp's StartManualCapture/
+// StopAndExportManualCapture) via that same file's shared, lock-free
+// g_manual_capture_session_token -- checked first on the Draw-time path,
+// before this module's own g_fade_control_enabled_for_session (whether this
+// particular session opted into tracing at all). StartFadeControlCapture/
+// StopFadeControlCapture below do not decide when a session starts or
+// stops; they are only ever called by manual_capture.cpp in lockstep with
+// its own Start/Stop, and record this module's per-session participation
+// (accumulator resets, the enabled choice), not session identity itself.
+//
 // Performance boundary: no GPU readback, no fence waits, no DXIL analysis
 // or matcher rerun on Draw, no file I/O on Draw, no unbounded allocation on
 // Draw. All shader/control-source analysis happens once, at pipeline
 // inspection time (dev/dev_inspection.cpp). The Draw-time hook is gated by
-// a single relaxed-acquire atomic load and is a no-op whenever no manual
-// capture is sampling control values.
+// two relaxed-acquire atomic loads (the shared session token, then this
+// module's own enabled flag) and is a no-op whenever no manual capture is
+// sampling control values.
 
 #pragma once
 
@@ -63,12 +77,17 @@ void RegisterFadeControlRuntimeEvents();
 bool FadeControlCapturePending();
 void SetFadeControlCapturePending(bool enabled);
 
-// Ties this module's lifecycle to the manual-capture session lifecycle.
-// `enabled` is the already-snapshotted (session-fixed) choice.
+// Called by manual_capture.cpp's StartManualCapture, immediately after it
+// starts the one shared session -- never an independent entry point of its
+// own. Resets this module's accumulators for the new session and records
+// `enabled`, the already-snapshotted (session-fixed) choice of whether this
+// particular session participates at all.
 void StartFadeControlCapture(std::uint64_t session_id, bool enabled);
 
-// Freezes the session's accumulated state. Returns false (and touches
-// nothing further) if value tracing was never enabled for this session.
+// Called by manual_capture.cpp's StopAndExportManualCapture, alongside its
+// own stop of the shared session. Freezes this module's accumulated state.
+// Returns false (and touches nothing further) if value tracing was never
+// enabled for this session.
 bool StopFadeControlCapture();
 
 struct FadeControlDiagnosticCounters {

@@ -5,6 +5,8 @@
 
 namespace wuwa_tfr::dev {
 
+ManualCaptureSessionToken g_manual_capture_session_token;
+
 void ManualCaptureAccumulator::Start(std::uint64_t session_id,
     std::uint64_t start_frame, ManualCaptureShaderFilter shader_filter) {
   active_ = ManualCaptureSnapshot{};
