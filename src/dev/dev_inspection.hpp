@@ -91,9 +91,10 @@ extern std::atomic<std::uint64_t> g_dumped_shaders;
 // Read from WuwaTFR.ini's [General] Diagnostic/Dump keys (or their
 // WUWA_TFR_DIAGNOSTIC/WUWA_TFR_DUMP environment-variable fallbacks) by
 // InitializeInspectionConfig(). g_diagnostic no longer gates anything in
-// this module: the canonical runtime always prepares every observed pixel
-// shader regardless, so g_inspections is always populated. Kept only for
-// WuwaTFR.ini/environment-variable compatibility.
+// this module: Dev inspection is populated for shaders that reach the
+// canonical FadePrimitiveRuntime preparation path (see OnShaderPrepared()
+// below), independent of this flag. Kept only for WuwaTFR.ini/environment-
+// variable compatibility.
 extern bool g_diagnostic;
 extern bool g_dump;
 

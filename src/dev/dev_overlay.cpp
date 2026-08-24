@@ -62,21 +62,19 @@ void DrawFadePrimitiveTargetModes() {
     std::uint64_t shader_hash = 0;
     std::size_t live_application_psos = 0;
     // Verified Fade Primitive instances -- independent of whether each one
-    // has pre-Fade evidence, patched, or fully prepared; see
+    // has patch evidence, patched, or fully prepared; see
     // dev/dev_inspection.hpp's InspectionRecord.
     std::uint32_t instances = 0;
     std::string consumers;
-    // Instances whose FadeInstanceObservation::pre_fade is present at all
-    // (any status), distinct from `qualifying` below -- an instance can be
-    // verified without ever reaching a pre-Fade analysis, and this must not
-    // be assumed away.
-    std::uint32_t with_pre_fade_evidence = 0;
-    // Of those, the ones whose analysis status is Matched: the canonical
-    // pre-Fade FMin analysis (pre_fade_fmin_analysis.hpp) that Production's
-    // patch itself relies on -- never a separate matcher. The adjacency
-    // coordinate is diagnostic-only and never a Production matching
-    // criterion.
-    std::uint32_t qualifying = 0;
+    // Instances whose FadeInstanceObservation::pre_fade is present.
+    // TargetDitherBypassResult::instance_evidence -- the source this is
+    // copied from -- only ever contains an instance whose analysis reached
+    // PreFadeFMinStatus::Matched (see its own doc comment), so under the
+    // current contract "has evidence" and "qualifying" are the same state:
+    // there is no separate qualifying count, and no present-but-unmatched
+    // case to report. The adjacency coordinate is diagnostic-only and never
+    // a Production matching criterion.
+    std::uint32_t patch_evidence = 0;
     std::string adjacency;
     std::string fail_reasons;
     bool patch_succeeded = false;
@@ -119,27 +117,21 @@ void DrawFadePrimitiveTargetModes() {
       for (const auto& fade_instance : inspection.fade_instances) {
         if (!fade_instance.pre_fade) {
           if (!row.fail_reasons.empty()) row.fail_reasons += "; ";
-          row.fail_reasons += "no pre-Fade evidence (not reached before "
+          row.fail_reasons += "no patch evidence (not reached before "
               "fail-closed rejection)";
           continue;
         }
-        ++row.with_pre_fade_evidence;
+        ++row.patch_evidence;
         const auto& analysis = *fade_instance.pre_fade;
-        if (analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched) {
-          ++row.qualifying;
-          const char* name = "unknown";
-          switch (analysis.adjacency) {
-            case wuwa_tfr::PreFadeAdjacency::SameRow: name = "same-row"; break;
-            case wuwa_tfr::PreFadeAdjacency::CrossRow: name = "cross-row"; break;
-            case wuwa_tfr::PreFadeAdjacency::NonAdjacent: name = "non-adjacent"; break;
-            case wuwa_tfr::PreFadeAdjacency::Unknown: name = "unknown"; break;
-          }
-          if (!row.adjacency.empty()) row.adjacency += ",";
-          row.adjacency += name;
-        } else {
-          if (!row.fail_reasons.empty()) row.fail_reasons += "; ";
-          row.fail_reasons += analysis.error;
+        const char* name = "unknown";
+        switch (analysis.adjacency) {
+          case wuwa_tfr::PreFadeAdjacency::SameRow: name = "same-row"; break;
+          case wuwa_tfr::PreFadeAdjacency::CrossRow: name = "cross-row"; break;
+          case wuwa_tfr::PreFadeAdjacency::NonAdjacent: name = "non-adjacent"; break;
+          case wuwa_tfr::PreFadeAdjacency::Unknown: name = "unknown"; break;
         }
+        if (!row.adjacency.empty()) row.adjacency += ",";
+        row.adjacency += name;
       }
       rows.push_back(std::move(row));
     }
@@ -152,7 +144,7 @@ void DrawFadePrimitiveTargetModes() {
   ImGui::Text("Fully verified Fade Primitive v1 shaders observed: %zu",
       rows.size());
 
-  if (!ImGui::BeginTable("fade_primitive_diagnostics", 10,
+  if (!ImGui::BeginTable("fade_primitive_diagnostics", 9,
           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
           ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
           ImVec2(0.0f, 420.0f)))
@@ -161,8 +153,7 @@ void DrawFadePrimitiveTargetModes() {
   ImGui::TableSetupColumn("Live application PSOs");
   ImGui::TableSetupColumn("Instances");
   ImGui::TableSetupColumn("Consumers");
-  ImGui::TableSetupColumn("Pre-Fade evidence");
-  ImGui::TableSetupColumn("Qualifying pre-Fade FMin");
+  ImGui::TableSetupColumn("Patch evidence");
   ImGui::TableSetupColumn("Adjacency (diagnostic only)");
   ImGui::TableSetupColumn("Patch");
   ImGui::TableSetupColumn("Prepared");
@@ -181,18 +172,16 @@ void DrawFadePrimitiveTargetModes() {
     ImGui::TableSetColumnIndex(3);
     ImGui::TextUnformatted(row.consumers.c_str());
     ImGui::TableSetColumnIndex(4);
-    ImGui::Text("%u/%u", row.with_pre_fade_evidence, row.instances);
+    ImGui::Text("%u/%u", row.patch_evidence, row.instances);
     ImGui::TableSetColumnIndex(5);
-    ImGui::Text("%u/%u", row.qualifying, row.instances);
-    ImGui::TableSetColumnIndex(6);
     ImGui::TextUnformatted(row.adjacency.c_str());
-    ImGui::TableSetColumnIndex(7);
+    ImGui::TableSetColumnIndex(6);
     if (row.patch_succeeded) ImGui::TextUnformatted("ok");
     else ImGui::TextUnformatted(row.patch_failure.c_str());
-    ImGui::TableSetColumnIndex(8);
+    ImGui::TableSetColumnIndex(7);
     if (row.prepared_succeeded) ImGui::TextUnformatted("ok");
     else ImGui::TextUnformatted(row.prepared_failure.c_str());
-    ImGui::TableSetColumnIndex(9);
+    ImGui::TableSetColumnIndex(8);
     ImGui::TextUnformatted(row.fail_reasons.c_str());
     ImGui::PopID();
   }

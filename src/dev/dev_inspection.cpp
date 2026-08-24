@@ -69,7 +69,7 @@ bool WriteShaderDump(
 
   const std::string base = Hex64(hash);
   const auto ir_path = directory / (base + ".original.ll");
-  const auto metadata_path = directory / (base + ".dump.meta.txt");
+  const auto metadata_path = directory / (base + ".capture.meta.txt");
 
   std::ofstream ir_file(ir_path, std::ios::binary | std::ios::trunc);
   if (!ir_file) return false;
