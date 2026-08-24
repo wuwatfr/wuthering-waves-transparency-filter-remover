@@ -433,8 +433,331 @@ bool ParseConditionalBranch(
   return false;
 }
 
-bool HasCbufferControlledGate(const Function& function,
-    std::string_view enabled_predecessor) {
+// ---- best-effort gate-predicate evidence (diagnostic only; see
+// FadePrimitiveGatePredicateEvidence's own comment) ----
+//
+// Structural parsers for the exact same three DXIL call shapes
+// pre_fade_fmin_analysis.hpp's ResolveDirectOrigin and
+// dev/capture/fade_control_analysis.cpp's ResolveControlSource already
+// recognize for other purposes. Deliberately not shared with either: this
+// file must never depend on Dev-only code, and depending on the canonical
+// shared analyzer here would pull FMin-operand-specific assumptions into
+// the matcher's own gate-verification path. Every literal-value coordinate
+// below is diagnostic-only -- see the per-field comments -- and a false
+// return only ever leaves a coordinate unavailable, never disqualifies an
+// otherwise structurally valid call.
+
+bool IsWellFormedIndexOperand(std::string_view text) noexcept {
+  if (text.empty()) return false;
+  std::size_t cursor = 0;
+  std::uint32_t ignored = 0;
+  if (ParseUnsigned(text, cursor, ignored) && cursor == text.size()) return true;
+  return IsSsaValue(text);
+}
+
+struct CbufferLoadLegacyOperands {
+  std::string_view handle;
+  bool row_resolved = false;
+  std::uint32_t row = 0;
+};
+
+// call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59,
+//     %dx.types.Handle %h, i32 <row>)
+bool ParseCbufferLoadLegacyOperands(
+    std::string_view rhs, CbufferLoadLegacyOperands& result) noexcept {
+  std::size_t cursor = 0;
+  if (!Consume(rhs, cursor,
+          "call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32("))
+    return false;
+  std::uint32_t opcode = 0;
+  if (!ParseTypedUnsigned(rhs, cursor, "i32", opcode) || opcode != 59 ||
+      !ConsumeComma(rhs, cursor))
+    return false;
+  SkipWhitespace(rhs, cursor);
+  if (!Consume(rhs, cursor, "%dx.types.Handle")) return false;
+  SkipWhitespace(rhs, cursor);
+  const std::size_t handle_start = cursor;
+  while (cursor < rhs.size() && rhs[cursor] != ',' && rhs[cursor] != ')')
+    ++cursor;
+  const std::string_view handle =
+      Trim(rhs.substr(handle_start, cursor - handle_start));
+  if (!IsSsaValue(handle) || cursor == rhs.size() || rhs[cursor] != ',')
+    return false;
+  result.handle = handle;
+  ++cursor;
+  SkipWhitespace(rhs, cursor);
+  if (!Consume(rhs, cursor, "i32") || cursor == rhs.size() ||
+      std::isspace(static_cast<unsigned char>(rhs[cursor])) == 0)
+    return false;
+  SkipWhitespace(rhs, cursor);
+  const std::size_t row_start = cursor;
+  while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
+  if (cursor == rhs.size()) return false;
+  const std::string_view row_text =
+      Trim(rhs.substr(row_start, cursor - row_start));
+  if (!IsWellFormedIndexOperand(row_text)) return false;
+  std::size_t row_cursor = 0;
+  result.row_resolved = ParseUnsigned(row_text, row_cursor, result.row) &&
+      row_cursor == row_text.size();
+  ++cursor;
+  return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
+}
+
+struct CbufferLoadByteOperands {
+  std::string_view handle;
+  bool byte_offset_resolved = false;
+  std::uint32_t byte_offset = 0;
+};
+
+// call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %h,
+//     i32 <byteOffset>, i32 <alignment>)
+bool ParseCbufferLoadByteOperands(
+    std::string_view rhs, CbufferLoadByteOperands& result) noexcept {
+  std::size_t cursor = 0;
+  if (!Consume(rhs, cursor, "call float @dx.op.cbufferLoad.f32(")) return false;
+  std::uint32_t opcode = 0;
+  if (!ParseTypedUnsigned(rhs, cursor, "i32", opcode) || opcode != 58 ||
+      !ConsumeComma(rhs, cursor))
+    return false;
+  SkipWhitespace(rhs, cursor);
+  if (!Consume(rhs, cursor, "%dx.types.Handle")) return false;
+  SkipWhitespace(rhs, cursor);
+  const std::size_t handle_start = cursor;
+  while (cursor < rhs.size() && rhs[cursor] != ',' && rhs[cursor] != ')')
+    ++cursor;
+  const std::string_view handle =
+      Trim(rhs.substr(handle_start, cursor - handle_start));
+  if (!IsSsaValue(handle) || cursor == rhs.size() || rhs[cursor] != ',')
+    return false;
+  result.handle = handle;
+  ++cursor;
+  SkipWhitespace(rhs, cursor);
+  if (!Consume(rhs, cursor, "i32") || cursor == rhs.size() ||
+      std::isspace(static_cast<unsigned char>(rhs[cursor])) == 0)
+    return false;
+  SkipWhitespace(rhs, cursor);
+  const std::size_t offset_start = cursor;
+  while (cursor < rhs.size() && rhs[cursor] != ',' && rhs[cursor] != ')')
+    ++cursor;
+  // dx.op.cbufferLoad is exactly (opcode, handle, byteOffset, alignment) --
+  // the alignment operand must follow, so a bare ')' here is not this call.
+  if (cursor == rhs.size() || rhs[cursor] != ',') return false;
+  const std::string_view offset_text =
+      Trim(rhs.substr(offset_start, cursor - offset_start));
+  if (!IsWellFormedIndexOperand(offset_text)) return false;
+  std::size_t offset_cursor = 0;
+  result.byte_offset_resolved =
+      ParseUnsigned(offset_text, offset_cursor, result.byte_offset) &&
+      offset_cursor == offset_text.size();
+  ++cursor;
+  SkipWhitespace(rhs, cursor);
+  if (!Consume(rhs, cursor, "i32") || cursor == rhs.size() ||
+      std::isspace(static_cast<unsigned char>(rhs[cursor])) == 0)
+    return false;
+  while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
+  if (cursor == rhs.size()) return false;
+  ++cursor;
+  return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
+}
+
+// extractvalue %dx.types.CBufRet.f32 %agg, <component> -- the aggregate
+// operand only; matches even when the trailing component index itself
+// does not parse as the diagnostic-only 0-3 literal ParseExtractValue
+// Component below requires.
+bool ParseExtractValueAggregate(
+    std::string_view rhs, std::string_view& aggregate) noexcept {
+  std::size_t cursor = 0;
+  if (!Consume(rhs, cursor, "extractvalue %dx.types.CBufRet.f32")) return false;
+  SkipWhitespace(rhs, cursor);
+  const std::size_t start = cursor;
+  const std::size_t comma = rhs.rfind(',');
+  if (comma == std::string_view::npos || comma < start) return false;
+  const std::string_view candidate = Trim(rhs.substr(start, comma - start));
+  if (!IsSsaValue(candidate)) return false;
+  aggregate = candidate;
+  return true;
+}
+
+// Diagnostic-only: the extractvalue's literal component index. A false
+// return leaves the component unavailable; it never disqualifies the
+// aggregate match above.
+bool ParseExtractValueComponent(
+    std::string_view rhs, std::uint32_t& component) noexcept {
+  const std::size_t comma = rhs.rfind(',');
+  if (comma == std::string_view::npos) return false;
+  const std::string_view text = Trim(rhs.substr(comma + 1));
+  std::size_t cursor = 0;
+  std::uint32_t value = 0;
+  if (!ParseUnsigned(text, cursor, value) || cursor != text.size() || value > 3)
+    return false;
+  component = value;
+  return true;
+}
+
+struct CreateHandleOperands {
+  bool resource_class_resolved = false;
+  std::uint32_t resource_class = 0;
+  bool range_id_resolved = false;
+  std::uint32_t range_id = 0;
+};
+
+// call %dx.types.Handle @dx.op.createHandle(i32 57, i8 <resourceClass>,
+//     i32 <rangeId>, ...) -- only the leading operands this evidence needs
+// are validated; the remainder (index, non-uniform flag) is not, since
+// nothing here depends on it.
+bool ParseCreateHandleOperands(
+    std::string_view rhs, CreateHandleOperands& result) noexcept {
+  std::size_t cursor = 0;
+  if (!Consume(rhs, cursor, "call %dx.types.Handle @dx.op.createHandle("))
+    return false;
+  std::uint32_t opcode = 0;
+  if (!ParseTypedUnsigned(rhs, cursor, "i32", opcode) || opcode != 57 ||
+      !ConsumeComma(rhs, cursor))
+    return false;
+  std::uint32_t resource_class = 0;
+  if (!ParseTypedUnsigned(rhs, cursor, "i8", resource_class) ||
+      !ConsumeComma(rhs, cursor))
+    return false;
+  result.resource_class_resolved = true;
+  result.resource_class = resource_class;
+  std::uint32_t range_id = 0;
+  if (ParseTypedUnsigned(rhs, cursor, "i32", range_id)) {
+    result.range_id_resolved = true;
+    result.range_id = range_id;
+  }
+  return true;
+}
+
+// Extracted from the SAME gate_slice the boolean gate check already
+// computed -- never a second backward slice. Requires exactly one direct
+// scalar CBV load reachable in the slice, behind a literally-typed CBV
+// createHandle; zero or more than one candidate (including an ambiguous
+// legacy load with more than one consuming extractvalue) leaves `resolved`
+// false rather than guessing.
+FadePrimitiveGatePredicateEvidence ResolveGatePredicateEvidence(
+    const Function& function, std::string_view condition,
+    const Slice& gate_slice) {
+  FadePrimitiveGatePredicateEvidence evidence;
+  if (IsSsaValue(condition)) {
+    evidence.condition_identified = true;
+    evidence.condition_value = std::string(condition);
+  }
+
+  struct Candidate {
+    std::string_view handle;
+    bool legacy_form = false;
+    bool row_resolved = false;
+    std::uint32_t row = 0;
+    bool component_resolved = false;
+    std::uint32_t component = 0;
+    bool byte_offset_resolved = false;
+    std::uint32_t byte_offset = 0;
+  };
+
+  // Pass 1: every direct-CBV-load-shaped call reachable in the slice.
+  // Legacy-form loads are aggregates and only become genuine candidates
+  // once pass 2 finds exactly one extractvalue consuming them; byte-form
+  // loads are already scalar and are candidates immediately.
+  std::unordered_map<std::string_view, CbufferLoadLegacyOperands> legacy_loads;
+  std::vector<Candidate> candidates;
+  for (const std::string& value : gate_slice.values) {
+    const Instruction* definition = Definition(function, value);
+    if (!definition) continue;
+    CbufferLoadLegacyOperands legacy;
+    if (ParseCbufferLoadLegacyOperands(definition->rhs, legacy)) {
+      legacy_loads.emplace(std::string_view(definition->lhs), legacy);
+      continue;
+    }
+    CbufferLoadByteOperands byte_form;
+    if (ParseCbufferLoadByteOperands(definition->rhs, byte_form)) {
+      Candidate candidate;
+      candidate.handle = byte_form.handle;
+      candidate.byte_offset_resolved = byte_form.byte_offset_resolved;
+      candidate.byte_offset = byte_form.byte_offset;
+      candidates.push_back(candidate);
+    }
+  }
+
+  // Pass 2: for each legacy load, exactly one extractvalue reachable in
+  // the same slice consuming its result -- more than one is ambiguous and
+  // that load is dropped as a candidate entirely.
+  std::unordered_map<std::string_view, std::size_t> extract_counts;
+  std::unordered_map<std::string_view, std::uint32_t> extract_components;
+  std::unordered_map<std::string_view, bool> extract_component_resolved;
+  for (const std::string& value : gate_slice.values) {
+    const Instruction* definition = Definition(function, value);
+    if (!definition) continue;
+    std::string_view aggregate;
+    if (!ParseExtractValueAggregate(definition->rhs, aggregate)) continue;
+    if (!legacy_loads.contains(aggregate)) continue;
+    ++extract_counts[aggregate];
+    std::uint32_t component = 0;
+    extract_component_resolved[aggregate] =
+        ParseExtractValueComponent(definition->rhs, component);
+    extract_components[aggregate] = component;
+  }
+  for (const auto& [load_lhs, load] : legacy_loads) {
+    const auto count_it = extract_counts.find(load_lhs);
+    if (count_it == extract_counts.end() || count_it->second != 1) continue;
+    Candidate candidate;
+    candidate.handle = load.handle;
+    candidate.legacy_form = true;
+    candidate.row_resolved = load.row_resolved;
+    candidate.row = load.row;
+    candidate.component_resolved = extract_component_resolved.at(load_lhs);
+    candidate.component = extract_components.at(load_lhs);
+    candidates.push_back(candidate);
+  }
+
+  if (candidates.size() != 1) return evidence;
+  const Candidate& winner = candidates.front();
+
+  // Handle validation: the winning candidate's handle must resolve to a
+  // literally-typed createHandle(resourceClass=CBV) call. Structurally
+  // unreachable for valid DXIL -- the load opcode itself already implies a
+  // CBV handle -- but never assumed; a handle that fails this leaves
+  // evidence unresolved entirely rather than reporting a coordinate for a
+  // source that was never proven to be a CBV.
+  const Instruction* handle_definition = Definition(function, winner.handle);
+  if (!handle_definition) return evidence;
+  CreateHandleOperands handle_call;
+  if (!ParseCreateHandleOperands(handle_definition->rhs, handle_call) ||
+      !handle_call.resource_class_resolved || handle_call.resource_class != 2)
+    return evidence;
+
+  evidence.resolved = true;
+  evidence.handle_value = std::string(winner.handle);
+  evidence.legacy_form = winner.legacy_form;
+  evidence.range_id_resolved = handle_call.range_id_resolved;
+  evidence.range_id = handle_call.range_id;
+  evidence.row_resolved = winner.row_resolved;
+  evidence.row = winner.row;
+  evidence.component_resolved = winner.component_resolved;
+  evidence.component = winner.component;
+  evidence.byte_offset_resolved = winner.byte_offset_resolved;
+  evidence.byte_offset = winner.byte_offset;
+  return evidence;
+}
+
+struct GateVerification {
+  bool gate_proven = false;
+  FadePrimitiveGatePredicateEvidence evidence;
+};
+
+// Preserves the exact original boolean semantics of what was
+// HasCbufferControlledGate() while additionally deriving best-effort
+// predicate evidence from the SAME gate branch and backward slice, without
+// a second analysis pass. `gate_proven` is byte-for-byte the same decision
+// the old bare-bool function made: exactly the first (in instruction
+// order) candidate branch into `enabled_predecessor` whose backward slice
+// is complete and reachably contains a cbufferLoadLegacy.f32 or
+// cbufferLoad.f32 call. An incomplete slice on that first candidate still
+// aborts immediately without considering any later candidate, exactly as
+// before -- this refactor changes nothing about when an instance is
+// accepted or rejected, only what is additionally recorded when it is.
+GateVerification VerifyCbufferControlledGate(
+    const Function& function, std::string_view enabled_predecessor) {
+  GateVerification result;
   for (const Instruction& instruction : function.instructions) {
     const std::string_view line = instruction.code;
     std::string_view condition;
@@ -443,18 +766,25 @@ bool HasCbufferControlledGate(const Function& function,
         successors[0] != enabled_predecessor && successors[1] != enabled_predecessor)
       continue;
     const Slice gate_slice = BackwardSlice(function, condition);
-    if (!gate_slice.complete) return false;
+    if (!gate_slice.complete) return result;
+    bool found_load = false;
     for (const std::string& value : gate_slice.values) {
       const Instruction* definition = Definition(function, value);
       if (definition &&
           (IsDxOpCallWithOpcode(*definition,
                "@dx.op.cbufferLoadLegacy.f32", 59) ||
            IsDxOpCallWithOpcode(*definition,
-               "@dx.op.cbufferLoad.f32", 58)))
-        return true;
+               "@dx.op.cbufferLoad.f32", 58))) {
+        found_load = true;
+        break;
+      }
     }
+    if (!found_load) continue;
+    result.gate_proven = true;
+    result.evidence = ResolveGatePredicateEvidence(function, condition, gate_slice);
+    return result;
   }
-  return false;
+  return result;
 }
 
 struct ThresholdAccess {
@@ -1233,12 +1563,17 @@ FadePrimitiveDiagnostic AnalyzeFadePrimitiveV1(const std::string& llvm_ir) {
         if (!enabled_slice.complete || !enabled_slice.values.contains(threshold.lhs) ||
             SliceCountInstructionOpcode(function, enabled_slice,
                 "getelementptr") != 1 ||
-            !IsCoverageExpression(function, enabled->value, threshold.lhs) ||
-            !HasCbufferControlledGate(function, enabled->predecessor)) continue;
+            !IsCoverageExpression(function, enabled->value, threshold.lhs))
+          continue;
+        const GateVerification gate =
+            VerifyCbufferControlledGate(function, enabled->predecessor);
+        if (!gate.gate_proven) continue;
         const ConsumerAnalysis consumers = ClassifyConsumers(function, module, phi.lhs);
         if (!consumers.complete) continue;
-        diagnostic.instances.push_back(
-            {consumers.consumer, function.identity, phi.start, phi.end, phi.lhs});
+        FadePrimitiveInstance instance{
+            consumers.consumer, function.identity, phi.start, phi.end, phi.lhs};
+        instance.gate_predicate = gate.evidence;
+        diagnostic.instances.push_back(std::move(instance));
       }
     }
   }
