@@ -30,6 +30,9 @@ struct TargetDitherBypassResult {
 };
 
 TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+    const std::string& original_llvm_ir, const FadePrimitiveDiagnostic& diagnostic);
+
+TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
     const std::string& original_llvm_ir);
 
 }

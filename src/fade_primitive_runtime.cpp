@@ -107,7 +107,7 @@ struct FadePrimitiveRuntime::Impl {
           } else {
             matched_shaders.fetch_add(1, std::memory_order_relaxed);
             patched = PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
-                inspected->original_ir);
+                inspected->original_ir, diagnostic);
             if (!patched->success ||
                 patched->verified_instance_count != diagnostic.instances.size() ||
                 patched->patched_instance_count != diagnostic.instances.size()) {

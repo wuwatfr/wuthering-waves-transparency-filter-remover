@@ -44,9 +44,8 @@ struct PendingRewrite {
 }
 
 TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
-    const std::string& original_llvm_ir) {
+    const std::string& original_llvm_ir, const FadePrimitiveDiagnostic& diagnostic) {
   TargetDitherBypassResult result;
-  const FadePrimitiveDiagnostic diagnostic = AnalyzeFadePrimitiveV1(original_llvm_ir);
   if (diagnostic.instances.empty()) {
     result.error = "no verified transparency-filter primitive instance";
     return result;
@@ -162,6 +161,12 @@ TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
   result.patched_instance_count = rewrites.size();
   result.success = true;
   return result;
+}
+
+TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+    const std::string& original_llvm_ir) {
+  return PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+      original_llvm_ir, AnalyzeFadePrimitiveV1(original_llvm_ir));
 }
 
 }

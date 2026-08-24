@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
     ++shaders_with_primitive;
 
     const wuwa_tfr::TargetDitherBypassResult patched =
-        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir);
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir, diagnostic);
 
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> rewrite_ranges;
     for (const wuwa_tfr::FadePrimitiveInstance& instance : diagnostic.instances) {
