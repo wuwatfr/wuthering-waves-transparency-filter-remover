@@ -196,14 +196,72 @@ bool ConsumeToken(std::string_view text, std::size_t& cursor, std::string_view t
   return true;
 }
 
-// Everything a well-formed call instruction may carry after its closing
-// parenthesis: nothing, an attribute group (#0), or a metadata attachment
-// list (, !dbg !5). Line comments are already stripped upstream. Anything
-// else is malformed trailing syntax and must fail closed rather than be
-// silently ignored.
+// A sequence of instruction metadata attachments, each `, !name !N`.
+//
+// Deliberately the same semantics as fade_primitive_detector.cpp's
+// HasOnlyMetadataAttachments(): a comma, a non-empty `!name`, mandatory
+// whitespace, then a non-empty `!<digits>` reference. Both parsers must
+// accept exactly the same attachment syntax; the two copies are kept in step
+// by hand rather than by a shared parsing layer, which this release does not
+// introduce. An empty sequence is well formed.
+bool HasOnlyMetadataAttachments(std::string_view trailing) noexcept {
+  std::size_t cursor = 0;
+  while (cursor < trailing.size()) {
+    if (trailing[cursor] != ',') return false;
+    ++cursor;
+    while (cursor < trailing.size() &&
+        std::isspace(static_cast<unsigned char>(trailing[cursor])) != 0)
+      ++cursor;
+
+    if (cursor == trailing.size() || trailing[cursor] != '!') return false;
+    const std::size_t name_start = ++cursor;
+    while (cursor < trailing.size() && IsSsaCharacter(trailing[cursor])) ++cursor;
+    if (cursor == name_start || cursor == trailing.size() ||
+        std::isspace(static_cast<unsigned char>(trailing[cursor])) == 0)
+      return false;
+    while (cursor < trailing.size() &&
+        std::isspace(static_cast<unsigned char>(trailing[cursor])) != 0)
+      ++cursor;
+
+    if (cursor == trailing.size() || trailing[cursor] != '!') return false;
+    const std::size_t reference_start = ++cursor;
+    while (cursor < trailing.size() &&
+        std::isdigit(static_cast<unsigned char>(trailing[cursor])) != 0)
+      ++cursor;
+    if (cursor == reference_start) return false;
+    while (cursor < trailing.size() &&
+        std::isspace(static_cast<unsigned char>(trailing[cursor])) != 0)
+      ++cursor;
+  }
+  return true;
+}
+
+// Exactly what a call instruction may carry after its closing parenthesis,
+// validated in full rather than by its first character:
+//
+//   <nothing> | #N | #N <attachments> | <attachments>
+//
+// where <attachments> is HasOnlyMetadataAttachments' comma-led form. An
+// attribute-group reference is `#` followed by at least one digit, and it may
+// only appear first -- metadata attachments are instruction metadata and
+// always carry their leading comma, so a bare `!dbg !1` is not valid call
+// syntax and is rejected. Line comments are already stripped upstream.
+// Anything else -- `#garbage`, `#0 garbage`, `, garbage`, `, !dbg`,
+// `, !dbg garbage`, a stray extra operand -- is malformed trailing syntax and
+// fails closed rather than being silently ignored.
 bool IsWellFormedCallSuffix(std::string_view rest) noexcept {
   rest = Trim(rest);
-  return rest.empty() || rest.front() == '#' || rest.front() == ',' || rest.front() == '!';
+  if (rest.empty()) return true;
+  if (rest.front() == '#') {
+    std::size_t cursor = 1;
+    while (cursor < rest.size() &&
+        std::isdigit(static_cast<unsigned char>(rest[cursor])) != 0)
+      ++cursor;
+    if (cursor == 1) return false;  // `#` with no attribute-group number
+    rest = Trim(rest.substr(cursor));
+    if (rest.empty()) return true;
+  }
+  return HasOnlyMetadataAttachments(rest);
 }
 
 // Parses a decimal literal, unsigned and bounded to 32 bits. Used only for
@@ -317,7 +375,12 @@ bool ParseCBufferLoadByte(std::string_view rhs, CBufferLoadByte& out) {
   start = cursor;
   while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
   if (cursor == rhs.size()) return false;  // no closing parenthesis
-  if (!IsWellFormedIndexOperand(Trim(rhs.substr(start, cursor - start)))) return false;
+  // Unlike byteOffset, alignment is not an index: DXIL requires a constant,
+  // and DxilInst_CBufferLoad::get_alignment_val() reads it as a ConstantInt.
+  // A dynamic alignment is not this intrinsic. Scanning to the closing paren
+  // also means a stray fifth operand lands inside this text and fails here.
+  std::uint32_t alignment = 0;
+  if (!ParseDecimalU32(Trim(rhs.substr(start, cursor - start)), alignment)) return false;
   if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
   out.byte_offset_resolved = ParseDecimalU32(offset_text, out.byte_offset);
   return true;

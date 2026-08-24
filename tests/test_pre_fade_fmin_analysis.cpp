@@ -219,25 +219,66 @@ int main() {
     CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::NoQualifyingCandidate);
   }
 
-  // Malformed trailing syntax after the FMin's closing parenthesis must fail
-  // closed, not be silently ignored as if the instruction ended there.
-  {
+  // ---- the call suffix grammar: <nothing> | #N | #N <md> | <md> ----------
+  // A call may carry an attribute-group reference and/or instruction metadata
+  // attachments after its closing parenthesis, and nothing else. The three
+  // shapes DXC actually emits for these intrinsics are the empty suffix, `#N`
+  // and `, !dx.precise !N`. Validation must be exact, not first-character.
+  for (const char* suffix : {
+           "",
+           " #0",
+           " #12",
+           ", !dx.precise !1",
+           " #0, !dbg !77",
+           " #0 , !dx.precise !1 , !dbg !77",
+           ",  !tbaa   !50 ,  !noalias  !54 ",
+       }) {
     const auto analysis = AnalyzeOnly(BuildIr(
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)" +
+        std::string(suffix) + "\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)" +
+        std::string(suffix)));
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+  }
+
+  // Everything else is malformed and must fail closed -- including forms whose
+  // first character is one a laxer check would have waved through.
+  for (const char* suffix : {
+           " float %opB0",        // a stray extra operand
+           " #",                  // attribute group with no number
+           " #garbage",           // attribute group that is not a number
+           " #0 garbage",         // trailing junk after a valid attribute group
+           " #0garbage",
+           ", garbage",           // comma-led, but not a metadata attachment
+           ", !dbg",              // attachment name with no reference
+           ", !dbg garbage",      // reference that is not a metadata id
+           ", !dbg !",            // metadata reference with no id
+           ", !dbg!77",           // missing the mandatory separating space
+           ", ! !77",             // empty attachment name
+           " !dbg !77",           // bare attachment: instruction metadata
+                                  // always carries its leading comma, so this
+                                  // is not valid call syntax
+           ", !dbg !77 trailing",
+           ", !dbg !77,",         // dangling separator
+       }) {
+    // On the FMin itself...
+    const auto fmin = AnalyzeOnly(BuildIr(
         "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
         "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
         "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
-        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0) float %opB0"));
-    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::NoQualifyingCandidate);
-  }
-
-  // ...while the trailing syntax a real call legitimately carries does not.
-  {
-    const auto analysis = AnalyzeOnly(BuildIr(
-        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40) #0\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)" +
+        std::string(suffix)));
+    CHECK(fmin.status == wuwa_tfr::PreFadeFMinStatus::NoQualifyingCandidate);
+    // ...and on the constant-buffer load feeding it.
+    const auto load = AnalyzeOnly(BuildIr(
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)" +
+        std::string(suffix) + "\n"
         "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
         "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
-        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0), !dbg !77"));
-    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
+    CHECK(load.status == wuwa_tfr::PreFadeFMinStatus::NoQualifyingCandidate);
   }
 
   // dx.op.cbufferLoad is exactly (opcode, handle, byteOffset, alignment);
@@ -247,6 +288,26 @@ int main() {
     const auto analysis = AnalyzeOnly(BuildIr(
         "%opA0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 648)\n"
         "%opB0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 652)\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::NoQualifyingCandidate);
+  }
+
+  // ...and its alignment is a constant, not an index: DXIL requires a
+  // ConstantInt there. byteOffset stays literal-or-SSA; alignment does not.
+  {
+    const auto analysis = AnalyzeOnly(BuildIr(
+        "%align = call i32 @dx.op.loadInput.i32(i32 4, i32 3, i32 0, i8 0, i32 undef)\n"
+        "%opA0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 648, i32 %align)\n"
+        "%opB0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 652, i32 4)\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::NoQualifyingCandidate);
+  }
+
+  // A fifth operand is not this intrinsic either.
+  {
+    const auto analysis = AnalyzeOnly(BuildIr(
+        "%opA0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 648, i32 4, i32 7)\n"
+        "%opB0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 652, i32 4, i32 7)\n"
         "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
     CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::NoQualifyingCandidate);
   }
