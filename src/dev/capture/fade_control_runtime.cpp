@@ -69,7 +69,9 @@ struct MappedBufferInfo {
 };
 
 constexpr std::size_t kMaxTrackedMappedBuffers = 4096;
-std::unordered_map<std::uint64_t, MappedBufferInfo> g_mapped_buffers;
+std::unordered_map<wuwa_tfr::TraceLiveHandleKey, MappedBufferInfo,
+    wuwa_tfr::TraceLiveHandleKeyHash>
+    g_mapped_buffers;
 
 bool IsCbvDescriptorType(descriptor_type type) noexcept {
   return type == descriptor_type::constant_buffer ||
@@ -204,30 +206,34 @@ void OnMapFadeControlBuffer(device* owner, resource resource_handle,
   }
   if (resolved_size == 0) return;
 
+  const wuwa_tfr::TraceLiveHandleKey key{
+      DeviceKey(owner), resource_handle.handle};
   std::lock_guard lock(g_fade_control_mutex);
   if (g_mapped_buffers.size() >= kMaxTrackedMappedBuffers &&
-      !g_mapped_buffers.contains(resource_handle.handle))
+      !g_mapped_buffers.contains(key))
     return;
-  g_mapped_buffers[resource_handle.handle] =
+  g_mapped_buffers[key] =
       MappedBufferInfo{static_cast<std::byte*>(*data), offset, resolved_size};
 }
 
-void OnUnmapFadeControlBuffer(device*, resource resource_handle) {
-  if (resource_handle.handle == 0) return;
+void OnUnmapFadeControlBuffer(device* owner, resource resource_handle) {
+  if (!owner || resource_handle.handle == 0) return;
   std::lock_guard lock(g_fade_control_mutex);
-  g_mapped_buffers.erase(resource_handle.handle);
+  g_mapped_buffers.erase(
+      wuwa_tfr::TraceLiveHandleKey{DeviceKey(owner), resource_handle.handle});
 }
 
 void OnDestroyFadeControlResource(device* owner, resource resource_handle) {
   if (resource_handle.handle == 0) return;
   std::lock_guard lock(g_fade_control_mutex);
-  g_mapped_buffers.erase(resource_handle.handle);
   if (owner) {
-    g_fade_control_resource_incarnations.Destroy(
-        {DeviceKey(owner), resource_handle.handle});
+    const wuwa_tfr::TraceLiveHandleKey key{
+        DeviceKey(owner), resource_handle.handle};
+    g_mapped_buffers.erase(key);
+    g_fade_control_resource_incarnations.Destroy(key);
+    InvalidateDescriptorTableSlotsForResource(
+        g_descriptor_table_slots, DeviceKey(owner), resource_handle.handle);
   }
-  InvalidateDescriptorTableSlotsForResource(
-      g_descriptor_table_slots, resource_handle.handle);
 }
 
 bool OnUpdateFadeControlDescriptorTables(device* owner, std::uint32_t count,
@@ -248,8 +254,8 @@ bool OnUpdateFadeControlDescriptorTables(device* owner, std::uint32_t count,
       continue;
     const auto* ranges = static_cast<const buffer_range*>(update.descriptors);
     for (std::uint32_t i = 0; i < update.count; ++i) {
-      const DescriptorSlotKey key{
-          update.table.handle, update.binding + update.array_offset + i};
+      const DescriptorSlotKey key{{DeviceKey(owner), update.table.handle},
+          update.binding + update.array_offset + i};
       if (ranges[i].buffer.handle == 0) {
         SetDescriptorTableSlot(g_descriptor_table_slots, key, std::nullopt);
         continue;
@@ -272,6 +278,7 @@ bool OnCopyFadeControlDescriptorTables(
   auto active = g_device_activity.Acquire(DeviceKey(owner));
   if (!active) return false;
 
+  const wuwa_tfr::DeviceIdentity device_key = DeviceKey(owner);
   std::lock_guard lock(g_fade_control_mutex);
   for (std::uint32_t c = 0; c < count; ++c) {
     const auto& copy = copies[c];
@@ -279,14 +286,26 @@ bool OnCopyFadeControlDescriptorTables(
         copy.count == 0)
       continue;
     for (std::uint32_t i = 0; i < copy.count; ++i) {
-      const DescriptorSlotKey source{copy.source_table.handle,
+      const DescriptorSlotKey source{{device_key, copy.source_table.handle},
           copy.source_binding + copy.source_array_offset + i};
-      const DescriptorSlotKey dest{copy.dest_table.handle,
+      const DescriptorSlotKey dest{{device_key, copy.dest_table.handle},
           copy.dest_binding + copy.dest_array_offset + i};
       CopyDescriptorTableSlot(g_descriptor_table_slots, source, dest);
     }
   }
   return false;
+}
+
+void OnDestroyFadeControlDevice(device* owner) {
+  if (!owner) return;
+  const wuwa_tfr::DeviceIdentity device_key = DeviceKey(owner);
+  std::lock_guard lock(g_fade_control_mutex);
+  std::erase_if(g_mapped_buffers, [device_key](const auto& entry) {
+    return entry.first.owner == device_key;
+  });
+  std::erase_if(g_descriptor_table_slots, [device_key](const auto& entry) {
+    return entry.first.table.owner == device_key;
+  });
 }
 
 FadeControlValueSample Unavailable(std::uint16_t reason) noexcept {
@@ -315,9 +334,10 @@ void TryCaptureFadeControlSnapshot(const FadeControlRecordKey& key,
 }
 
 void ObserveMappedCbvValue(const FadeControlRecordKey& key,
-    RecordedTraceDraw& draw, std::uint64_t resource_handle,
-    std::uint64_t range_offset, std::uint64_t range_size,
-    std::uint32_t vector_index, std::uint32_t component) {
+    RecordedTraceDraw& draw, wuwa_tfr::DeviceIdentity device,
+    std::uint64_t resource_handle, std::uint64_t range_offset,
+    std::uint64_t range_size, std::uint32_t vector_index,
+    std::uint32_t component) {
   const std::uint64_t byte_offset =
       ResolveFadeControlByteOffset(range_offset, vector_index, component);
 
@@ -329,7 +349,8 @@ void ObserveMappedCbvValue(const FadeControlRecordKey& key,
     return;
   }
 
-  const auto mapped_it = g_mapped_buffers.find(resource_handle);
+  const auto mapped_it = g_mapped_buffers.find(
+      wuwa_tfr::TraceLiveHandleKey{device, resource_handle});
   if (mapped_it == g_mapped_buffers.end()) {
     draw.pending_fade_observations.push_back(
         {key, Unavailable(kFadeControlReasonNotMapped)});
@@ -417,8 +438,8 @@ bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
   const auto& binding = binding_it->second;
   key.runtime_resource_incarnation = binding.resource_incarnation;
   key.runtime_range_offset = binding.offset;
-  ObserveMappedCbvValue(key, draw, binding.resource_handle, binding.offset,
-      binding.size, source.vector_index, source.component);
+  ObserveMappedCbvValue(key, draw, trace.device, binding.resource_handle,
+      binding.offset, binding.size, source.vector_index, source.component);
   return true;
 }
 
@@ -449,7 +470,7 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
   }
 
   const DescriptorSlotKey descriptor_key{
-      table_it->second.table_handle, slot->slot};
+      {trace.device, table_it->second.table_handle}, slot->slot};
   const auto content =
       FindDescriptorTableSlot(g_descriptor_table_slots, descriptor_key);
   if (!content) {
@@ -467,8 +488,8 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
 
   key.runtime_resource_incarnation = content->resource_incarnation;
   key.runtime_range_offset = content->offset;
-  ObserveMappedCbvValue(key, draw, content->resource_handle, content->offset,
-      content->size, source.vector_index, source.component);
+  ObserveMappedCbvValue(key, draw, trace.device, content->resource_handle,
+      content->offset, content->size, source.vector_index, source.component);
   return true;
 }
 
@@ -556,6 +577,8 @@ void RegisterFadeControlRuntimeEvents() {
       OnUpdateFadeControlDescriptorTables);
   reshade::register_event<reshade::addon_event::copy_descriptor_tables>(
       OnCopyFadeControlDescriptorTables);
+  reshade::register_event<reshade::addon_event::destroy_device>(
+      OnDestroyFadeControlDevice);
 }
 
 bool FadeControlCapturePending() { return g_fade_control_pending_enabled; }

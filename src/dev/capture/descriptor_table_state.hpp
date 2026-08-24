@@ -37,7 +37,7 @@ std::optional<DescriptorCbvSlot> ResolveDescriptorTableCbvSlot(
     std::uint32_t register_space, std::uint32_t register_index);
 
 struct DescriptorSlotKey {
-  std::uint64_t table_handle = 0;
+  wuwa_tfr::TraceLiveHandleKey table;
   std::uint32_t slot = 0;
 
   friend bool operator==(const DescriptorSlotKey&, const DescriptorSlotKey&) =
@@ -46,7 +46,7 @@ struct DescriptorSlotKey {
 
 struct DescriptorSlotKeyHash {
   std::size_t operator()(const DescriptorSlotKey& key) const noexcept {
-    std::size_t hash = std::hash<std::uint64_t>{}(key.table_handle);
+    std::size_t hash = wuwa_tfr::TraceLiveHandleKeyHash{}(key.table);
     wuwa_tfr::TraceHashCombine(hash, key.slot);
     return hash;
   }
@@ -73,8 +73,8 @@ bool SetDescriptorTableSlot(DescriptorSlotTable& table,
 void CopyDescriptorTableSlot(DescriptorSlotTable& table,
     const DescriptorSlotKey& source, const DescriptorSlotKey& dest);
 
-void InvalidateDescriptorTableSlotsForResource(
-    DescriptorSlotTable& table, std::uint64_t resource_handle);
+void InvalidateDescriptorTableSlotsForResource(DescriptorSlotTable& table,
+    std::uintptr_t device, std::uint64_t resource_handle);
 
 std::optional<DescriptorSlotContent> FindDescriptorTableSlot(
     const DescriptorSlotTable& table, const DescriptorSlotKey& key);

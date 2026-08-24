@@ -43,10 +43,11 @@ void CopyDescriptorTableSlot(DescriptorSlotTable& table,
   SetDescriptorTableSlot(table, dest, it->second);
 }
 
-void InvalidateDescriptorTableSlotsForResource(
-    DescriptorSlotTable& table, std::uint64_t resource_handle) {
-  std::erase_if(table, [resource_handle](const auto& entry) {
-    return entry.second.resource_handle == resource_handle;
+void InvalidateDescriptorTableSlotsForResource(DescriptorSlotTable& table,
+    std::uintptr_t device, std::uint64_t resource_handle) {
+  std::erase_if(table, [device, resource_handle](const auto& entry) {
+    return entry.first.table.owner == device &&
+        entry.second.resource_handle == resource_handle;
   });
 }
 

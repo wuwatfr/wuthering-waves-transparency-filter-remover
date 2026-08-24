@@ -19,6 +19,14 @@ using wuwa_tfr::dev::SetDescriptorTableSlot;
 
 namespace {
 
+constexpr std::uintptr_t kDeviceA = 1;
+constexpr std::uintptr_t kDeviceB = 2;
+
+DescriptorSlotKey Key(std::uintptr_t device, std::uint64_t table_handle,
+    std::uint32_t slot) {
+  return DescriptorSlotKey{{device, table_handle}, slot};
+}
+
 void TestRegisterResolvesToCorrectSlot() {
   const std::vector<DescriptorCbvRangeInfo> ranges{
       {/*param_index=*/2, /*binding_start=*/5, /*register_space=*/0,
@@ -59,7 +67,7 @@ void TestNoMatchingRangeFailsClosed() {
 
 void TestUpdateOverwritesCurrentDescriptor() {
   DescriptorSlotTable table;
-  const DescriptorSlotKey key{100, 3};
+  const DescriptorSlotKey key = Key(kDeviceA, 100, 3);
   assert(SetDescriptorTableSlot(
       table, key, DescriptorSlotContent{1, 1, 0, 256}));
   assert(SetDescriptorTableSlot(
@@ -73,8 +81,8 @@ void TestUpdateOverwritesCurrentDescriptor() {
 
 void TestCopyPropagatesCurrentDescriptor() {
   DescriptorSlotTable table;
-  const DescriptorSlotKey source{100, 0};
-  const DescriptorSlotKey dest{200, 5};
+  const DescriptorSlotKey source = Key(kDeviceA, 100, 0);
+  const DescriptorSlotKey dest = Key(kDeviceA, 200, 5);
   SetDescriptorTableSlot(table, source, DescriptorSlotContent{7, 3, 16, 64});
   CopyDescriptorTableSlot(table, source, dest);
   const auto content = FindDescriptorTableSlot(table, dest);
@@ -87,8 +95,8 @@ void TestCopyPropagatesCurrentDescriptor() {
 
 void TestUnknownCopyInvalidatesDestination() {
   DescriptorSlotTable table;
-  const DescriptorSlotKey source{999, 0};  // never written
-  const DescriptorSlotKey dest{200, 5};
+  const DescriptorSlotKey source = Key(kDeviceA, 999, 0);  // never written
+  const DescriptorSlotKey dest = Key(kDeviceA, 200, 5);
   SetDescriptorTableSlot(table, dest, DescriptorSlotContent{7, 3, 16, 64});
   CopyDescriptorTableSlot(table, source, dest);
   assert(!FindDescriptorTableSlot(table, dest).has_value());
@@ -96,7 +104,21 @@ void TestUnknownCopyInvalidatesDestination() {
 
 void TestUnboundSlotFailsClosed() {
   DescriptorSlotTable table;
-  assert(!FindDescriptorTableSlot(table, DescriptorSlotKey{1, 0}).has_value());
+  assert(!FindDescriptorTableSlot(table, Key(kDeviceA, 1, 0)).has_value());
+}
+
+void TestSameTableAndSlotOnDifferentDevicesRemainDistinct() {
+  DescriptorSlotTable table;
+  SetDescriptorTableSlot(
+      table, Key(kDeviceA, 100, 3), DescriptorSlotContent{1, 1, 0, 64});
+  SetDescriptorTableSlot(
+      table, Key(kDeviceB, 100, 3), DescriptorSlotContent{2, 2, 0, 64});
+  assert(table.size() == 2);  // not deduplicated across devices
+
+  const auto on_a = FindDescriptorTableSlot(table, Key(kDeviceA, 100, 3));
+  const auto on_b = FindDescriptorTableSlot(table, Key(kDeviceB, 100, 3));
+  assert(on_a.has_value() && on_a->resource_handle == 1);
+  assert(on_b.has_value() && on_b->resource_handle == 2);
 }
 
 void TestResourceIncarnationMismatchIsRejected() {
@@ -108,29 +130,45 @@ void TestResourceIncarnationMismatchIsRejected() {
 void TestDestroyInvalidatesEveryReferencingSlot() {
   DescriptorSlotTable table;
   SetDescriptorTableSlot(
-      table, DescriptorSlotKey{10, 0}, DescriptorSlotContent{42, 1, 0, 64});
+      table, Key(kDeviceA, 10, 0), DescriptorSlotContent{42, 1, 0, 64});
   SetDescriptorTableSlot(
-      table, DescriptorSlotKey{20, 3}, DescriptorSlotContent{42, 1, 0, 64});
+      table, Key(kDeviceA, 20, 3), DescriptorSlotContent{42, 1, 0, 64});
   SetDescriptorTableSlot(
-      table, DescriptorSlotKey{30, 1}, DescriptorSlotContent{99, 1, 0, 64});
-  wuwa_tfr::dev::InvalidateDescriptorTableSlotsForResource(table, 42);
-  assert(!FindDescriptorTableSlot(table, DescriptorSlotKey{10, 0}).has_value());
-  assert(!FindDescriptorTableSlot(table, DescriptorSlotKey{20, 3}).has_value());
-  assert(FindDescriptorTableSlot(table, DescriptorSlotKey{30, 1}).has_value());
+      table, Key(kDeviceA, 30, 1), DescriptorSlotContent{99, 1, 0, 64});
+  wuwa_tfr::dev::InvalidateDescriptorTableSlotsForResource(
+      table, kDeviceA, 42);
+  assert(!FindDescriptorTableSlot(table, Key(kDeviceA, 10, 0)).has_value());
+  assert(!FindDescriptorTableSlot(table, Key(kDeviceA, 20, 3)).has_value());
+  assert(FindDescriptorTableSlot(table, Key(kDeviceA, 30, 1)).has_value());
+}
+
+void TestResourceInvalidationIsDeviceLocal() {
+  DescriptorSlotTable table;
+  // Both devices happen to report the same raw resource handle (42): a
+  // realistic case, since raw D3D12 handles are only unique per device.
+  SetDescriptorTableSlot(
+      table, Key(kDeviceA, 10, 0), DescriptorSlotContent{42, 1, 0, 64});
+  SetDescriptorTableSlot(
+      table, Key(kDeviceB, 10, 0), DescriptorSlotContent{42, 1, 0, 64});
+  wuwa_tfr::dev::InvalidateDescriptorTableSlotsForResource(
+      table, kDeviceA, 42);
+  assert(!FindDescriptorTableSlot(table, Key(kDeviceA, 10, 0)).has_value());
+  // Device B's slot referencing the same raw handle must survive.
+  assert(FindDescriptorTableSlot(table, Key(kDeviceB, 10, 0)).has_value());
 }
 
 void TestSlotCapacityIsBounded() {
   DescriptorSlotTable table;
   for (std::uint32_t i = 0; i < wuwa_tfr::dev::kMaxTrackedDescriptorSlots; ++i) {
     assert(SetDescriptorTableSlot(
-        table, DescriptorSlotKey{1, i}, DescriptorSlotContent{1, 1, 0, 4}));
+        table, Key(kDeviceA, 1, i), DescriptorSlotContent{1, 1, 0, 4}));
   }
   // Table is full: a brand-new key is refused...
-  assert(!SetDescriptorTableSlot(table, DescriptorSlotKey{1, 999999},
+  assert(!SetDescriptorTableSlot(table, Key(kDeviceA, 1, 999999),
       DescriptorSlotContent{1, 1, 0, 4}));
   // ...but an existing key may still be updated.
   assert(SetDescriptorTableSlot(
-      table, DescriptorSlotKey{1, 0}, DescriptorSlotContent{2, 2, 0, 4}));
+      table, Key(kDeviceA, 1, 0), DescriptorSlotContent{2, 2, 0, 4}));
 }
 
 void TestDynamicOffsetExactOrFailClosed() {
@@ -150,8 +188,10 @@ int main() {
   TestCopyPropagatesCurrentDescriptor();
   TestUnknownCopyInvalidatesDestination();
   TestUnboundSlotFailsClosed();
+  TestSameTableAndSlotOnDifferentDevicesRemainDistinct();
   TestResourceIncarnationMismatchIsRejected();
   TestDestroyInvalidatesEveryReferencingSlot();
+  TestResourceInvalidationIsDeviceLocal();
   TestSlotCapacityIsBounded();
   TestDynamicOffsetExactOrFailClosed();
   std::puts("test_descriptor_table_state: all tests passed");

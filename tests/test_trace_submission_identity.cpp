@@ -71,6 +71,31 @@ int main() {
   const auto other_device = psos.Activate({2, 7}, {200});
   CHECK(other_device.id != reused.id);
 
+  // TraceLiveHandleKey is also reused directly as the key of a plain
+  // std::unordered_map (e.g. Fade-control's mapped-buffer table) -- confirm
+  // the same raw handle on two different devices is a genuinely distinct
+  // map entry, and erasing one device's entry never touches the other's.
+  {
+    struct DeviceScopedRecord {
+      int value = 0;
+    };
+    std::unordered_map<TraceLiveHandleKey, DeviceScopedRecord,
+        wuwa_tfr::TraceLiveHandleKeyHash>
+        device_scoped;
+    const TraceLiveHandleKey key_on_device_1{1, 42};
+    const TraceLiveHandleKey key_on_device_2{2, 42};  // same raw handle
+    device_scoped[key_on_device_1] = DeviceScopedRecord{100};
+    device_scoped[key_on_device_2] = DeviceScopedRecord{200};
+    CHECK(device_scoped.size() == 2);
+    CHECK(device_scoped.at(key_on_device_1).value == 100);
+    CHECK(device_scoped.at(key_on_device_2).value == 200);
+
+    device_scoped.erase(key_on_device_1);
+    CHECK(!device_scoped.contains(key_on_device_1));
+    CHECK(device_scoped.contains(key_on_device_2));  // untouched
+    CHECK(device_scoped.at(key_on_device_2).value == 200);
+  }
+
   const auto geometry = IndexedGeometry(11, 12);
   CHECK(wuwa_tfr::TraceGeometryIsConcrete(geometry));
   auto changed_argument = geometry;
