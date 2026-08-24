@@ -74,6 +74,18 @@ class ManualCaptureSessionToken {
   }
   void Stop() noexcept { value_.store(0, std::memory_order_release); }
 
+  // True only when `session_id` (previously captured from an earlier
+  // value() read) is STILL the live session -- i.e. neither a Stop() nor a
+  // later Start() has happened since. Catches both "the session already
+  // stopped" (value() == 0) and "a different session already started"
+  // (value() == some other nonzero id) with a single comparison, so a
+  // channel that began work under one session id can safely refuse to
+  // commit it once this returns false, rather than accidentally attributing
+  // it to whichever session happens to be live by the time it finishes.
+  bool StillLive(std::uint64_t session_id) const noexcept {
+    return session_id != 0 && value() == session_id;
+  }
+
  private:
   std::atomic<std::uint64_t> value_{0};
 };
@@ -231,6 +243,19 @@ class ManualCaptureAccumulator {
   void Clear();
 
   ManualCaptureState state() const noexcept { return state_; }
+
+  // True only when Capturing AND the active session is exactly
+  // `session_id`. The authoritative (mutex-protected) counterpart to
+  // ManualCaptureSessionToken::StillLive above -- callers that captured a
+  // session id before doing unlocked work (a shader-filter lookup, a DXIL
+  // inspection cache read) must re-check this under the same lock they use
+  // to accumulate, so work begun for one session is never committed into a
+  // later, different session that also happens to be Capturing by the time
+  // the lock is re-acquired.
+  bool IsLiveSession(std::uint64_t session_id) const noexcept {
+    return state_ == ManualCaptureState::Capturing &&
+        active_.session_id == session_id;
+  }
 
   // The session currently worth displaying: the in-progress session while
   // Capturing, otherwise the last frozen result (or an empty summary if

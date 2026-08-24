@@ -601,17 +601,26 @@ bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
 // lock touched here (g_inspection_mutex was already released by the caller
 // before this runs; see SampleFadeControlValuesOnDraw). Never acquires
 // g_trace_mutex: see g_fade_control_resource_incarnations' comment for why.
+//
+// `session_id` is the session SampleFadeControlValuesOnDraw captured before
+// doing any of the unlocked work (the inspection cache lookup) leading up
+// to this call. Re-checked against the shared token immediately after
+// acquiring the lock, before any Observe/sample mutation below: without
+// this, a session ending (or a new one starting) in the gap between that
+// capture and this lock acquisition could commit a Draw begun under the
+// old session into whichever session happens to be live now.
 void SampleOneRole(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route,
     const FadeControlPipelineIdentity& pipeline_identity,
     std::uint32_t primitive_index, FadeControlRole role,
-    const FadeControlSource& source) {
+    const FadeControlSource& source, std::uint64_t session_id) {
   FadeControlRecordKey key;
   key.route = route;
   key.primitive_index = primitive_index;
   key.role = role;
 
   std::lock_guard lock(g_fade_control_mutex);
+  if (!g_manual_capture_session_token.StillLive(session_id)) return;
   if (!source.resolved) {
     g_fade_control_accumulator.Observe(
         key, pipeline_identity, Unavailable(kFadeControlReasonSourceUnresolved));
@@ -977,7 +986,8 @@ bool WriteFadeControlSnapshotExport(
 void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route,
     const TracePipelineInfo& pipeline) {
-  if (g_manual_capture_session_token.value() == 0) return;
+  const std::uint64_t session_id = g_manual_capture_session_token.value();
+  if (session_id == 0) return;
   if (!g_fade_control_enabled_for_session.load(std::memory_order_acquire))
     return;
 
@@ -999,9 +1009,9 @@ void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
   for (std::size_t i = 0; i < sources_copy.size(); ++i) {
     const auto primitive_index = static_cast<std::uint32_t>(i);
     SampleOneRole(trace, route, pipeline_identity, primitive_index,
-        FadeControlRole::Predicate, sources_copy[i].predicate);
+        FadeControlRole::Predicate, sources_copy[i].predicate, session_id);
     SampleOneRole(trace, route, pipeline_identity, primitive_index,
-        FadeControlRole::Coverage, sources_copy[i].coverage);
+        FadeControlRole::Coverage, sources_copy[i].coverage, session_id);
   }
 }
 

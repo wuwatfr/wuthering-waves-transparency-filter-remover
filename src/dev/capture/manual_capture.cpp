@@ -225,7 +225,8 @@ bool IsVerifiedFadePrimitiveShaderLocked(std::uint64_t shader_hash) {
 }  // namespace
 
 void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
-  if (g_manual_capture_session_token.value() == 0 || !cmd_list) return;
+  const std::uint64_t session_id = g_manual_capture_session_token.value();
+  if (session_id == 0 || !cmd_list) return;
   const auto* trace = cmd_list->get_private_data<CommandListTrace>();
   if (!trace ||
       (trace->recorded_draws.empty() &&
@@ -234,11 +235,17 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
 
   // Snapshot the session's fixed filter mode without holding g_trace_mutex
   // across the g_inspection_mutex lookups below -- lock order must never
-  // nest g_inspection_mutex inside g_trace_mutex.
+  // nest g_inspection_mutex inside g_trace_mutex. IsLiveSession (not just
+  // state() == Capturing) is required here and again at the final
+  // accumulation lock below: without it, a Stop() immediately followed by a
+  // new Start() in between these two locked sections would leave state()
+  // Capturing again by the time this function re-acquires the lock, and
+  // filter_mode/eligible_shader_hashes computed for the OLD session would
+  // silently be committed into the NEW one.
   ManualCaptureShaderFilter filter_mode;
   {
     std::lock_guard lock(g_trace_mutex);
-    if (g_manual_capture.state() != ManualCaptureState::Capturing) return;
+    if (!g_manual_capture.IsLiveSession(session_id)) return;
     filter_mode = g_manual_capture.active().shader_filter;
   }
 
@@ -259,7 +266,7 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
   }
 
   std::lock_guard lock(g_trace_mutex);
-  if (g_manual_capture.state() != ManualCaptureState::Capturing) return;
+  if (!g_manual_capture.IsLiveSession(session_id)) return;
   if (trace->recorded_draw_capacity_exceeded)
     g_manual_capture.MarkCapacityExceeded();
   const std::uint64_t frame = g_manual_capture_frame_counter;
@@ -285,10 +292,11 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
 
 void OnManualCapturePresent(command_queue*, swapchain* presented_swapchain,
     const rect*, const rect*, std::uint32_t, const rect*) {
-  if (g_manual_capture_session_token.value() == 0) return;
+  const std::uint64_t session_id = g_manual_capture_session_token.value();
+  if (session_id == 0) return;
 
   std::lock_guard lock(g_trace_mutex);
-  if (g_manual_capture.state() != ManualCaptureState::Capturing) return;
+  if (!g_manual_capture.IsLiveSession(session_id)) return;
   const std::uintptr_t swapchain_id =
       reinterpret_cast<std::uintptr_t>(presented_swapchain);
   if (g_manual_capture_swapchain == 0)
@@ -321,14 +329,18 @@ void StartManualCapture() {
   g_manual_capture_frame_counter = 0;
   g_manual_capture_swapchain = 0;
   g_manual_capture.Start(g_manual_capture_generation, 0, filter_mode);
-  g_manual_capture_session_token.Start(g_manual_capture_generation);
   g_manual_capture_status = "capturing";
   // Fade control has its own mutex/accumulators (see
   // fade_control_runtime.hpp) but no independent session lifecycle of its
   // own: it participates in this same session via
-  // g_manual_capture_session_token above, and is simply told here whether
-  // it was opted into this particular one.
+  // g_manual_capture_session_token below, and is simply told here whether
+  // it was opted into this particular one. This must run before the token
+  // is published: once it becomes visible to a concurrent Draw-time hot
+  // path, every participating channel must already be initialized for the
+  // new session, not still mid-reset.
   StartFadeControlCapture(g_manual_capture_generation, fade_control_enabled);
+  // Published last, only once every channel above is ready.
+  g_manual_capture_session_token.Start(g_manual_capture_generation);
 }
 
 bool StopAndExportManualCapture() {
@@ -337,8 +349,11 @@ bool StopAndExportManualCapture() {
     std::lock_guard lock(g_trace_mutex);
     if (g_manual_capture.state() != ManualCaptureState::Capturing)
       return false;
-    snapshot = g_manual_capture.Stop(g_manual_capture_frame_counter);
+    // Closes admission first: cleared before either channel's state is
+    // frozen, so no Draw/Present hot-path check newly entering can observe
+    // this session as still live, even momentarily.
     g_manual_capture_session_token.Stop();
+    snapshot = g_manual_capture.Stop(g_manual_capture_frame_counter);
   }
   const bool fade_control_was_enabled = StopFadeControlCapture();
 

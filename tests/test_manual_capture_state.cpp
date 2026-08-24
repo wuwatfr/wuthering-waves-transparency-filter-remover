@@ -279,6 +279,62 @@ int main() {
     CHECK(token.value() == 0);
   }
 
+  // ManualCaptureSessionToken::StillLive: the exact-session-id validation
+  // logic every Draw-time channel re-checks before committing work. Never
+  // true for session id 0 (an uncaptured/idle token value), even if the
+  // token itself happens to read 0.
+  {
+    ManualCaptureSessionToken token;
+    CHECK(!token.StillLive(0));
+    CHECK(!token.StillLive(1));  // not started yet
+
+    token.Start(1);
+    CHECK(token.StillLive(1));
+    CHECK(!token.StillLive(2));  // a different id was never live
+
+    token.Stop();
+    CHECK(!token.StillLive(1));  // stopped: no id is live anymore
+  }
+
+  // Regression: stale work captured under session A must never be
+  // admitted into session B, even though B is also Capturing by the time
+  // the check runs -- exactly the scenario a bare "state == Capturing"
+  // check (without also comparing the captured session id) would miss.
+  // Deterministic: models the interleaving directly, no threads/sleeps.
+  {
+    ManualCaptureSessionToken token;
+    token.Start(1);
+    const std::uint64_t captured_session_id = token.value();
+    CHECK(captured_session_id == 1);
+
+    // Session A stops and session B starts before the captured id is
+    // re-checked (e.g. an inspection-cache lookup ran in between).
+    token.Stop();
+    token.Start(2);
+
+    CHECK(!token.StillLive(captured_session_id));
+    CHECK(token.StillLive(token.value()));
+  }
+
+  // Same regression, against ManualCaptureAccumulator::IsLiveSession --
+  // the authoritative, mutex-protected counterpart channels re-check under
+  // g_trace_mutex once they actually have work to commit.
+  {
+    ManualCaptureAccumulator accumulator;
+    accumulator.Start(1, 0, kAllShaders);
+    CHECK(accumulator.IsLiveSession(1));
+    CHECK(!accumulator.IsLiveSession(2));
+
+    // Work captured under session 1's id must not be accepted once session
+    // 1 has stopped and session 2 has started, even though the accumulator
+    // is Capturing again by then.
+    accumulator.Stop(0);
+    accumulator.Start(2, 0, kAllShaders);
+    CHECK(accumulator.state() == ManualCaptureState::Capturing);
+    CHECK(!accumulator.IsLiveSession(1));
+    CHECK(accumulator.IsLiveSession(2));
+  }
+
   // AllocateExportFilename: no collision returns the bare stem+extension.
   {
     std::unordered_set<std::string> existing;
