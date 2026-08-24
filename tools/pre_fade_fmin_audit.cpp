@@ -39,6 +39,12 @@ std::string TsvEscape(std::string_view text) {
   return out;
 }
 
+bool SameInstanceIdentity(const wuwa_tfr::FadePrimitiveInstance& a,
+    const wuwa_tfr::FadePrimitiveInstance& b) noexcept {
+  return a.function_identity == b.function_identity &&
+      a.merge_value == b.merge_value && a.consumer == b.consumer;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -78,11 +84,23 @@ int main(int argc, char** argv) {
     if (diagnostic.instances.empty()) continue;
     ++shaders_with_primitive;
 
+    const wuwa_tfr::TargetDitherBypassResult patched =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir);
+
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> rewrite_ranges;
     for (const wuwa_tfr::FadePrimitiveInstance& instance : diagnostic.instances) {
       ++verified_instances;
-      wuwa_tfr::PreFadeFMinAnalysis analysis =
-          wuwa_tfr::AnalyzePreFadeFMinForInstance(ir, instance);
+      wuwa_tfr::PreFadeFMinAnalysis analysis;
+      bool reused_patch_analysis = false;
+      for (const wuwa_tfr::PreFadeFMinEvidence& evidence : patched.instance_evidence) {
+        if (SameInstanceIdentity(evidence.instance, instance)) {
+          analysis = evidence.analysis;
+          reused_patch_analysis = true;
+          break;
+        }
+      }
+      if (!reused_patch_analysis)
+        analysis = wuwa_tfr::AnalyzePreFadeFMinForInstance(ir, instance);
       wuwa_tfr::ResolvePreFadeCbvRegisters(ir, instance, analysis);
       ++status_distribution[wuwa_tfr::PreFadeFMinStatusName(analysis.status)];
       if (wuwa_tfr::PreFadeFMinAnalysisIsStructurallyComplete(analysis)) {
@@ -121,8 +139,6 @@ int main(int argc, char** argv) {
       shared_rewrite_range_shaders.push_back(hash);
     }
 
-    const wuwa_tfr::TargetDitherBypassResult patched =
-        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir);
     if (patched.success) {
       ++shaders_patched;
     } else {
