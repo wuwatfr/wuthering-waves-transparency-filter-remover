@@ -11,6 +11,8 @@
 
 namespace wuwa_tfr {
 
+class FadePrimitiveRuntimeObserver;
+
 // A point-in-time view of only the Production runtime objects explicitly
 // retained by WuwaTFR. Cumulative totals retain their existing meanings:
 // matched/prepared count successful structural match and patch preparation;
@@ -53,6 +55,17 @@ class FadePrimitiveRuntime {
       reshade::api::pipeline_stage stages, reshade::api::pipeline pipeline);
   // Set during add-on initialization, before ReShade registers callbacks.
   void set_dxc_runtime_directory(std::filesystem::path addon_directory);
+  // Installs an optional, read-only observer of already-computed shader-
+  // preparation and application-pipeline facts; see
+  // fade_primitive_runtime_observer.hpp. Not owned: the caller retains
+  // responsibility for the observer's lifetime, which must outlive every
+  // subsequent callback into this runtime. Like set_dxc_runtime_directory,
+  // this is initialization-time configuration -- set once, before any
+  // device activates (i.e. before OnInitDevice can first be called) -- and
+  // is never guarded by a lock, so it must not be changed afterward.
+  // Production never calls this setter; its observer stays null and its
+  // behavior is unaffected.
+  void set_observer(FadePrimitiveRuntimeObserver* observer);
   bool enabled() const;
   void set_enabled(bool enabled);
   FadePrimitiveRuntimeTelemetrySnapshot memory_telemetry_snapshot() const;

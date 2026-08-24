@@ -8,6 +8,7 @@
 #include "test_check.hpp"
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -17,6 +18,14 @@ std::string LongChain(int length) {
     chain += "%chain" + std::to_string(i) + " = fadd fast float %chain" +
         std::to_string(i - 1) + ", 1.000000e+00\n";
   return chain;
+}
+
+const wuwa_tfr::FadePrimitiveInstance* FindByMergeValue(
+    const std::vector<wuwa_tfr::FadePrimitiveInstance>& instances,
+    std::string_view merge_value) {
+  for (const auto& instance : instances)
+    if (instance.merge_value == merge_value) return &instance;
+  return nullptr;
 }
 
 }  // namespace
@@ -128,6 +137,38 @@ call void @dx.op.discard(i32 82, i1 %kill)
   }
   CHECK(all_instances.llvm_ir.find("float %opA0") == std::string::npos);
   CHECK(all_instances.llvm_ir.find("float %opA1") == std::string::npos);
+
+  // The evidence behind this same patch: exactly the analyses that
+  // authorized it, associated with their instances by value (not by a
+  // shared vector index), and reproducing exactly the text that got
+  // rewritten -- proving this is the analysis actually used, not a
+  // re-derived stand-in.
+  CHECK(all_instances.instance_evidence.size() == 2);
+  {
+    const auto diagnostic = wuwa_tfr::AnalyzeFadePrimitiveV1(all_instances_ir);
+    CHECK(diagnostic.instances.size() == 2);
+    for (const auto& evidence : all_instances.instance_evidence) {
+      CHECK(evidence.analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+      const auto* original_instance =
+          FindByMergeValue(diagnostic.instances, evidence.instance.merge_value);
+      CHECK(original_instance != nullptr);
+      CHECK(original_instance->function_identity == evidence.instance.function_identity);
+      CHECK(original_instance->consumer == evidence.instance.consumer);
+      const auto& operand = evidence.analysis.operand_one;
+      CHECK(operand.source_end > operand.source_start);
+      CHECK(operand.source_end <= all_instances_ir.size());
+      CHECK(all_instances_ir.substr(operand.source_start,
+          operand.source_end - operand.source_start) == operand.source_text);
+      CHECK(operand.source_text != wuwa_tfr::kPreFadeRewriteLiteral);
+    }
+    const bool has_d0 =
+        all_instances.instance_evidence[0].instance.merge_value == "%d0" ||
+        all_instances.instance_evidence[1].instance.merge_value == "%d0";
+    const bool has_d1 =
+        all_instances.instance_evidence[0].instance.merge_value == "%d1" ||
+        all_instances.instance_evidence[1].instance.merge_value == "%d1";
+    CHECK(has_d0 && has_d1);
+  }
 
   // Production cannot authorize screen-space indexing from an unrelated
   // TEXCOORD signature merely because SV_Position metadata exists elsewhere.
@@ -340,6 +381,9 @@ entry:
     CHECK(result.patched_instance_count == 0);
     CHECK(result.llvm_ir.empty());
     CHECK(result.error.find("no qualifying pre-Fade FMin") != std::string::npos);
+    // The rejected instance is first in iteration order and never reaches a
+    // Matched analysis, so no evidence is fabricated for it.
+    CHECK(result.instance_evidence.empty());
   }
 
   // ---- fail-closed: operands from different CBV handles ----
@@ -395,6 +439,40 @@ entry:
     CHECK(result.error.find("ambiguous") != std::string::npos);
   }
 
+  // ---- fail-closed: only the second instance's analysis fails ----
+  // The first instance (%d0) is untouched and reaches a Matched analysis;
+  // the second (%d1) is broken the same way the "absent" case broke the
+  // first. Evidence must contain exactly the completed prefix -- one entry,
+  // for %d0 -- never a fabricated entry for the instance that failed.
+  {
+    std::string second_broken = all_instances_ir;
+    const std::string second_instance_prefix =
+        "%pf1 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb3, i32 55)\n"
+        "%opA1 = extractvalue %dx.types.CBufRet.f32 %pf1, 1\n"
+        "%opB1 = extractvalue %dx.types.CBufRet.f32 %pf1, 2\n"
+        "%coverage1 = call float @dx.op.binary.f32(i32 36, float %opA1, float %opB1)  ; FMin(a,b)";
+    const std::string second_instance_broken =
+        "%pf1 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb3, i32 55)\n"
+        "%opA1 = extractvalue %dx.types.CBufRet.f32 %pf1, 1\n"
+        "%opB1 = call float @dx.op.loadInput.f32(i32 4, i32 2, i32 0, i8 0, i32 undef)\n"
+        "%coverage1 = call float @dx.op.binary.f32(i32 36, float %opA1, float %opB1)  ; FMin(a,b)";
+    const std::size_t at = second_broken.find(second_instance_prefix);
+    CHECK(at != std::string::npos);
+    second_broken.replace(at, second_instance_prefix.size(), second_instance_broken);
+    const auto diagnostic = wuwa_tfr::AnalyzeFadePrimitiveV1(second_broken);
+    CHECK(diagnostic.instances.size() == 2);
+    const auto result =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(second_broken);
+    CHECK(!result.success);
+    CHECK(result.patched_instance_count == 0);
+    CHECK(result.llvm_ir.empty());
+    CHECK(result.error.find("no qualifying pre-Fade FMin") != std::string::npos);
+    CHECK(result.instance_evidence.size() == 1);
+    CHECK(result.instance_evidence[0].instance.merge_value == "%d0");
+    CHECK(result.instance_evidence[0].analysis.status ==
+        wuwa_tfr::PreFadeFMinStatus::Matched);
+  }
+
   // ---- fail-closed: two verified instances sharing one rewrite range ----
   // Both phis take their enabled value from the same expression, so both
   // resolve to the same operand-1 byte range. Rewriting it twice would mean
@@ -417,6 +495,12 @@ entry:
     CHECK(result.patched_instance_count == 0);
     CHECK(result.llvm_ir.empty());
     CHECK(result.error.find("share a pre-Fade rewrite range") != std::string::npos);
+    // Both instances individually reached a Matched analysis before the
+    // shared-range check ran; a failure discovered only after the per-
+    // instance loop completed does not truncate already-completed evidence.
+    CHECK(result.instance_evidence.size() == 2);
+    for (const auto& evidence : result.instance_evidence)
+      CHECK(evidence.analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
   }
 
   // ---- post-patch: the verified primitive itself survives byte-identically ----

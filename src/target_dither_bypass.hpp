@@ -5,8 +5,26 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
+
+#include "fade_primitive_detector.hpp"
+#include "pre_fade_fmin_analysis.hpp"
 
 namespace wuwa_tfr {
+
+// One verified instance's already-computed canonical pre-Fade evidence: the
+// exact FadePrimitiveInstance it was matched against, paired with the exact
+// PreFadeFMinAnalysis that authorized (or, for a not-yet-rewritten instance
+// exposed mid-failure, would have authorized) its rewrite. Read-only
+// diagnostic data -- this is the same analysis
+// PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand() itself already
+// computed and acted on, copied out rather than re-derived. Association with
+// the instance is carried directly by value in `instance`, not by a shared
+// index into some other vector, so it survives independently of ordering.
+struct PreFadeFMinEvidence {
+  FadePrimitiveInstance instance;
+  PreFadeFMinAnalysis analysis;
+};
 
 struct TargetDitherBypassResult {
   bool success = false;
@@ -23,6 +41,32 @@ struct TargetDitherBypassResult {
   std::size_t patched_instance_count = 0;
   std::string llvm_ir;
   std::string error;
+
+  // The already-computed evidence behind every instance that reached a
+  // Matched pre-Fade analysis on the way to this result -- i.e. exactly the
+  // instances staged for rewrite, each paired with the analysis that
+  // authorized it. Exposed purely for read-only diagnostic consumers (see
+  // FadePrimitiveRuntimeObserver in fade_primitive_runtime_observer.hpp);
+  // this function never re-derives an analysis to populate it, and never
+  // calls ResolvePreFadeCbvRegisters() -- register/space enrichment stays
+  // diagnostic-only and outside this cost.
+  //
+  // On success, one entry per patched instance (size() == patched_instance_
+  // count).
+  //
+  // On failure, this is exactly whichever prefix of that same set had
+  // already reached a Matched analysis before the fail-closed rejection:
+  // empty for a whole-shader failure detected before any instance was
+  // analyzed (no verified instance, an unsupported consumer, or non-unique
+  // instance identities), a strict prefix for a failure discovered while
+  // still analyzing instances (an instance whose own analysis was not
+  // Matched), or the complete matched set for a failure discovered only
+  // after every instance was analyzed (two instances sharing one rewrite
+  // range, a rewrite target that changed before patching, or any part of
+  // post-patch verification). An instance whose own analysis was not Matched
+  // is never included here, even on the failing shader: an unmatched
+  // analysis is not patch evidence, and this vector never fabricates any.
+  std::vector<PreFadeFMinEvidence> instance_evidence;
 };
 
 // The canonical Production patch. For every already v1-verified Fade

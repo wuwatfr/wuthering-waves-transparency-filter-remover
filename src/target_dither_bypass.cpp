@@ -83,6 +83,14 @@ TargetDitherBypassResult PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
       return result;
     }
     ++result.qualifying_instance_count;
+    // Evidence is appended here, before `analysis` is moved into the
+    // rewrite below, so every early `return result;` from this point on
+    // (including every one still ahead in this function) preserves exactly
+    // the prefix of instances that reached a Matched analysis -- see
+    // TargetDitherBypassResult::instance_evidence's own documented
+    // semantics. No extra analysis pass: this is a copy of the analysis
+    // this loop already computed.
+    result.instance_evidence.push_back(PreFadeFMinEvidence{instance, analysis});
 
     PendingRewrite rewrite;
     rewrite.identity_key = std::move(identity_key);

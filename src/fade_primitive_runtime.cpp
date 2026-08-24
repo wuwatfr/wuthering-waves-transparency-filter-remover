@@ -7,6 +7,7 @@
 #include "device_activity_state.hpp"
 #include "dxc_bridge.hpp"
 #include "fade_primitive_detector.hpp"
+#include "fade_primitive_runtime_observer.hpp"
 #include "pipeline_replacement_coordinator.hpp"
 #include "preparation_context_pool.hpp"
 #include "single_flight_cache.hpp"
@@ -20,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace wuwa_tfr {
@@ -127,6 +129,11 @@ struct FadePrimitiveRuntime::Impl {
   DeviceActivityState<DeviceId> activity;
   PipelineReplacementCoordinator<DeviceId, pipeline> replacements;
   std::atomic<bool> enabled{false};
+  // Optional, read-only, initialization-time configuration -- see
+  // set_observer()'s own documentation. Not owned; never null-checked under
+  // any lock, since it is never written after the initialization window
+  // set_observer() documents.
+  FadePrimitiveRuntimeObserver* observer = nullptr;
   // These are cumulative runtime activity counters, not retained-object
   // gauges. Telemetry snapshots only load them and never increment them.
   std::atomic<std::uint64_t> matched_shaders{0};
@@ -142,9 +149,17 @@ struct FadePrimitiveRuntime::Impl {
           return std::make_unique<DxcBridge>(dxc_runtime_directory);
         }) {}
 
-  PreparedShader PrepareOne(const shader_desc& original) {
+  PreparedShader PrepareOne(std::uint64_t hash, const shader_desc& original) {
     PreparedShader state;
     state.attempted = true;
+    // Declared here, rather than in the blocks below where each is actually
+    // computed, purely so an observer -- if one is installed -- can still
+    // see them after those blocks close. This changes no decision-making
+    // logic: every condition and assignment below is otherwise unchanged
+    // from before this observation seam existed.
+    std::optional<DxilInspectionOutput> inspected;
+    FadePrimitiveDiagnostic diagnostic;
+    std::optional<TargetDitherBypassResult> patched;
     try {
       auto dxc = dxc_pool.Acquire();
       if (!dxc) {
@@ -152,28 +167,28 @@ struct FadePrimitiveRuntime::Impl {
       } else if (!dxc->available()) {
         state.failure = dxc->init_error();
       } else {
-        const auto inspected = dxc->InspectShader(original.code, original.code_size);
-        if (!inspected.success) {
-          state.failure = inspected.error;
+        inspected = dxc->InspectShader(original.code, original.code_size);
+        if (!inspected->success) {
+          state.failure = inspected->error;
         } else {
-          const auto diagnostic = AnalyzeFadePrimitiveV1(inspected.original_ir);
+          diagnostic = AnalyzeFadePrimitiveV1(inspected->original_ir);
           state.matches = !diagnostic.instances.empty();
           if (!state.matches) {
             state.failure = "no fully verified transparency-filter primitive";
           } else {
             matched_shaders.fetch_add(1, std::memory_order_relaxed);
-            const auto patched = PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
-                inspected.original_ir);
-            if (!patched.success ||
-                patched.verified_instance_count != diagnostic.instances.size() ||
-                patched.patched_instance_count != diagnostic.instances.size()) {
-              state.failure = patched.error.empty() ?
-                  "structural verification failed" : patched.error;
+            patched = PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+                inspected->original_ir);
+            if (!patched->success ||
+                patched->verified_instance_count != diagnostic.instances.size() ||
+                patched->patched_instance_count != diagnostic.instances.size()) {
+              state.failure = patched->error.empty() ?
+                  "structural verification failed" : patched->error;
             } else {
               auto bytes = std::make_shared<std::vector<std::uint8_t>>();
               std::string error;
               DxilAssemblyValidationOutput result;
-              if (!dxc->AssembleAndValidate(patched.llvm_ir, *bytes, error, result)) {
+              if (!dxc->AssembleAndValidate(patched->llvm_ir, *bytes, error, result)) {
                 state.failure = error;
               } else {
                 state.bytecode = std::move(bytes);
@@ -190,6 +205,35 @@ struct FadePrimitiveRuntime::Impl {
     }
     if (!state.bytecode)
       replacements_failed.fetch_add(1, std::memory_order_relaxed);
+
+    // Reported from here -- after every decision above has already been
+    // made and `dxc` (the leased context) has already gone out of scope --
+    // so this can only observe outcomes, never influence them. Guarded on
+    // `observer` so an absent observer costs nothing beyond the branch
+    // itself: no extra copy of the diagnostic, the evidence vector, or the
+    // IR text is ever made.
+    if (observer) {
+      FadePrimitiveRuntimeObserver::ShaderPreparationObservation observation;
+      observation.original_shader_hash = hash;
+      observation.original_bytecode_size = original.code_size;
+      observation.inspection_succeeded = inspected.has_value() && inspected->success;
+      if (inspected) {
+        if (!inspected->success) observation.inspection_error = inspected->error;
+      } else {
+        observation.inspection_error = state.failure;
+      }
+      if (observation.inspection_succeeded)
+        observation.original_ir = &inspected->original_ir;
+      observation.fade_primitive = diagnostic;
+      if (patched) {
+        observation.pre_fade_evidence = patched->instance_evidence;
+        observation.patch_succeeded = patched->success;
+        if (!patched->success) observation.patch_failure = state.failure;
+      }
+      observation.prepared_succeeded = state.bytecode != nullptr;
+      observation.prepared_failure = state.failure;
+      observer->OnShaderPrepared(observation);
+    }
     return state;
   }
 
@@ -197,7 +241,7 @@ struct FadePrimitiveRuntime::Impl {
       std::uint64_t hash, const shader_desc& original) {
     const PreparedShader state = prepared.GetOrPrepare(
         hash,
-        [&] { return PrepareOne(original); },
+        [&] { return PrepareOne(hash, original); },
         [&] {
           PreparedShader aborted;
           aborted.attempted = true;
@@ -215,6 +259,10 @@ FadePrimitiveRuntime::~FadePrimitiveRuntime() { delete impl_; }
 void FadePrimitiveRuntime::set_dxc_runtime_directory(
     std::filesystem::path addon_directory) {
   impl_->dxc_runtime_directory = std::move(addon_directory);
+}
+
+void FadePrimitiveRuntime::set_observer(FadePrimitiveRuntimeObserver* observer) {
+  impl_->observer = observer;
 }
 
 void FadePrimitiveRuntime::OnInitDevice(device* owner) {
@@ -252,6 +300,22 @@ void FadePrimitiveRuntime::OnInitPipeline(device* owner, pipeline_layout layout,
   const shader_desc* original = nullptr;
   std::uint64_t hash = 0;
   const bool has_pixel_shader = FindPixelShader(count, subobjects, original, hash);
+  // Reported here, immediately after identification and before any
+  // replacement-selection decision is made from it, so this can only
+  // observe what was identified, never influence what happens with it.
+  // This sits inside the same `active` shared/reader lock already held for
+  // this entire function -- not a new lock scope -- which already tolerates
+  // far heavier work below (a DXC compile via impl_->Prepare); it excludes
+  // only concurrent device teardown, never other concurrent OnInitPipeline
+  // or OnBindPipeline calls.
+  if (impl_->observer) {
+    FadePrimitiveRuntimeObserver::PipelineInitObservation observation;
+    observation.device = owner;
+    observation.application_pipeline = application.handle;
+    observation.pixel_shader_identified = has_pixel_shader;
+    observation.pixel_shader_hash = has_pixel_shader ? hash : 0;
+    impl_->observer->OnPipelineInit(observation);
+  }
   const auto destroy_replacement = [owner](pipeline replacement) {
     ScopedFlag internal(g_internal_destroy);
     owner->destroy_pipeline(replacement);
