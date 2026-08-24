@@ -70,7 +70,11 @@ constexpr std::size_t kMaxTrackedDescriptorSlots = 4096;
 bool SetDescriptorTableSlot(DescriptorSlotTable& table,
     const DescriptorSlotKey& key, std::optional<DescriptorSlotContent> content);
 
-void CopyDescriptorTableSlot(DescriptorSlotTable& table,
+// Returns false only when copying an existing source slot's content into
+// dest failed because the table was at capacity; returns true both when the
+// copy succeeded and when source was unbound (dest is simply cleared, which
+// is never a capacity failure).
+bool CopyDescriptorTableSlot(DescriptorSlotTable& table,
     const DescriptorSlotKey& source, const DescriptorSlotKey& dest);
 
 void InvalidateDescriptorTableSlotsForResource(DescriptorSlotTable& table,

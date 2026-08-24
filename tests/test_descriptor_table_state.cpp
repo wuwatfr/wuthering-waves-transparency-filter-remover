@@ -84,7 +84,7 @@ void TestCopyPropagatesCurrentDescriptor() {
   const DescriptorSlotKey source = Key(kDeviceA, 100, 0);
   const DescriptorSlotKey dest = Key(kDeviceA, 200, 5);
   SetDescriptorTableSlot(table, source, DescriptorSlotContent{7, 3, 16, 64});
-  CopyDescriptorTableSlot(table, source, dest);
+  assert(CopyDescriptorTableSlot(table, source, dest));
   const auto content = FindDescriptorTableSlot(table, dest);
   assert(content.has_value());
   assert(content->resource_handle == 7);
@@ -98,8 +98,35 @@ void TestUnknownCopyInvalidatesDestination() {
   const DescriptorSlotKey source = Key(kDeviceA, 999, 0);  // never written
   const DescriptorSlotKey dest = Key(kDeviceA, 200, 5);
   SetDescriptorTableSlot(table, dest, DescriptorSlotContent{7, 3, 16, 64});
-  CopyDescriptorTableSlot(table, source, dest);
+  // An unbound source clearing dest is a normal outcome, not a capacity
+  // failure -- must report success.
+  assert(CopyDescriptorTableSlot(table, source, dest));
   assert(!FindDescriptorTableSlot(table, dest).has_value());
+}
+
+void TestCopyReportsCapacityFailure() {
+  DescriptorSlotTable table;
+  const DescriptorSlotKey source = Key(kDeviceA, 100, 0);
+  SetDescriptorTableSlot(table, source, DescriptorSlotContent{7, 3, 16, 64});
+  for (std::uint32_t i = 1; i < wuwa_tfr::dev::kMaxTrackedDescriptorSlots;
+       ++i) {
+    SetDescriptorTableSlot(
+        table, Key(kDeviceA, 1, i), DescriptorSlotContent{1, 1, 0, 4});
+  }
+  // Table is now exactly at capacity (source counts as one of the slots).
+  const DescriptorSlotKey brand_new_dest = Key(kDeviceA, 999999, 0);
+  // A copy into a genuinely new key at capacity must report failure, not
+  // silently drop it -- this is the exact case CopyDescriptorTableSlot used
+  // to swallow.
+  assert(!CopyDescriptorTableSlot(table, source, brand_new_dest));
+  assert(!FindDescriptorTableSlot(table, brand_new_dest).has_value());
+
+  // Copying into an EXISTING key at capacity is an update, not a capacity
+  // failure.
+  const DescriptorSlotKey existing_dest = Key(kDeviceA, 1, 1);
+  assert(CopyDescriptorTableSlot(table, source, existing_dest));
+  const auto updated = FindDescriptorTableSlot(table, existing_dest);
+  assert(updated.has_value() && updated->resource_handle == 7);
 }
 
 void TestUnboundSlotFailsClosed() {
@@ -187,6 +214,7 @@ int main() {
   TestUpdateOverwritesCurrentDescriptor();
   TestCopyPropagatesCurrentDescriptor();
   TestUnknownCopyInvalidatesDestination();
+  TestCopyReportsCapacityFailure();
   TestUnboundSlotFailsClosed();
   TestSameTableAndSlotOnDifferentDevicesRemainDistinct();
   TestResourceIncarnationMismatchIsRejected();

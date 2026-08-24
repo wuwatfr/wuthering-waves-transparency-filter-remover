@@ -33,6 +33,15 @@ struct FadeControlDiagnosticCounters {
   bool capacity_exceeded = false;
   std::size_t snapshot_count = 0;
   bool snapshot_capacity_exceeded = false;
+  // Fade-control's own runtime trackers (as opposed to the accumulators'
+  // record capacity above): whether any of them dropped or truncated state
+  // during the current/most recent capture. See the export's
+  // tracker_capacity_loss_semantics line for why this matters -- without
+  // it, tracker data loss can look like a genuine binding/source miss.
+  bool descriptor_slot_capacity_loss = false;
+  bool mapped_buffer_capacity_loss = false;
+  bool layout_map_capacity_loss = false;
+  bool descriptor_range_truncated = false;
 };
 FadeControlDiagnosticCounters GetFadeControlDiagnosticCounters();
 

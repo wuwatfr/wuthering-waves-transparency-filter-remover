@@ -33,6 +33,18 @@ bool g_fade_control_session_enabled = false;
 
 bool g_fade_control_pending_enabled = true;
 
+// Tracks whether any of Fade-control's own fixed-capacity runtime trackers
+// (as opposed to the accumulators' own record capacity) silently dropped or
+// truncated state. Reset when a capture starts, so it reports loss that
+// occurred during the current/most recent capture, not lifetime history.
+struct FadeControlTrackerCapacityDiagnostics {
+  bool descriptor_slot_loss = false;
+  bool mapped_buffer_loss = false;
+  bool layout_map_loss = false;
+  bool descriptor_range_truncated = false;
+};
+FadeControlTrackerCapacityDiagnostics g_fade_control_tracker_capacity;
+
 struct LayoutCbvRangeInfo {
   std::vector<DescriptorCbvRangeInfo> ranges;
   bool ranges_truncated = false;
@@ -91,8 +103,10 @@ void StoreLayoutCbvRanges(
     const wuwa_tfr::TraceLiveHandleKey& key,
     std::vector<DescriptorCbvRangeInfo>&& ranges, bool truncated) {
   if (ranges.empty() && !truncated) return;
-  if (target.size() >= kMaxTrackedFadeControlLayouts && !target.contains(key))
+  if (target.size() >= kMaxTrackedFadeControlLayouts && !target.contains(key)) {
+    g_fade_control_tracker_capacity.layout_map_loss = true;
     return;
+  }
   target[key] = LayoutCbvRangeInfo{std::move(ranges), truncated};
 }
 
@@ -158,6 +172,10 @@ void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
 
   const wuwa_tfr::TraceLiveHandleKey key{DeviceKey(owner), layout.handle};
   std::lock_guard lock(g_fade_control_mutex);
+  if (push_ranges_truncated || descriptor_ranges_truncated ||
+      push_constant_ranges_truncated) {
+    g_fade_control_tracker_capacity.descriptor_range_truncated = true;
+  }
   StoreLayoutCbvRanges(g_layout_push_cbv_ranges, key, std::move(push_ranges),
       push_ranges_truncated);
   StoreLayoutCbvRanges(g_layout_descriptor_cbv_ranges, key,
@@ -195,8 +213,10 @@ void OnMapFadeControlBuffer(device* owner, resource resource_handle,
       DeviceKey(owner), resource_handle.handle};
   std::lock_guard lock(g_fade_control_mutex);
   if (g_mapped_buffers.size() >= kMaxTrackedMappedBuffers &&
-      !g_mapped_buffers.contains(key))
+      !g_mapped_buffers.contains(key)) {
+    g_fade_control_tracker_capacity.mapped_buffer_loss = true;
     return;
+  }
   g_mapped_buffers[key] =
       MappedBufferInfo{static_cast<std::byte*>(*data), offset, resolved_size};
 }
@@ -246,9 +266,11 @@ bool OnUpdateFadeControlDescriptorTables(device* owner, std::uint32_t count,
       }
       const auto incarnation = FindActiveResourceLifecycle(
           {DeviceKey(owner), ranges[i].buffer.handle}).incarnation_id;
-      SetDescriptorTableSlot(g_descriptor_table_slots, key,
-          DescriptorSlotContent{ranges[i].buffer.handle, incarnation,
-              ranges[i].offset, ranges[i].size});
+      if (!SetDescriptorTableSlot(g_descriptor_table_slots, key,
+              DescriptorSlotContent{ranges[i].buffer.handle, incarnation,
+                  ranges[i].offset, ranges[i].size})) {
+        g_fade_control_tracker_capacity.descriptor_slot_loss = true;
+      }
     }
   }
   return false;
@@ -274,7 +296,8 @@ bool OnCopyFadeControlDescriptorTables(
           copy.source_binding + copy.source_array_offset + i};
       const DescriptorSlotKey dest{{device_key, copy.dest_table.handle},
           copy.dest_binding + copy.dest_array_offset + i};
-      CopyDescriptorTableSlot(g_descriptor_table_slots, source, dest);
+      if (!CopyDescriptorTableSlot(g_descriptor_table_slots, source, dest))
+        g_fade_control_tracker_capacity.descriptor_slot_loss = true;
     }
   }
   return false;
@@ -539,6 +562,7 @@ void StartFadeControlCapture(std::uint64_t session_id, bool enabled) {
   if (enabled) {
     g_fade_control_accumulator.Start(session_id);
     g_fade_control_snapshot_accumulator.Start(session_id);
+    g_fade_control_tracker_capacity = FadeControlTrackerCapacityDiagnostics{};
   }
 }
 
@@ -571,16 +595,27 @@ FadeControlDiagnosticCounters GetFadeControlDiagnosticCounters() {
       : g_fade_control_snapshot_accumulator.last_result();
   counters.snapshot_count = snapshot_result.snapshots.size();
   counters.snapshot_capacity_exceeded = snapshot_result.capacity_exceeded;
+
+  counters.descriptor_slot_capacity_loss =
+      g_fade_control_tracker_capacity.descriptor_slot_loss;
+  counters.mapped_buffer_capacity_loss =
+      g_fade_control_tracker_capacity.mapped_buffer_loss;
+  counters.layout_map_capacity_loss =
+      g_fade_control_tracker_capacity.layout_map_loss;
+  counters.descriptor_range_truncated =
+      g_fade_control_tracker_capacity.descriptor_range_truncated;
   return counters;
 }
 
 bool WriteFadeControlExport(
     const std::string& timestamp, std::filesystem::path& out_path) {
   FadeControlSnapshot snapshot;
+  FadeControlTrackerCapacityDiagnostics tracker_capacity;
   {
     std::lock_guard lock(g_fade_control_mutex);
     if (!g_fade_control_session_enabled) return false;
     snapshot = g_fade_control_accumulator.last_result();
+    tracker_capacity = g_fade_control_tracker_capacity;
   }
 
   const auto directory = DumpDir();
@@ -601,6 +636,24 @@ bool WriteFadeControlExport(
   report << "record_count\t" << snapshot.records.size() << '\n';
   report << "capacity_exceeded\t"
          << static_cast<int>(snapshot.capacity_exceeded) << '\n';
+  report << "tracker_descriptor_slot_capacity_loss\t"
+         << static_cast<int>(tracker_capacity.descriptor_slot_loss) << '\n';
+  report << "tracker_mapped_buffer_capacity_loss\t"
+         << static_cast<int>(tracker_capacity.mapped_buffer_loss) << '\n';
+  report << "tracker_layout_map_capacity_loss\t"
+         << static_cast<int>(tracker_capacity.layout_map_loss) << '\n';
+  report << "tracker_descriptor_range_truncated\t"
+         << static_cast<int>(tracker_capacity.descriptor_range_truncated)
+         << '\n';
+  report << "tracker_capacity_loss_semantics\t"
+      "these_four_flags_are_reset_when_capture_starts_and_report_whether_"
+      "the_shared_fade_control_runtime_trackers_descriptor_slots_mapped_"
+      "buffers_layout_cbv_range_maps_dropped_or_truncated_state_at_any_"
+      "point_during_this_capture_a_true_flag_means_some_rows_reason_bits_"
+      "1_not_mapped_or_128_descriptor_unknown_in_this_export_may_reflect_"
+      "diagnostic_tracker_capacity_loss_rather_than_a_genuine_runtime_miss_"
+      "this_is_never_retroactively_attributed_to_individual_records_see_"
+      "unavailable_reason_bits_for_per_row_detail\n";
   report << "export_timestamp_local\t" << timestamp << '\n';
   report << "value_observation\t"
       "cpu_command_recording_time_observation_of_mapped_constant_buffer_"
@@ -733,10 +786,12 @@ bool WriteFadeControlExport(
 bool WriteFadeControlSnapshotExport(
     const std::string& timestamp, std::filesystem::path& out_path) {
   FadeControlSnapshotSet snapshot_set;
+  FadeControlTrackerCapacityDiagnostics tracker_capacity;
   {
     std::lock_guard lock(g_fade_control_mutex);
     if (!g_fade_control_session_enabled) return false;
     snapshot_set = g_fade_control_snapshot_accumulator.last_result();
+    tracker_capacity = g_fade_control_tracker_capacity;
   }
 
   const auto directory = DumpDir();
@@ -757,6 +812,22 @@ bool WriteFadeControlSnapshotExport(
   report << "record_count\t" << snapshot_set.snapshots.size() << '\n';
   report << "capacity_exceeded\t"
          << static_cast<int>(snapshot_set.capacity_exceeded) << '\n';
+  report << "tracker_descriptor_slot_capacity_loss\t"
+         << static_cast<int>(tracker_capacity.descriptor_slot_loss) << '\n';
+  report << "tracker_mapped_buffer_capacity_loss\t"
+         << static_cast<int>(tracker_capacity.mapped_buffer_loss) << '\n';
+  report << "tracker_layout_map_capacity_loss\t"
+         << static_cast<int>(tracker_capacity.layout_map_loss) << '\n';
+  report << "tracker_descriptor_range_truncated\t"
+         << static_cast<int>(tracker_capacity.descriptor_range_truncated)
+         << '\n';
+  report << "tracker_capacity_loss_semantics\t"
+      "these_four_flags_are_reset_when_capture_starts_and_report_whether_"
+      "the_shared_fade_control_runtime_trackers_descriptor_slots_mapped_"
+      "buffers_layout_cbv_range_maps_dropped_or_truncated_state_at_any_"
+      "point_during_this_capture_this_is_never_retroactively_attributed_to_"
+      "individual_snapshots_see_manual_fade_controls_tsv_for_per_row_"
+      "unavailable_reason_detail\n";
   report << "export_timestamp_local\t" << timestamp << '\n';
   report << "value_observation\t"
       "cpu_command_recording_time_observation_of_mapped_constant_buffer_"

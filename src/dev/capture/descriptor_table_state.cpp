@@ -33,14 +33,14 @@ bool SetDescriptorTableSlot(DescriptorSlotTable& table,
   return true;
 }
 
-void CopyDescriptorTableSlot(DescriptorSlotTable& table,
+bool CopyDescriptorTableSlot(DescriptorSlotTable& table,
     const DescriptorSlotKey& source, const DescriptorSlotKey& dest) {
   const auto it = table.find(source);
   if (it == table.end()) {
     table.erase(dest);
-    return;
+    return true;
   }
-  SetDescriptorTableSlot(table, dest, it->second);
+  return SetDescriptorTableSlot(table, dest, it->second);
 }
 
 void InvalidateDescriptorTableSlotsForResource(DescriptorSlotTable& table,
