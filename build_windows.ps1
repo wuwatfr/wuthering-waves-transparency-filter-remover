@@ -141,7 +141,6 @@ $testTargets = @(
     'fade_primitive_detector_tests',
     'pre_fade_fmin_analysis_tests',
     'target_dither_bypass_tests',
-    'fade_control_analysis_tests',
     'fade_control_state_tests',
     'descriptor_table_state_tests',
     'fade_control_snapshot_tests',

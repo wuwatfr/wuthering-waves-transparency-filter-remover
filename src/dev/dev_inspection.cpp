@@ -206,7 +206,7 @@ std::atomic<std::uint64_t> g_disassembly_successes{0};
 std::atomic<std::uint64_t> g_disassembly_failures{0};
 std::atomic<std::uint64_t> g_dumped_shaders{0};
 
-bool g_diagnostic = false;
+bool g_diagnostic_config_flag = false;
 bool g_dump = false;
 
 wuwa_tfr::FadePrimitiveRuntimeObserver* InspectionObserver() {
@@ -215,7 +215,8 @@ wuwa_tfr::FadePrimitiveRuntimeObserver* InspectionObserver() {
 }
 
 void InitializeInspectionConfig() {
-  g_diagnostic = ConfigFlag(L"Diagnostic", EnvFlag(L"WUWA_TFR_DIAGNOSTIC"));
+  g_diagnostic_config_flag =
+      ConfigFlag(L"Diagnostic", EnvFlag(L"WUWA_TFR_DIAGNOSTIC"));
   g_dump = ConfigFlag(L"Dump", EnvFlag(L"WUWA_TFR_DUMP"));
   g_dump_path = ConfigPathValue(L"DumpPath");
 }

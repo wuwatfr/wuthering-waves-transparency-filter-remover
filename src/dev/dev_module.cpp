@@ -73,7 +73,7 @@ void DrawVariantOverlay() {
 void LogVariantStartup() {
   Log(reshade::log::level::info,
       std::string("loaded Dev research build") +
-      (dev::g_diagnostic ? "; diagnostic=on" : "; diagnostic=off") +
+      (dev::g_diagnostic_config_flag ? "; diagnostic=on" : "; diagnostic=off") +
       (dev::g_dump ? "; dump=all-unique-dxil" : "; dump=off") +
       (dev::g_dump ? "; dump-path=" + dev::g_dump_path.string() : "") +
       "; devtools=compiled" +

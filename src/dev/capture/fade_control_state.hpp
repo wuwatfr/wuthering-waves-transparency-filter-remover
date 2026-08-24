@@ -77,8 +77,8 @@ constexpr std::uint16_t kFadeControlReasonDescriptorUnknown = 1u << 7;
 // (32-bit values embedded directly in the command list, not a Constant
 // Buffer View), so this tracer -- scoped to CBVs -- does not attempt to
 // sample them; this reason exists purely so a real capture can prove or
-// rule out this exact cause when a predicate/coverage source is otherwise
-// unresolved.
+// rule out this exact cause when a predicate/pre-Fade-operand source is
+// otherwise unresolved.
 constexpr std::uint16_t kFadeControlReasonPushConstantBacked = 1u << 8;
 
 // Which binding mechanism resolved this record's live CBV, independent of
