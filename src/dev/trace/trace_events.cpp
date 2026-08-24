@@ -9,8 +9,8 @@
 #include "dev/capture/fade_control_runtime.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/dev_runtime.hpp"
-#include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/trace/trace_report.hpp"
+#include "pixel_shader_identity.hpp"
 
 using namespace reshade::api;
 
@@ -47,7 +47,7 @@ void OnInitTracePipeline(
   const TracePipelineKey key{DeviceKey(owner), handle.handle};
   const shader_desc* descriptor = nullptr;
   std::uint64_t shader_hash = 0;
-  if (!FindDxilPixelShader(
+  if (!wuwa_tfr::FindDxilPixelShader(
           subobject_count, subobjects, descriptor, shader_hash)) {
     std::lock_guard lock(g_trace_mutex);
     g_trace_pso_incarnations.Destroy(key);

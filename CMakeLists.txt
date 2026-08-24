@@ -146,6 +146,7 @@ if(WIN32)
         src/addon.cpp
         src/dxc_bridge.cpp
         src/fade_primitive_detector.cpp
+        src/pixel_shader_identity.cpp
         src/pre_fade_fmin_analysis.cpp
         src/target_dither_bypass.cpp)
       if(DEVTOOLS_VALUE)

@@ -6,7 +6,6 @@
 #include <Windows.h>
 
 #include <algorithm>
-#include <cstring>
 #include <cwctype>
 #include <fstream>
 #include <string>
@@ -18,34 +17,6 @@
 namespace wuwa_tfr::dev {
 
 namespace {
-
-bool HasDxilChunk(const std::uint8_t* data, std::size_t size) {
-  if (!data || size < 32 || std::memcmp(data, "DXBC", 4) != 0) return false;
-
-  std::uint32_t total_size = 0;
-  std::uint32_t chunk_count = 0;
-  std::memcpy(&total_size, data + 24, sizeof(total_size));
-  std::memcpy(&chunk_count, data + 28, sizeof(chunk_count));
-  if (chunk_count > 4096 || total_size != size) return false;
-
-  const std::size_t table_end = 32ull + 4ull * chunk_count;
-  if (total_size < table_end) return false;
-
-  bool has_dxil = false;
-  for (std::uint32_t i = 0; i < chunk_count; ++i) {
-    std::uint32_t offset = 0;
-    std::memcpy(&offset, data + 32 + 4ull * i, sizeof(offset));
-    if (static_cast<std::size_t>(offset) + 8 > total_size) return false;
-
-    std::uint32_t chunk_size = 0;
-    std::memcpy(&chunk_size, data + offset + 4, sizeof(chunk_size));
-    const std::size_t chunk_end =
-        static_cast<std::size_t>(offset) + 8ull + chunk_size;
-    if (chunk_end > total_size) return false;
-    if (std::memcmp(data + offset, "DXIL", 4) == 0) has_dxil = true;
-  }
-  return has_dxil;
-}
 
 // Same stable identity target_dither_bypass.cpp's own instance matching
 // uses (function, merge SSA name, consumer): enough to re-associate a
@@ -226,23 +197,6 @@ std::atomic<std::uint64_t> g_dumped_shaders{0};
 
 bool g_diagnostic = false;
 bool g_dump = false;
-
-bool LooksLikeDxil(const reshade::api::shader_desc& descriptor) {
-  if (!descriptor.code || descriptor.code_size < 64) return false;
-  return HasDxilChunk(
-      static_cast<const std::uint8_t*>(descriptor.code),
-      descriptor.code_size);
-}
-
-std::uint64_t Fnv1a64(const void* data, std::size_t size) {
-  const auto* bytes = static_cast<const std::uint8_t*>(data);
-  std::uint64_t hash = 14695981039346656037ull;
-  for (std::size_t i = 0; i < size; ++i) {
-    hash ^= bytes[i];
-    hash *= 1099511628211ull;
-  }
-  return hash;
-}
 
 wuwa_tfr::FadePrimitiveRuntimeObserver* InspectionObserver() {
   static InspectionObserverImpl instance;

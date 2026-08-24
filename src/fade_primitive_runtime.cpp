@@ -9,6 +9,7 @@
 #include "fade_primitive_detector.hpp"
 #include "fade_primitive_runtime_observer.hpp"
 #include "pipeline_replacement_coordinator.hpp"
+#include "pixel_shader_identity.hpp"
 #include "preparation_context_pool.hpp"
 #include "single_flight_cache.hpp"
 #include "target_dither_bypass.hpp"
@@ -16,7 +17,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <exception>
 #include <memory>
 #include <optional>
@@ -31,60 +31,6 @@ using DeviceId = std::uintptr_t;
 
 DeviceId DeviceKey(device* value) noexcept {
   return reinterpret_cast<DeviceId>(value);
-}
-
-std::uint64_t Fnv1a64(const void* data, std::size_t size) {
-  const auto* bytes = static_cast<const std::uint8_t*>(data);
-  std::uint64_t hash = 14695981039346656037ull;
-  for (std::size_t i = 0; i < size; ++i) {
-    hash ^= bytes[i];
-    hash *= 1099511628211ull;
-  }
-  return hash;
-}
-
-bool HasDxilChunk(const void* code, std::size_t size) {
-  if (!code || size < 32) return false;
-  const auto* bytes = static_cast<const std::uint8_t*>(code);
-  if (std::memcmp(bytes, "DXBC", 4) != 0) return false;
-  const auto read_u32 = [bytes](std::size_t offset) {
-    std::uint32_t value = 0;
-    std::memcpy(&value, bytes + offset, sizeof(value));
-    return value;
-  };
-  const std::uint32_t total_size = read_u32(24);
-  const std::uint32_t chunk_count = read_u32(28);
-  if (total_size != size || total_size < 32 ||
-      chunk_count > (total_size - 32) / 4)
-    return false;
-  bool has_dxil = false;
-  for (std::uint32_t i = 0; i < chunk_count; ++i) {
-    const std::uint32_t offset = read_u32(32 + 4 * i);
-    if (offset > total_size || total_size - offset < 8) return false;
-    const std::uint32_t chunk_size = read_u32(offset + 4);
-    if (chunk_size > total_size - offset - 8) return false;
-    has_dxil = has_dxil || std::memcmp(bytes + offset, "DXIL", 4) == 0;
-  }
-  return has_dxil;
-}
-
-bool FindPixelShader(std::uint32_t count, const pipeline_subobject* subobjects,
-    const shader_desc*& shader, std::uint64_t& hash) {
-  shader = nullptr;
-  hash = 0;
-  if (!subobjects) return false;
-  for (std::uint32_t i = 0; i < count; ++i) {
-    if (subobjects[i].type != pipeline_subobject_type::pixel_shader ||
-        !subobjects[i].data)
-      continue;
-    const auto& candidate = *static_cast<const shader_desc*>(subobjects[i].data);
-    if (!HasDxilChunk(candidate.code, candidate.code_size)) continue;
-    const std::uint64_t candidate_hash = Fnv1a64(candidate.code, candidate.code_size);
-    if (shader && hash != candidate_hash) return false;
-    shader = &candidate;
-    hash = candidate_hash;
-  }
-  return shader != nullptr;
 }
 
 class ScopedFlag {
@@ -299,7 +245,8 @@ void FadePrimitiveRuntime::OnInitPipeline(device* owner, pipeline_layout layout,
   // or destroying an object that may still be referenced by command lists.
   const shader_desc* original = nullptr;
   std::uint64_t hash = 0;
-  const bool has_pixel_shader = FindPixelShader(count, subobjects, original, hash);
+  const bool has_pixel_shader =
+      FindDxilPixelShader(count, subobjects, original, hash);
   // Reported here, immediately after identification and before any
   // replacement-selection decision is made from it, so this can only
   // observe what was identified, never influence what happens with it.

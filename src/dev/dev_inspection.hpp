@@ -14,10 +14,10 @@
 // Dev-only: spatial/dither diagnostics, the fade-control static source
 // analysis, and the shader-dump file write.
 //
-// It also still owns LooksLikeDxil()/Fnv1a64(), needed by
-// dev/diagnostics/dev_diagnostics.cpp's FindDxilPixelShader() for trace --
-// see that function's own comment for why it remains a separate,
-// undissolved duplication rather than being folded into this module.
+// DXIL pixel-shader identification is not this module's concern either: it
+// is delivered here as an already-resolved hash on the observation, and
+// trace's own independent identification calls the same canonical
+// implementation in pixel_shader_identity.hpp.
 
 #pragma once
 
@@ -97,9 +97,6 @@ extern std::atomic<std::uint64_t> g_dumped_shaders;
 // variable compatibility.
 extern bool g_diagnostic;
 extern bool g_dump;
-
-bool LooksLikeDxil(const reshade::api::shader_desc& descriptor);
-std::uint64_t Fnv1a64(const void* data, std::size_t size);
 
 // The Dev-owned FadePrimitiveRuntimeObserver implementation: its
 // OnShaderPrepared()/OnPipelineInit() overrides are the sole writers of
