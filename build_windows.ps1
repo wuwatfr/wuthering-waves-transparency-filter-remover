@@ -20,16 +20,35 @@ $distDev = Join-Path $dist 'dev'
 # running build_windows.cmd when one is required by the network.
 $buildProxy = $env:WUWA_BUILD_PROXY
 
-function Fail([string]$Message) {
+function Fail([string]$Message, [switch]$NoToolchainHint) {
     Write-Host ''
     Write-Host 'BUILD FAILED' -ForegroundColor Red
     Write-Host $Message -ForegroundColor Red
-    Write-Host ''
-    Write-Host 'Required once on this PC:'
-    Write-Host '  Visual Studio 2026/2022 Build Tools'
-    Write-Host '  Workload: Desktop development with C++'
-    Write-Host '  Component: C++ CMake tools for Windows'
+    if (-not $NoToolchainHint) {
+        Write-Host ''
+        Write-Host 'Required once on this PC:'
+        Write-Host '  Visual Studio 2026/2022 Build Tools'
+        Write-Host '  Workload: Desktop development with C++'
+        Write-Host '  Component: C++ CMake tools for Windows'
+    }
     exit 1
+}
+
+# Under $ErrorActionPreference = 'Stop', a bare Remove-Item failure (e.g. a
+# file still held by a running game with a WuwaTFR add-on loaded from
+# dist/) surfaces as an unhandled PowerShell exception with no indication of
+# which file or why. Catch it and fail with a message that names the path
+# and suggests what's likely holding it.
+function Remove-OutputTree([string]$Path, [string]$Hint) {
+    if (-not (Test-Path $Path)) { return }
+    try {
+        Remove-Item -Recurse -Force -LiteralPath $Path -ErrorAction Stop
+    } catch {
+        Fail -NoToolchainHint -Message (
+            "Could not delete: $Path" + [Environment]::NewLine +
+            $_.Exception.Message + [Environment]::NewLine +
+            [Environment]::NewLine + $Hint)
+    }
 }
 
 function Download-And-Expand([string]$Url, [string]$ZipPath, [string]$Destination) {
@@ -66,7 +85,10 @@ if (-not $cmake) {
 }
 
 New-Item -ItemType Directory -Force -Path $deps | Out-Null
-if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
+Remove-OutputTree $dist (
+    'A WuwaTFR add-on from this folder is still loaded by another process.' +
+    [Environment]::NewLine +
+    'Close Wuthering Waves (or whatever has it loaded) and run this again.')
 New-Item -ItemType Directory -Force -Path $dist, $distRelease, $distDev | Out-Null
 
 # Pin all build-time dependencies, including the ReShade add-on API headers.
@@ -102,7 +124,12 @@ Write-Host "ReShade include: $reshadeInclude"
 Write-Host "DXC include:     $dxcInclude"
 Write-Host "ImGui include:   $imguiInclude"
 
-if (Test-Path $build) { Remove-Item -Recurse -Force $build }
+Remove-OutputTree $build (
+    'Something still holds a file inside the build folder.' +
+    [Environment]::NewLine +
+    'Close Visual Studio or VS Code if either has this project open, and' +
+    [Environment]::NewLine +
+    'stop any running test executable, then run this again.')
 
 # Match the CMake Visual Studio generator to the installed Build Tools.
 $generator = $null
