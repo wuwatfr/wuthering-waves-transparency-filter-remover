@@ -71,4 +71,20 @@ class FadeControlSnapshotAccumulator {
       index_;
 };
 
+struct PendingFadeControlObservation {
+  FadeControlRecordKey key;
+  FadeControlValueSample sample;
+};
+
+struct PendingFadeControlSnapshot {
+  FadeControlRecordKey key;
+  FadeControlSnapshotRecord record;
+};
+
+void CommitPendingFadeControlObservations(FadeControlAccumulator& accumulator,
+    FadeControlSnapshotAccumulator& snapshot_accumulator,
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline,
+    const std::vector<PendingFadeControlObservation>& observations,
+    const std::vector<PendingFadeControlSnapshot>& snapshots);
+
 }

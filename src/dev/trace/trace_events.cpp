@@ -504,7 +504,7 @@ bool RecordOrSuppressTraceDraw(command_list* cmd_list,
   }
   ++draw->second.commands;
 
-  SampleFadeControlValuesOnDraw(*trace, concrete, draw->second.pipeline);
+  SampleFadeControlValuesOnDraw(*trace, concrete, draw->second);
 
   return false;
 }
@@ -599,6 +599,17 @@ void OnExecuteSecondaryTrace(
       primary_draw->second.pipeline = secondary_draw.pipeline;
     }
     primary_draw->second.commands += secondary_draw.commands;
+
+    for (auto pending : secondary_draw.pending_fade_observations) {
+      pending.key.route = draw_key.concrete;
+      primary_draw->second.pending_fade_observations.push_back(
+          std::move(pending));
+    }
+    for (auto pending : secondary_draw.pending_fade_snapshots) {
+      pending.key.route = draw_key.concrete;
+      primary_draw->second.pending_fade_snapshots.push_back(
+          std::move(pending));
+    }
   }
 }
 

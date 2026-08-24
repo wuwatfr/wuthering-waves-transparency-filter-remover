@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <string>
 
+#include "dev/capture/fade_control_snapshot.hpp"
 #include "dev/capture/fade_control_state.hpp"
 #include "dev/trace/trace_state.hpp"
 
@@ -42,7 +43,8 @@ bool WriteFadeControlSnapshotExport(
     const std::string& timestamp, std::filesystem::path& out_path);
 
 void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
-    const wuwa_tfr::TraceConcreteDrawKey& route,
-    const wuwa_tfr::ExecutionPipelineIdentity& pipeline);
+    const wuwa_tfr::TraceConcreteDrawKey& route, RecordedTraceDraw& draw);
+
+void CommitPendingFadeControlObservations(const RecordedTraceDraw& draw);
 
 }

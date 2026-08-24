@@ -16,6 +16,7 @@
 #include <reshade.hpp>
 
 #include "addon_shared.hpp"
+#include "dev/capture/fade_control_snapshot.hpp"
 #include "trace_submission_identity.hpp"
 
 namespace wuwa_tfr::dev {
@@ -263,6 +264,8 @@ struct RecordedTraceDrawKeyHash {
 struct RecordedTraceDraw {
   std::uint64_t commands = 0;
   wuwa_tfr::ExecutionPipelineIdentity pipeline;
+  std::vector<PendingFadeControlObservation> pending_fade_observations;
+  std::vector<PendingFadeControlSnapshot> pending_fade_snapshots;
 };
 
 struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))

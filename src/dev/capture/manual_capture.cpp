@@ -238,6 +238,7 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
     g_manual_capture.MarkCapacityExceeded();
   const std::uint64_t frame = g_manual_capture_frame_counter;
   for (const auto& [draw_key, draw] : trace->recorded_draws) {
+    CommitPendingFadeControlObservations(draw);
     if (filter_active &&
         !eligible_shader_hashes.contains(draw.pipeline.shader_hash))
       continue;

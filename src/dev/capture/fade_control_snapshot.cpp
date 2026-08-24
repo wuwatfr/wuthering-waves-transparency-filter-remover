@@ -71,4 +71,17 @@ FadeControlSnapshotSet FadeControlSnapshotAccumulator::Stop() {
   return last_result_;
 }
 
+void CommitPendingFadeControlObservations(FadeControlAccumulator& accumulator,
+    FadeControlSnapshotAccumulator& snapshot_accumulator,
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline,
+    const std::vector<PendingFadeControlObservation>& observations,
+    const std::vector<PendingFadeControlSnapshot>& snapshots) {
+  for (const auto& pending : observations)
+    accumulator.Observe(pending.key, pipeline, pending.sample);
+  for (const auto& pending : snapshots) {
+    if (!snapshot_accumulator.ShouldCapture(pending.key)) continue;
+    snapshot_accumulator.Commit(pending.key, pending.record);
+  }
+}
+
 }

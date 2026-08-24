@@ -29,8 +29,6 @@ FadeControlAccumulator g_fade_control_accumulator;
 FadeControlSnapshotAccumulator g_fade_control_snapshot_accumulator;
 bool g_fade_control_session_enabled = false;
 
-std::atomic<bool> g_fade_control_enabled_for_session{false};
-
 bool g_fade_control_pending_enabled = true;
 
 struct LayoutCbvRangeInfo {
@@ -296,18 +294,15 @@ FadeControlValueSample Unavailable(std::uint16_t reason) noexcept {
 }
 
 void TryCaptureFadeControlSnapshot(const FadeControlRecordKey& key,
-    const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
-    std::uint64_t cbv_offset, std::uint32_t predicate_vector,
-    const MappedBufferInfo& mapped) {
-  if (!g_fade_control_snapshot_accumulator.ShouldCapture(key)) return;
-
+    RecordedTraceDraw& draw, std::uint64_t cbv_offset,
+    std::uint32_t predicate_vector, const MappedBufferInfo& mapped) {
   const auto window = ResolveFadeControlSnapshotWindow(cbv_offset,
       predicate_vector, kFadeControlSnapshotVectorRadius, mapped.offset,
       mapped.offset + mapped.size);
   if (!window.valid) return;
 
   FadeControlSnapshotRecord record;
-  record.pipeline = pipeline_identity;
+  record.pipeline = draw.pipeline;
   record.cbv_offset = cbv_offset;
   record.mapped_range_offset = mapped.offset;
   record.mapped_range_size = mapped.size;
@@ -315,17 +310,18 @@ void TryCaptureFadeControlSnapshot(const FadeControlRecordKey& key,
   record.window_size = window.size;
   const std::byte* source_bytes = mapped.base + (window.start - mapped.offset);
   std::memcpy(record.raw_bytes.data(), source_bytes, window.size);
-  g_fade_control_snapshot_accumulator.Commit(key, record);
+  draw.pending_fade_snapshots.push_back(
+      PendingFadeControlSnapshot{key, record});
 }
 
 void ObserveMappedCbvValue(const FadeControlRecordKey& key,
-    const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
-    std::uint64_t resource_handle, std::uint64_t range_offset,
-    std::uint32_t vector_index, std::uint32_t component) {
+    RecordedTraceDraw& draw, std::uint64_t resource_handle,
+    std::uint64_t range_offset, std::uint32_t vector_index,
+    std::uint32_t component) {
   const auto mapped_it = g_mapped_buffers.find(resource_handle);
   if (mapped_it == g_mapped_buffers.end()) {
-    g_fade_control_accumulator.Observe(
-        key, pipeline_identity, Unavailable(kFadeControlReasonNotMapped));
+    draw.pending_fade_observations.push_back(
+        {key, Unavailable(kFadeControlReasonNotMapped)});
     return;
   }
 
@@ -333,8 +329,8 @@ void ObserveMappedCbvValue(const FadeControlRecordKey& key,
       ResolveFadeControlByteOffset(range_offset, vector_index, component);
   if (!FadeControlByteOffsetInMappedRegion(
           byte_offset, mapped_it->second.offset, mapped_it->second.size)) {
-    g_fade_control_accumulator.Observe(
-        key, pipeline_identity, Unavailable(kFadeControlReasonOutOfRange));
+    draw.pending_fade_observations.push_back(
+        {key, Unavailable(kFadeControlReasonOutOfRange)});
     return;
   }
 
@@ -342,12 +338,12 @@ void ObserveMappedCbvValue(const FadeControlRecordKey& key,
   const std::byte* source_bytes =
       mapped_it->second.base + (byte_offset - mapped_it->second.offset);
   std::memcpy(&bits, source_bytes, sizeof(bits));
-  g_fade_control_accumulator.Observe(
-      key, pipeline_identity, FadeControlValueSample{true, bits, 0});
+  draw.pending_fade_observations.push_back(
+      {key, FadeControlValueSample{true, bits, 0}});
 
   if (key.role == FadeControlRole::Predicate) {
     TryCaptureFadeControlSnapshot(
-        key, pipeline_identity, range_offset, vector_index, mapped_it->second);
+        key, draw, range_offset, vector_index, mapped_it->second);
   }
 }
 
@@ -389,7 +385,7 @@ ResolvedCbvSource FromPreFadeOperand(
 }
 
 bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
-    FadeControlRecordKey key, const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
+    FadeControlRecordKey key, RecordedTraceDraw& draw,
     const ResolvedCbvSource& source) {
   const auto layout_it = g_layout_push_cbv_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
@@ -404,21 +400,21 @@ bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
   const RootCbvKey binding_key{trace.bound_layout, slot->param_index, slot->slot};
   const auto binding_it = trace.root_cbv_bindings.find(binding_key);
   if (binding_it == trace.root_cbv_bindings.end()) {
-    g_fade_control_accumulator.Observe(key, pipeline_identity,
-        Unavailable(kFadeControlReasonBindingUnresolved));
+    draw.pending_fade_observations.push_back(
+        {key, Unavailable(kFadeControlReasonBindingUnresolved)});
     return true;
   }
 
   const auto& binding = binding_it->second;
   key.runtime_resource_incarnation = binding.resource_incarnation;
   key.runtime_range_offset = binding.offset;
-  ObserveMappedCbvValue(key, pipeline_identity, binding.resource_handle,
-      binding.offset, source.vector_index, source.component);
+  ObserveMappedCbvValue(key, draw, binding.resource_handle, binding.offset,
+      source.vector_index, source.component);
   return true;
 }
 
 bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
-    FadeControlRecordKey key, const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
+    FadeControlRecordKey key, RecordedTraceDraw& draw,
     const ResolvedCbvSource& source) {
   const auto layout_it = g_layout_descriptor_cbv_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
@@ -433,13 +429,13 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
   const auto table_it = trace.bound_descriptor_tables.find(
       BoundDescriptorTableKey{trace.bound_layout, slot->param_index});
   if (table_it == trace.bound_descriptor_tables.end()) {
-    g_fade_control_accumulator.Observe(key, pipeline_identity,
-        Unavailable(kFadeControlReasonBindingUnresolved));
+    draw.pending_fade_observations.push_back(
+        {key, Unavailable(kFadeControlReasonBindingUnresolved)});
     return true;
   }
   if (table_it->second.dynamic_offsets_present) {
-    g_fade_control_accumulator.Observe(key, pipeline_identity,
-        Unavailable(kFadeControlReasonDynamicOffsetUnresolved));
+    draw.pending_fade_observations.push_back(
+        {key, Unavailable(kFadeControlReasonDynamicOffsetUnresolved)});
     return true;
   }
 
@@ -448,28 +444,27 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
   const auto content =
       FindDescriptorTableSlot(g_descriptor_table_slots, descriptor_key);
   if (!content) {
-    g_fade_control_accumulator.Observe(key, pipeline_identity,
-        Unavailable(kFadeControlReasonDescriptorUnknown));
+    draw.pending_fade_observations.push_back(
+        {key, Unavailable(kFadeControlReasonDescriptorUnknown)});
     return true;
   }
   const auto current_incarnation = CurrentFadeControlResourceIncarnationLocked(
       trace.device, content->resource_handle);
   if (!DescriptorSlotContentIsCurrent(*content, current_incarnation)) {
-    g_fade_control_accumulator.Observe(key, pipeline_identity,
-        Unavailable(kFadeControlReasonStaleDescriptorBinding));
+    draw.pending_fade_observations.push_back(
+        {key, Unavailable(kFadeControlReasonStaleDescriptorBinding)});
     return true;
   }
 
   key.runtime_resource_incarnation = content->resource_incarnation;
   key.runtime_range_offset = content->offset;
-  ObserveMappedCbvValue(key, pipeline_identity, content->resource_handle,
-      content->offset, source.vector_index, source.component);
+  ObserveMappedCbvValue(key, draw, content->resource_handle, content->offset,
+      source.vector_index, source.component);
   return true;
 }
 
 bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
-    const FadeControlRecordKey& key,
-    const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
+    const FadeControlRecordKey& key, RecordedTraceDraw& draw,
     const ResolvedCbvSource& source) {
   const auto layout_it = g_layout_push_constant_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
@@ -480,26 +475,24 @@ bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
           layout_it->second.ranges, source.cbuffer_space,
           source.cbuffer_register))
     return false;
-  g_fade_control_accumulator.Observe(key, pipeline_identity,
-      Unavailable(kFadeControlReasonPushConstantBacked));
+  draw.pending_fade_observations.push_back(
+      {key, Unavailable(kFadeControlReasonPushConstantBacked)});
   return true;
 }
 
 void SampleOneRole(const CommandListTrace& trace,
-    const wuwa_tfr::TraceConcreteDrawKey& route,
-    const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
+    const wuwa_tfr::TraceConcreteDrawKey& route, RecordedTraceDraw& draw,
     std::uint32_t primitive_index, FadeControlRole role,
-    const ResolvedCbvSource& source, std::uint64_t session_id) {
+    const ResolvedCbvSource& source) {
   FadeControlRecordKey key;
   key.route = route;
   key.primitive_index = primitive_index;
   key.role = role;
 
   std::lock_guard lock(g_fade_control_mutex);
-  if (!g_manual_capture_session_token.StillLive(session_id)) return;
   if (!source.resolved) {
-    g_fade_control_accumulator.Observe(
-        key, pipeline_identity, Unavailable(kFadeControlReasonSourceUnresolved));
+    draw.pending_fade_observations.push_back(
+        {key, Unavailable(kFadeControlReasonSourceUnresolved)});
     return;
   }
 
@@ -508,14 +501,11 @@ void SampleOneRole(const CommandListTrace& trace,
   key.vector_index = source.vector_index;
   key.component = source.component;
 
-  if (TrySampleRootPushDescriptorsRoute(trace, key, pipeline_identity, source))
-    return;
-  if (TrySampleDescriptorTableRoute(trace, key, pipeline_identity, source))
-    return;
-  if (TryReportPushConstantBackedSource(trace, key, pipeline_identity, source))
-    return;
-  g_fade_control_accumulator.Observe(key, pipeline_identity,
-      Unavailable(kFadeControlReasonUnsupportedBindingRoute));
+  if (TrySampleRootPushDescriptorsRoute(trace, key, draw, source)) return;
+  if (TrySampleDescriptorTableRoute(trace, key, draw, source)) return;
+  if (TryReportPushConstantBackedSource(trace, key, draw, source)) return;
+  draw.pending_fade_observations.push_back(
+      {key, Unavailable(kFadeControlReasonUnsupportedBindingRoute)});
 }
 
 std::string SampleFilenameStem(const std::string& timestamp) {
@@ -568,7 +558,6 @@ void SetFadeControlCapturePending(bool enabled) {
 void StartFadeControlCapture(std::uint64_t session_id, bool enabled) {
   std::lock_guard lock(g_fade_control_mutex);
   g_fade_control_session_enabled = enabled;
-  g_fade_control_enabled_for_session.store(enabled, std::memory_order_release);
   if (enabled) {
     g_fade_control_accumulator.Start(session_id);
     g_fade_control_snapshot_accumulator.Start(session_id);
@@ -862,17 +851,11 @@ bool WriteFadeControlSnapshotExport(
 }
 
 void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
-    const wuwa_tfr::TraceConcreteDrawKey& route,
-    const wuwa_tfr::ExecutionPipelineIdentity& pipeline) {
-  const std::uint64_t session_id = g_manual_capture_session_token.value();
-  if (session_id == 0) return;
-  if (!g_fade_control_enabled_for_session.load(std::memory_order_acquire))
-    return;
-
+    const wuwa_tfr::TraceConcreteDrawKey& route, RecordedTraceDraw& draw) {
   std::vector<FadeInstanceObservation> instances_copy;
   {
     std::lock_guard lock(g_inspection_mutex);
-    const auto it = g_inspections.find(pipeline.shader_hash);
+    const auto it = g_inspections.find(draw.pipeline.shader_hash);
     if (it == g_inspections.end() || it->second.fade_instances.empty()) return;
     instances_copy = it->second.fade_instances;
   }
@@ -880,19 +863,25 @@ void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
   for (std::size_t i = 0; i < instances_copy.size(); ++i) {
     const auto primitive_index = static_cast<std::uint32_t>(i);
     const auto& observation = instances_copy[i];
-    SampleOneRole(trace, route, pipeline, primitive_index,
+    SampleOneRole(trace, route, draw, primitive_index,
         FadeControlRole::Predicate,
-        FromGatePredicateEvidence(observation.instance.gate_predicate),
-        session_id);
+        FromGatePredicateEvidence(observation.instance.gate_predicate));
     if (observation.pre_fade) {
-      SampleOneRole(trace, route, pipeline, primitive_index,
+      SampleOneRole(trace, route, draw, primitive_index,
           FadeControlRole::PreFadeOperandOne,
-          FromPreFadeOperand(observation.pre_fade->operand_one), session_id);
-      SampleOneRole(trace, route, pipeline, primitive_index,
+          FromPreFadeOperand(observation.pre_fade->operand_one));
+      SampleOneRole(trace, route, draw, primitive_index,
           FadeControlRole::PreFadeOperandTwo,
-          FromPreFadeOperand(observation.pre_fade->operand_two), session_id);
+          FromPreFadeOperand(observation.pre_fade->operand_two));
     }
   }
+}
+
+void CommitPendingFadeControlObservations(const RecordedTraceDraw& draw) {
+  std::lock_guard lock(g_fade_control_mutex);
+  CommitPendingFadeControlObservations(g_fade_control_accumulator,
+      g_fade_control_snapshot_accumulator, draw.pipeline,
+      draw.pending_fade_observations, draw.pending_fade_snapshots);
 }
 
 }  // namespace wuwa_tfr::dev
