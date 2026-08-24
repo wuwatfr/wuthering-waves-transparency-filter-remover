@@ -51,7 +51,6 @@ extern std::atomic<std::uint64_t> g_disassembly_successes;
 extern std::atomic<std::uint64_t> g_disassembly_failures;
 extern std::atomic<std::uint64_t> g_dumped_shaders;
 
-extern bool g_diagnostic_config_flag;
 extern bool g_dump;
 
 wuwa_tfr::FadePrimitiveRuntimeObserver* InspectionObserver();
