@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.1.0 - 2026-08-25
+
 ### Changed
 
 - Pre-Fade patch now removes only the camera-fade operand while preserving the
