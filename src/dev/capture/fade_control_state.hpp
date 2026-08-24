@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "fade_primitive_detector.hpp"
+#include "pre_fade_fmin_analysis.hpp"
 #include "trace_submission_identity.hpp"
 
 namespace wuwa_tfr::dev {
@@ -19,6 +21,33 @@ enum class FadeControlRole : std::uint8_t {
   PreFadeOperandOne,
   PreFadeOperandTwo,
 };
+
+// The minimal, immutable per-(primitive, role) projection Draw-time
+// sampling needs -- precomputed once from the matcher's gate/pre-Fade
+// evidence when a shader is inspected, so sampling a Draw never has to
+// touch FadePrimitiveInstance's strings or the full PreFadeFMinAnalysis.
+struct FadeControlSamplingSource {
+  std::uint32_t primitive_index = 0;
+  FadeControlRole role = FadeControlRole::Predicate;
+  bool resolved = false;
+  std::uint32_t cbuffer_space = 0;
+  std::uint32_t cbuffer_register = 0;
+  std::uint32_t vector_index = 0;
+  std::uint32_t component = 0;
+};
+
+// Projects the matcher's gate/pre-Fade evidence into a FadeControlSamplingSource.
+// resolved stays false (and every other field stays default) unless the
+// evidence has a fully resolved, legacy-form, static CBV register/row/
+// component -- Draw-time sampling never treats a partially-resolved source
+// as usable.
+FadeControlSamplingSource FadeControlSourceFromGatePredicateEvidence(
+    std::uint32_t primitive_index,
+    const wuwa_tfr::FadePrimitiveGatePredicateEvidence& evidence);
+
+FadeControlSamplingSource FadeControlSourceFromPreFadeOperand(
+    std::uint32_t primitive_index, FadeControlRole role,
+    const wuwa_tfr::PreFadeOperandSource& operand);
 
 constexpr std::uint16_t kFadeControlReasonNotMapped = 1u << 0;
 constexpr std::uint16_t kFadeControlReasonOutOfRange = 1u << 1;

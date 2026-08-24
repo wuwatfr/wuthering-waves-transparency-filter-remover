@@ -123,14 +123,28 @@ class InspectionObserverImpl final : public wuwa_tfr::FadePrimitiveRuntimeObserv
       const std::string& original_ir = *observation.original_ir;
       record.dither = wuwa_tfr::AnalyzeSpatialDitherDiagnostic(original_ir);
 
-      for (auto& fade_instance : record.fade_instances) {
+      auto sampling_sources =
+          std::make_shared<std::vector<FadeControlSamplingSource>>();
+      sampling_sources->reserve(record.fade_instances.size() * 3);
+      for (std::size_t i = 0; i < record.fade_instances.size(); ++i) {
+        auto& fade_instance = record.fade_instances[i];
         wuwa_tfr::ResolveGatePredicateCbvRegister(
             original_ir, fade_instance.instance.gate_predicate);
+        const auto primitive_index = static_cast<std::uint32_t>(i);
+        sampling_sources->push_back(FadeControlSourceFromGatePredicateEvidence(
+            primitive_index, fade_instance.instance.gate_predicate));
         if (fade_instance.pre_fade) {
           wuwa_tfr::ResolvePreFadeCbvRegisters(
               original_ir, fade_instance.instance, *fade_instance.pre_fade);
+          sampling_sources->push_back(FadeControlSourceFromPreFadeOperand(
+              primitive_index, FadeControlRole::PreFadeOperandOne,
+              fade_instance.pre_fade->operand_one));
+          sampling_sources->push_back(FadeControlSourceFromPreFadeOperand(
+              primitive_index, FadeControlRole::PreFadeOperandTwo,
+              fade_instance.pre_fade->operand_two));
         }
       }
+      record.fade_control_sampling_sources = std::move(sampling_sources);
 
       if (record.dither.discard_calls != 0)
         g_discard_shader_count.fetch_add(1, std::memory_order_relaxed);

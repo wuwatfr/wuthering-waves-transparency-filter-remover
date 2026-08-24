@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -360,46 +361,9 @@ void ObserveMappedCbvValue(const FadeControlRecordKey& key,
   }
 }
 
-struct ResolvedCbvSource {
-  bool resolved = false;
-  std::uint32_t cbuffer_space = 0;
-  std::uint32_t cbuffer_register = 0;
-  std::uint32_t vector_index = 0;
-  std::uint32_t component = 0;
-};
-
-ResolvedCbvSource FromGatePredicateEvidence(
-    const wuwa_tfr::FadePrimitiveGatePredicateEvidence& evidence) {
-  ResolvedCbvSource source;
-  if (!evidence.resolved || !evidence.legacy_form ||
-      !evidence.register_resolved || !evidence.row_resolved ||
-      !evidence.component_resolved)
-    return source;
-  source.resolved = true;
-  source.cbuffer_space = evidence.cbuffer_space;
-  source.cbuffer_register = evidence.cbuffer_register;
-  source.vector_index = evidence.row;
-  source.component = evidence.component;
-  return source;
-}
-
-ResolvedCbvSource FromPreFadeOperand(
-    const wuwa_tfr::PreFadeOperandSource& operand) {
-  ResolvedCbvSource source;
-  if (!operand.resolved || !operand.legacy_form || !operand.register_resolved ||
-      !operand.row_resolved || !operand.component_resolved)
-    return source;
-  source.resolved = true;
-  source.cbuffer_space = operand.cbuffer_space;
-  source.cbuffer_register = operand.cbuffer_register;
-  source.vector_index = operand.row;
-  source.component = operand.component;
-  return source;
-}
-
 bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
     FadeControlRecordKey key, RecordedTraceDraw& draw,
-    const ResolvedCbvSource& source) {
+    const FadeControlSamplingSource& source) {
   const auto layout_it = g_layout_push_cbv_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
   if (layout_it == g_layout_push_cbv_ranges.end() ||
@@ -428,7 +392,7 @@ bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
 
 bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
     FadeControlRecordKey key, RecordedTraceDraw& draw,
-    const ResolvedCbvSource& source) {
+    const FadeControlSamplingSource& source) {
   const auto layout_it = g_layout_descriptor_cbv_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
   if (layout_it == g_layout_descriptor_cbv_ranges.end() ||
@@ -478,7 +442,7 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
 
 bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
     const FadeControlRecordKey& key, RecordedTraceDraw& draw,
-    const ResolvedCbvSource& source) {
+    const FadeControlSamplingSource& source) {
   const auto layout_it = g_layout_push_constant_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
   if (layout_it == g_layout_push_constant_ranges.end() ||
@@ -493,16 +457,17 @@ bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
   return true;
 }
 
+// Assumes g_fade_control_mutex is already held by the caller -- called once
+// per prepared source for a Draw, all under one acquisition rather than
+// one per role.
 void SampleOneRole(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route, RecordedTraceDraw& draw,
-    std::uint32_t primitive_index, FadeControlRole role,
-    const ResolvedCbvSource& source) {
+    const FadeControlSamplingSource& source) {
   FadeControlRecordKey key;
   key.route = route;
-  key.primitive_index = primitive_index;
-  key.role = role;
+  key.primitive_index = source.primitive_index;
+  key.role = source.role;
 
-  std::lock_guard lock(g_fade_control_mutex);
   if (!source.resolved) {
     draw.pending_fade_observations.push_back(
         {key, Unavailable(kFadeControlReasonSourceUnresolved)});
@@ -874,29 +839,18 @@ bool WriteFadeControlSnapshotExport(
 
 void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route, RecordedTraceDraw& draw) {
-  std::vector<FadeInstanceObservation> instances_copy;
+  std::shared_ptr<const std::vector<FadeControlSamplingSource>> sources;
   {
     std::lock_guard lock(g_inspection_mutex);
     const auto it = g_inspections.find(draw.pipeline.shader_hash);
-    if (it == g_inspections.end() || it->second.fade_instances.empty()) return;
-    instances_copy = it->second.fade_instances;
+    if (it == g_inspections.end() || !it->second.fade_control_sampling_sources)
+      return;
+    sources = it->second.fade_control_sampling_sources;
   }
+  if (sources->empty()) return;
 
-  for (std::size_t i = 0; i < instances_copy.size(); ++i) {
-    const auto primitive_index = static_cast<std::uint32_t>(i);
-    const auto& observation = instances_copy[i];
-    SampleOneRole(trace, route, draw, primitive_index,
-        FadeControlRole::Predicate,
-        FromGatePredicateEvidence(observation.instance.gate_predicate));
-    if (observation.pre_fade) {
-      SampleOneRole(trace, route, draw, primitive_index,
-          FadeControlRole::PreFadeOperandOne,
-          FromPreFadeOperand(observation.pre_fade->operand_one));
-      SampleOneRole(trace, route, draw, primitive_index,
-          FadeControlRole::PreFadeOperandTwo,
-          FromPreFadeOperand(observation.pre_fade->operand_two));
-    }
-  }
+  std::lock_guard lock(g_fade_control_mutex);
+  for (const auto& source : *sources) SampleOneRole(trace, route, draw, source);
 }
 
 void CommitPendingFadeControlObservations(const RecordedTraceDraw& draw) {

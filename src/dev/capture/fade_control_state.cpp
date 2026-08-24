@@ -9,6 +9,41 @@
 
 namespace wuwa_tfr::dev {
 
+FadeControlSamplingSource FadeControlSourceFromGatePredicateEvidence(
+    std::uint32_t primitive_index,
+    const wuwa_tfr::FadePrimitiveGatePredicateEvidence& evidence) {
+  FadeControlSamplingSource source;
+  source.primitive_index = primitive_index;
+  source.role = FadeControlRole::Predicate;
+  if (!evidence.resolved || !evidence.legacy_form ||
+      !evidence.register_resolved || !evidence.row_resolved ||
+      !evidence.component_resolved)
+    return source;
+  source.resolved = true;
+  source.cbuffer_space = evidence.cbuffer_space;
+  source.cbuffer_register = evidence.cbuffer_register;
+  source.vector_index = evidence.row;
+  source.component = evidence.component;
+  return source;
+}
+
+FadeControlSamplingSource FadeControlSourceFromPreFadeOperand(
+    std::uint32_t primitive_index, FadeControlRole role,
+    const wuwa_tfr::PreFadeOperandSource& operand) {
+  FadeControlSamplingSource source;
+  source.primitive_index = primitive_index;
+  source.role = role;
+  if (!operand.resolved || !operand.legacy_form || !operand.register_resolved ||
+      !operand.row_resolved || !operand.component_resolved)
+    return source;
+  source.resolved = true;
+  source.cbuffer_space = operand.cbuffer_space;
+  source.cbuffer_register = operand.cbuffer_register;
+  source.vector_index = operand.row;
+  source.component = operand.component;
+  return source;
+}
+
 void FadeControlValueStats::Observe(const FadeControlValueSample& sample) {
   ++draw_observations;
   if (!sample.available) {

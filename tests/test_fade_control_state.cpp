@@ -14,6 +14,9 @@ using wuwa_tfr::dev::FadeControlAccumulator;
 using wuwa_tfr::dev::FadeControlByteOffsetInDeclaredCbvRange;
 using wuwa_tfr::dev::FadeControlRecordKey;
 using wuwa_tfr::dev::FadeControlRole;
+using wuwa_tfr::dev::FadeControlSamplingSource;
+using wuwa_tfr::dev::FadeControlSourceFromGatePredicateEvidence;
+using wuwa_tfr::dev::FadeControlSourceFromPreFadeOperand;
 using wuwa_tfr::dev::FadeControlValueSample;
 using wuwa_tfr::dev::FadeControlValueStats;
 using wuwa_tfr::dev::kFadeControlReasonBindingUnresolved;
@@ -68,6 +71,38 @@ FadeControlValueSample Available(float value) {
 
 FadeControlValueSample Unavailable(std::uint16_t reason) {
   return FadeControlValueSample{false, 0, reason};
+}
+
+wuwa_tfr::FadePrimitiveGatePredicateEvidence FullyResolvedGateEvidence(
+    std::uint32_t cbuffer_space, std::uint32_t cbuffer_register,
+    std::uint32_t row, std::uint32_t component) {
+  wuwa_tfr::FadePrimitiveGatePredicateEvidence evidence;
+  evidence.resolved = true;
+  evidence.legacy_form = true;
+  evidence.register_resolved = true;
+  evidence.cbuffer_space = cbuffer_space;
+  evidence.cbuffer_register = cbuffer_register;
+  evidence.row_resolved = true;
+  evidence.row = row;
+  evidence.component_resolved = true;
+  evidence.component = component;
+  return evidence;
+}
+
+wuwa_tfr::PreFadeOperandSource FullyResolvedOperand(std::uint32_t cbuffer_space,
+    std::uint32_t cbuffer_register, std::uint32_t row,
+    std::uint32_t component) {
+  wuwa_tfr::PreFadeOperandSource operand;
+  operand.resolved = true;
+  operand.legacy_form = true;
+  operand.register_resolved = true;
+  operand.cbuffer_space = cbuffer_space;
+  operand.cbuffer_register = cbuffer_register;
+  operand.row_resolved = true;
+  operand.row = row;
+  operand.component_resolved = true;
+  operand.component = component;
+  return operand;
 }
 
 }  // namespace
@@ -254,6 +289,97 @@ int main() {
     const auto result = accumulator.Stop();
     CHECK(result.records.size() == kMaxFadeControlRecords);
     CHECK(result.capacity_exceeded);
+  }
+
+  // 13. FadeControlSourceFromGatePredicateEvidence/FromPreFadeOperand:
+  // prepared source projection matches existing gate/pre-Fade evidence when
+  // fully resolved.
+  {
+    const auto source = FadeControlSourceFromGatePredicateEvidence(
+        2, FullyResolvedGateEvidence(0, 3, 5, 1));
+    CHECK(source.resolved);
+    CHECK(source.primitive_index == 2);
+    CHECK(source.role == FadeControlRole::Predicate);
+    CHECK(source.cbuffer_space == 0);
+    CHECK(source.cbuffer_register == 3);
+    CHECK(source.vector_index == 5);
+    CHECK(source.component == 1);
+  }
+  {
+    const auto source = FadeControlSourceFromPreFadeOperand(
+        4, FadeControlRole::PreFadeOperandTwo,
+        FullyResolvedOperand(1, 7, 9, 2));
+    CHECK(source.resolved);
+    CHECK(source.primitive_index == 4);
+    CHECK(source.role == FadeControlRole::PreFadeOperandTwo);
+    CHECK(source.cbuffer_space == 1);
+    CHECK(source.cbuffer_register == 7);
+    CHECK(source.vector_index == 9);
+    CHECK(source.component == 2);
+  }
+
+  // 14. Unresolved sources remain unresolved: each of the gating flags the
+  // matcher can fail to resolve independently must fail closed -- resolved
+  // stays false and no partial numeric field is trusted.
+  {
+    auto missing_resolved = FullyResolvedGateEvidence(0, 1, 2, 3);
+    missing_resolved.resolved = false;
+    CHECK(!FadeControlSourceFromGatePredicateEvidence(0, missing_resolved)
+               .resolved);
+
+    auto not_legacy_form = FullyResolvedGateEvidence(0, 1, 2, 3);
+    not_legacy_form.legacy_form = false;
+    CHECK(!FadeControlSourceFromGatePredicateEvidence(0, not_legacy_form)
+               .resolved);
+
+    auto register_unresolved = FullyResolvedGateEvidence(0, 1, 2, 3);
+    register_unresolved.register_resolved = false;
+    CHECK(!FadeControlSourceFromGatePredicateEvidence(0, register_unresolved)
+               .resolved);
+
+    auto row_unresolved = FullyResolvedGateEvidence(0, 1, 2, 3);
+    row_unresolved.row_resolved = false;
+    CHECK(!FadeControlSourceFromGatePredicateEvidence(0, row_unresolved)
+               .resolved);
+
+    auto component_unresolved = FullyResolvedGateEvidence(0, 1, 2, 3);
+    component_unresolved.component_resolved = false;
+    const auto source =
+        FadeControlSourceFromGatePredicateEvidence(0, component_unresolved);
+    CHECK(!source.resolved);
+    // An unresolved source never carries partial numeric fields through.
+    CHECK(source.cbuffer_space == 0);
+    CHECK(source.cbuffer_register == 0);
+    CHECK(source.vector_index == 0);
+    CHECK(source.component == 0);
+
+    auto operand_unresolved = FullyResolvedOperand(0, 1, 2, 3);
+    operand_unresolved.resolved = false;
+    CHECK(!FadeControlSourceFromPreFadeOperand(
+        0, FadeControlRole::PreFadeOperandOne, operand_unresolved)
+               .resolved);
+  }
+
+  // 15. Multiple primitives/roles preserve indices and roles, regardless of
+  // resolved state.
+  {
+    for (const auto role : {FadeControlRole::Predicate,
+             FadeControlRole::PreFadeOperandOne,
+             FadeControlRole::PreFadeOperandTwo}) {
+      for (const std::uint32_t primitive_index : {0u, 1u, 5u}) {
+        const auto resolved_source = FadeControlSourceFromPreFadeOperand(
+            primitive_index, role, FullyResolvedOperand(0, 1, 2, 3));
+        CHECK(resolved_source.primitive_index == primitive_index);
+        CHECK(resolved_source.role == role);
+
+        wuwa_tfr::PreFadeOperandSource unresolved;
+        const auto unresolved_source = FadeControlSourceFromPreFadeOperand(
+            primitive_index, role, unresolved);
+        CHECK(!unresolved_source.resolved);
+        CHECK(unresolved_source.primitive_index == primitive_index);
+        CHECK(unresolved_source.role == role);
+      }
+    }
   }
 
   return 0;

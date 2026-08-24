@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -13,6 +14,7 @@
 
 #include <reshade.hpp>
 
+#include "dev/capture/fade_control_state.hpp"
 #include "dxil_dither_diagnostic.hpp"
 #include "fade_primitive_detector.hpp"
 #include "fade_primitive_runtime_observer.hpp"
@@ -30,6 +32,8 @@ struct InspectionRecord {
   std::string inspection_error;
   std::size_t bytecode_size = 0;
   std::vector<FadeInstanceObservation> fade_instances;
+  std::shared_ptr<const std::vector<FadeControlSamplingSource>>
+      fade_control_sampling_sources;
   bool patch_succeeded = false;
   std::string patch_failure;
   bool prepared_succeeded = false;
