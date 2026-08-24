@@ -148,11 +148,11 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
 
   for (const auto& [key, record] : snapshot.records) {
     report << Hex64(record.pipeline.device) << '\t'
-           << Hex64(record.pipeline.application_pso) << '\t'
-           << record.pipeline.pso_incarnation << '\t'
+           << Hex64(record.pipeline.application_pipeline) << '\t'
+           << record.pipeline.incarnation_id << '\t'
            << Hex64(record.pipeline.pso_fingerprint) << '\t'
-           << Hex64(record.pipeline.pso_context_hash) << '\t'
-           << Hex64(record.pipeline.pixel_shader_hash) << '\t'
+           << Hex64(record.pipeline.context_hash) << '\t'
+           << Hex64(record.pipeline.shader_hash) << '\t'
            << TraceDrawKindName(key.geometry.kind) << '\t'
            << Hex64(static_cast<std::uint64_t>(
                   wuwa_tfr::TraceGeometryKeyHash{}(key.geometry)));
@@ -243,17 +243,11 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
       continue;
     const ManualCaptureRecordKey key{draw_key.concrete.pso_incarnation,
         draw_key.concrete.geometry, draw_key.concrete.pass_fingerprint};
-    const ManualCapturePipelineInfo pipeline{draw.pipeline.device,
-        draw.pipeline.application_pipeline, draw.pipeline.incarnation_id,
-        draw.pipeline.pso_fingerprint, draw.pipeline.context_hash,
-        draw.pipeline.shader_hash, draw.pipeline.primitive_topology,
-        draw.pipeline.rt0_blend, draw.pipeline.alpha_to_coverage,
-        draw.pipeline.depth_test, draw.pipeline.depth_write,
-        draw.pipeline.render_target_count, draw.pipeline.sample_count};
     const ManualCaptureBindingObservation binding{draw_key.root_constants,
         draw_key.pushed_cbvs, draw_key.descriptor_tables,
         draw_key.observed_bindings};
-    g_manual_capture.Accumulate(key, pipeline, draw.commands, frame, binding);
+    g_manual_capture.Accumulate(
+        key, draw.pipeline, draw.commands, frame, binding);
   }
 }
 

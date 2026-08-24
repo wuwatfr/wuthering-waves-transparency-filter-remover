@@ -39,6 +39,22 @@ struct TraceLiveHandleKeyHash {
   }
 };
 
+struct ExecutionPipelineIdentity {
+  std::uint64_t device = 0;
+  std::uint64_t application_pipeline = 0;
+  std::uint64_t incarnation_id = 0;
+  std::uint64_t pso_fingerprint = 0;
+  std::uint64_t shader_hash = 0;
+  std::uint64_t context_hash = 0;
+  std::uint32_t primitive_topology = 0;
+  bool rt0_blend = false;
+  bool alpha_to_coverage = false;
+  bool depth_test = false;
+  bool depth_write = false;
+  std::uint32_t render_target_count = 0;
+  std::uint32_t sample_count = 1;
+};
+
 template <typename Identity>
 class TraceIncarnationIndex {
  public:

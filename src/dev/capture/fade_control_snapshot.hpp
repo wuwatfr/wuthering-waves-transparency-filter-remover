@@ -31,7 +31,7 @@ FadeControlSnapshotWindow ResolveFadeControlSnapshotWindow(
     std::uint64_t mapped_end) noexcept;
 
 struct FadeControlSnapshotRecord {
-  FadeControlPipelineIdentity pipeline;
+  wuwa_tfr::ExecutionPipelineIdentity pipeline;
   std::uint64_t cbv_offset = 0;
   std::uint64_t mapped_range_offset = 0;
   std::uint64_t mapped_range_size = 0;

@@ -20,7 +20,7 @@ wuwa_tfr::TraceIncarnationIndex<std::uint64_t> g_trace_view_incarnations;
 TracePsoAmbiguityDiagnostics g_trace_pso_lifecycle_ambiguities;
 TraceResourceAmbiguityDiagnostics g_trace_resource_lifecycle_ambiguities;
 std::uint64_t g_trace_lifecycle_event_serial = 0;
-std::unordered_map<TracePipelineKey, TracePipelineInfo, TracePipelineKeyHash>
+std::unordered_map<TracePipelineKey, wuwa_tfr::ExecutionPipelineIdentity, TracePipelineKeyHash>
     g_trace_pipelines;
 std::unordered_map<std::uint64_t, ShaderTraceRecord> g_trace_shaders;
 std::unordered_map<wuwa_tfr::TraceConcreteDrawKey, ConcreteTraceRecord,
@@ -239,13 +239,13 @@ void ResetLifecycleAmbiguityDiagnosticsLocked() {
   g_trace_lifecycle_event_serial = 0;
 }
 
-TracePipelineInfo DescribeTracePipeline(
+wuwa_tfr::ExecutionPipelineIdentity DescribeTracePipeline(
     std::uint32_t subobject_count,
     const pipeline_subobject* subobjects,
     std::uint64_t shader_hash) {
   blend_desc blend{};
   depth_stencil_desc depth{};
-  TracePipelineInfo info;
+  wuwa_tfr::ExecutionPipelineIdentity info;
   info.shader_hash = shader_hash;
   std::uint64_t context_hash = kTraceFnvOffset;
 

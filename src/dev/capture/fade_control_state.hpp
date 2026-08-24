@@ -116,16 +116,8 @@ struct FadeControlRecordKeyHash {
   }
 };
 
-struct FadeControlPipelineIdentity {
-  std::uint64_t device = 0;
-  std::uint64_t application_pso = 0;
-  std::uint64_t pso_incarnation = 0;
-  std::uint64_t pso_context_hash = 0;
-  std::uint64_t pixel_shader_hash = 0;
-};
-
 struct FadeControlRecord {
-  FadeControlPipelineIdentity pipeline;
+  wuwa_tfr::ExecutionPipelineIdentity pipeline;
   FadeControlValueStats stats;
 };
 
@@ -140,7 +132,7 @@ class FadeControlAccumulator {
   void Start(std::uint64_t session_id);
 
   void Observe(const FadeControlRecordKey& key,
-      const FadeControlPipelineIdentity& pipeline,
+      const wuwa_tfr::ExecutionPipelineIdentity& pipeline,
       const FadeControlValueSample& sample);
 
   FadeControlSnapshot Stop();

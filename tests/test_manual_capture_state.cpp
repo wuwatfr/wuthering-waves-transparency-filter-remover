@@ -11,8 +11,8 @@ namespace {
 
 using wuwa_tfr::dev::AllocateExportFilename;
 using wuwa_tfr::dev::ManualCaptureAccumulator;
+using wuwa_tfr::ExecutionPipelineIdentity;
 using wuwa_tfr::dev::ManualCaptureBindingObservation;
-using wuwa_tfr::dev::ManualCapturePipelineInfo;
 using wuwa_tfr::dev::ManualCaptureRecordKey;
 using wuwa_tfr::dev::ManualCaptureSessionToken;
 using wuwa_tfr::dev::ManualCaptureShaderFilter;
@@ -46,15 +46,15 @@ ManualCaptureRecordKey MakeKey(std::uint64_t pso_incarnation,
       pso_incarnation, Geometry(vertex_resource), pass_fingerprint};
 }
 
-ManualCapturePipelineInfo MakePipeline(
+ExecutionPipelineIdentity MakePipeline(
     std::uint64_t pso_incarnation, std::uint64_t shader_hash) {
-  ManualCapturePipelineInfo pipeline;
+  ExecutionPipelineIdentity pipeline;
   pipeline.device = 1;
-  pipeline.application_pso = 0x1000;
-  pipeline.pso_incarnation = pso_incarnation;
+  pipeline.application_pipeline = 0x1000;
+  pipeline.incarnation_id = pso_incarnation;
   pipeline.pso_fingerprint = 0xAAAA;
-  pipeline.pso_context_hash = 0xBBBB;
-  pipeline.pixel_shader_hash = shader_hash;
+  pipeline.context_hash = 0xBBBB;
+  pipeline.shader_hash = shader_hash;
   return pipeline;
 }
 

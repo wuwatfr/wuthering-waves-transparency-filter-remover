@@ -36,7 +36,7 @@ void UpdateBindingSummary(ManualCaptureBindingSummary& summary,
 }
 
 void ManualCaptureAccumulator::Accumulate(const ManualCaptureRecordKey& key,
-    const ManualCapturePipelineInfo& pipeline, std::uint64_t commands,
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline, std::uint64_t commands,
     std::uint64_t frame, const ManualCaptureBindingObservation& binding) {
   if (state_ != ManualCaptureState::Capturing) return;
 

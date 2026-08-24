@@ -62,7 +62,7 @@ void FadeControlAccumulator::Start(std::uint64_t session_id) {
 }
 
 void FadeControlAccumulator::Observe(const FadeControlRecordKey& key,
-    const FadeControlPipelineIdentity& pipeline,
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline,
     const FadeControlValueSample& sample) {
   if (!active_) return;
 

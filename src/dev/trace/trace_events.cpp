@@ -48,7 +48,7 @@ void OnInitTracePipeline(
     return;
   }
 
-  TracePipelineInfo pipeline_info = DescribeTracePipeline(
+  wuwa_tfr::ExecutionPipelineIdentity pipeline_info = DescribeTracePipeline(
       subobject_count, subobjects, shader_hash);
 
   std::uint64_t creation_fingerprint = kTraceFnvOffset;
@@ -72,7 +72,6 @@ void OnInitTracePipeline(
     pipeline_info.device = key.owner;
     pipeline_info.application_pipeline = key.handle;
     pipeline_info.pso_fingerprint = creation_fingerprint;
-    pipeline_info.live = true;
     g_trace_pipelines[key] = pipeline_info;
     g_trace_shaders.try_emplace(shader_hash);
     const std::size_t pruned =
@@ -939,7 +938,7 @@ std::optional<ConcreteTraceRow> MakeConcreteTraceRowLocked(
   row.pipeline = record.pipeline;
   const auto live = g_trace_pipelines.find(
       {row.pipeline.device, row.pipeline.application_pipeline});
-  row.pipeline.live = live != g_trace_pipelines.end() &&
+  row.pipeline_live = live != g_trace_pipelines.end() &&
       live->second.incarnation_id == key.pso_incarnation;
   row.windows = record.windows;
   row.last_submission_serial = record.last_submission_serial;

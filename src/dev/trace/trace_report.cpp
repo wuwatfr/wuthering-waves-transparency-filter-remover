@@ -228,7 +228,7 @@ bool WriteTraceReport() {
         << Hex64(row.key.pass_fingerprint) << '\t'
         << static_cast<int>(row.concrete) << '\t'
         << static_cast<int>(row.skip_eligible) << '\t'
-        << static_cast<int>(row.pipeline.live) << '\t'
+        << static_cast<int>(row.pipeline_live) << '\t'
         << row.key.geometry.observations;
     for (const auto& window : row.windows)
       concrete_report << '\t' << window.queue_submitted_commands << '\t'

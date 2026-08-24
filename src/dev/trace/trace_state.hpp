@@ -61,35 +61,19 @@ struct TraceResourceIdentity {
       const TraceResourceIdentity&) = default;
 };
 
-struct TracePipelineInfo {
-  std::uint64_t incarnation_id = 0;
-  DeviceIdentity device = 0;
-  std::uint64_t application_pipeline = 0;
-  std::uint64_t pso_fingerprint = 0;
-  std::uint64_t shader_hash = 0;
-  std::uint64_t context_hash = 0;
-  std::uint32_t primitive_topology = 0;
-  bool live = true;
-  bool rt0_blend = false;
-  bool alpha_to_coverage = false;
-  bool depth_test = false;
-  bool depth_write = false;
-  std::uint32_t render_target_count = 0;
-  std::uint32_t sample_count = 1;
-};
-
 using ConcreteWindowMetrics = wuwa_tfr::TraceSubmissionWindowMetrics;
 using ConcreteSubmissionRecord =
     wuwa_tfr::TraceSubmissionRecord<kTraceWindowCount>;
 
 struct ConcreteTraceRecord : ConcreteSubmissionRecord {
-  TracePipelineInfo pipeline;
+  wuwa_tfr::ExecutionPipelineIdentity pipeline;
   std::uint64_t last_submission_serial = 0;
 };
 
 struct ConcreteTraceRow {
   wuwa_tfr::TraceConcreteDrawKey key;
-  TracePipelineInfo pipeline;
+  wuwa_tfr::ExecutionPipelineIdentity pipeline;
+  bool pipeline_live = false;
   std::array<ConcreteWindowMetrics, kTraceWindowCount> windows;
   std::uint64_t last_submission_serial = 0;
   std::uint64_t geometry_fingerprint = 0;
@@ -278,14 +262,14 @@ struct RecordedTraceDrawKeyHash {
 
 struct RecordedTraceDraw {
   std::uint64_t commands = 0;
-  TracePipelineInfo pipeline;
+  wuwa_tfr::ExecutionPipelineIdentity pipeline;
 };
 
 struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
     CommandListTrace {
   DeviceIdentity device = 0;
   std::uint64_t bound_pso_incarnation = 0;
-  std::optional<TracePipelineInfo> bound_pipeline;
+  std::optional<wuwa_tfr::ExecutionPipelineIdentity> bound_pipeline;
   std::uint64_t bound_layout = 0;
   std::uint32_t primitive_topology = 0;
   bool topology_observed = false;
@@ -349,7 +333,7 @@ extern wuwa_tfr::TraceIncarnationIndex<std::uint64_t>
 extern TracePsoAmbiguityDiagnostics g_trace_pso_lifecycle_ambiguities;
 extern TraceResourceAmbiguityDiagnostics g_trace_resource_lifecycle_ambiguities;
 extern std::uint64_t g_trace_lifecycle_event_serial;
-extern std::unordered_map<TracePipelineKey, TracePipelineInfo,
+extern std::unordered_map<TracePipelineKey, wuwa_tfr::ExecutionPipelineIdentity,
     TracePipelineKeyHash> g_trace_pipelines;
 extern std::unordered_map<std::uint64_t, ShaderTraceRecord> g_trace_shaders;
 extern std::unordered_map<wuwa_tfr::TraceConcreteDrawKey, ConcreteTraceRecord,
@@ -419,7 +403,7 @@ std::string RouteUncertainty(const ConcreteTraceRow& row);
 std::string TraceIdentityText(const TracePsoIdentity& identity);
 std::string TraceIdentityText(const TraceResourceIdentity& identity);
 void ResetLifecycleAmbiguityDiagnosticsLocked();
-TracePipelineInfo DescribeTracePipeline(
+wuwa_tfr::ExecutionPipelineIdentity DescribeTracePipeline(
     std::uint32_t subobject_count,
     const reshade::api::pipeline_subobject* subobjects,
     std::uint64_t shader_hash);

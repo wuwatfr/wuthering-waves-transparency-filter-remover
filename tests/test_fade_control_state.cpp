@@ -9,8 +9,8 @@
 
 namespace {
 
+using wuwa_tfr::ExecutionPipelineIdentity;
 using wuwa_tfr::dev::FadeControlAccumulator;
-using wuwa_tfr::dev::FadeControlPipelineIdentity;
 using wuwa_tfr::dev::FadeControlRecordKey;
 using wuwa_tfr::dev::FadeControlRole;
 using wuwa_tfr::dev::FadeControlValueSample;
@@ -49,13 +49,13 @@ FadeControlRecordKey MakeKey(std::uint64_t pso_incarnation = 1,
       runtime_resource_incarnation, runtime_range_offset};
 }
 
-FadeControlPipelineIdentity MakePipeline() {
-  FadeControlPipelineIdentity pipeline;
+ExecutionPipelineIdentity MakePipeline() {
+  ExecutionPipelineIdentity pipeline;
   pipeline.device = 1;
-  pipeline.application_pso = 0x1000;
-  pipeline.pso_incarnation = 1;
-  pipeline.pso_context_hash = 0xBBBB;
-  pipeline.pixel_shader_hash = 0x1;
+  pipeline.application_pipeline = 0x1000;
+  pipeline.incarnation_id = 1;
+  pipeline.context_hash = 0xBBBB;
+  pipeline.shader_hash = 0x1;
   return pipeline;
 }
 

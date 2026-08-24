@@ -65,24 +65,8 @@ struct ManualCaptureBindingObservation {
   std::uint8_t observed_bindings = 0;
 };
 
-struct ManualCapturePipelineInfo {
-  std::uint64_t device = 0;
-  std::uint64_t application_pso = 0;
-  std::uint64_t pso_incarnation = 0;
-  std::uint64_t pso_fingerprint = 0;
-  std::uint64_t pso_context_hash = 0;
-  std::uint64_t pixel_shader_hash = 0;
-  std::uint32_t primitive_topology = 0;
-  bool rt0_blend = false;
-  bool alpha_to_coverage = false;
-  bool depth_test = false;
-  bool depth_write = false;
-  std::uint32_t render_target_count = 0;
-  std::uint32_t sample_count = 1;
-};
-
 struct ManualCaptureRecord {
-  ManualCapturePipelineInfo pipeline;
+  wuwa_tfr::ExecutionPipelineIdentity pipeline;
   std::uint64_t commands = 0;
   std::uint64_t submissions = 0;
   std::uint64_t first_frame = 0;
@@ -122,7 +106,7 @@ class ManualCaptureAccumulator {
       ManualCaptureShaderFilter shader_filter);
 
   void Accumulate(const ManualCaptureRecordKey& key,
-      const ManualCapturePipelineInfo& pipeline, std::uint64_t commands,
+      const wuwa_tfr::ExecutionPipelineIdentity& pipeline, std::uint64_t commands,
       std::uint64_t frame, const ManualCaptureBindingObservation& binding);
 
   void MarkCapacityExceeded();

@@ -296,7 +296,7 @@ FadeControlValueSample Unavailable(std::uint16_t reason) noexcept {
 }
 
 void TryCaptureFadeControlSnapshot(const FadeControlRecordKey& key,
-    const FadeControlPipelineIdentity& pipeline_identity,
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
     std::uint64_t cbv_offset, std::uint32_t predicate_vector,
     const MappedBufferInfo& mapped) {
   if (!g_fade_control_snapshot_accumulator.ShouldCapture(key)) return;
@@ -319,7 +319,7 @@ void TryCaptureFadeControlSnapshot(const FadeControlRecordKey& key,
 }
 
 void ObserveMappedCbvValue(const FadeControlRecordKey& key,
-    const FadeControlPipelineIdentity& pipeline_identity,
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
     std::uint64_t resource_handle, std::uint64_t range_offset,
     std::uint32_t vector_index, std::uint32_t component) {
   const auto mapped_it = g_mapped_buffers.find(resource_handle);
@@ -389,7 +389,7 @@ ResolvedCbvSource FromPreFadeOperand(
 }
 
 bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
-    FadeControlRecordKey key, const FadeControlPipelineIdentity& pipeline_identity,
+    FadeControlRecordKey key, const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
     const ResolvedCbvSource& source) {
   const auto layout_it = g_layout_push_cbv_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
@@ -418,7 +418,7 @@ bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
 }
 
 bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
-    FadeControlRecordKey key, const FadeControlPipelineIdentity& pipeline_identity,
+    FadeControlRecordKey key, const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
     const ResolvedCbvSource& source) {
   const auto layout_it = g_layout_descriptor_cbv_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
@@ -469,7 +469,7 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
 
 bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
     const FadeControlRecordKey& key,
-    const FadeControlPipelineIdentity& pipeline_identity,
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
     const ResolvedCbvSource& source) {
   const auto layout_it = g_layout_push_constant_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
@@ -487,7 +487,7 @@ bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
 
 void SampleOneRole(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route,
-    const FadeControlPipelineIdentity& pipeline_identity,
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline_identity,
     std::uint32_t primitive_index, FadeControlRole role,
     const ResolvedCbvSource& source, std::uint64_t session_id) {
   FadeControlRecordKey key;
@@ -707,10 +707,10 @@ bool WriteFadeControlExport(
             : "unresolved";
 
     report << Hex64(record.pipeline.device) << '\t'
-           << Hex64(record.pipeline.application_pso) << '\t'
-           << record.pipeline.pso_incarnation << '\t'
-           << Hex64(record.pipeline.pso_context_hash) << '\t'
-           << Hex64(record.pipeline.pixel_shader_hash) << '\t'
+           << Hex64(record.pipeline.application_pipeline) << '\t'
+           << record.pipeline.incarnation_id << '\t'
+           << Hex64(record.pipeline.context_hash) << '\t'
+           << Hex64(record.pipeline.shader_hash) << '\t'
            << TraceDrawKindName(key.route.geometry.kind) << '\t'
            << Hex64(static_cast<std::uint64_t>(
                   wuwa_tfr::TraceGeometryKeyHash{}(key.route.geometry)))
@@ -831,10 +831,10 @@ bool WriteFadeControlSnapshotExport(
             : "unresolved";
 
     report << Hex64(record.pipeline.device) << '\t'
-           << Hex64(record.pipeline.application_pso) << '\t'
-           << record.pipeline.pso_incarnation << '\t'
-           << Hex64(record.pipeline.pso_context_hash) << '\t'
-           << Hex64(record.pipeline.pixel_shader_hash) << '\t'
+           << Hex64(record.pipeline.application_pipeline) << '\t'
+           << record.pipeline.incarnation_id << '\t'
+           << Hex64(record.pipeline.context_hash) << '\t'
+           << Hex64(record.pipeline.shader_hash) << '\t'
            << TraceDrawKindName(key.route.geometry.kind) << '\t'
            << Hex64(static_cast<std::uint64_t>(
                   wuwa_tfr::TraceGeometryKeyHash{}(key.route.geometry)))
@@ -863,7 +863,7 @@ bool WriteFadeControlSnapshotExport(
 
 void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route,
-    const TracePipelineInfo& pipeline) {
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline) {
   const std::uint64_t session_id = g_manual_capture_session_token.value();
   if (session_id == 0) return;
   if (!g_fade_control_enabled_for_session.load(std::memory_order_acquire))
@@ -877,21 +877,18 @@ void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
     instances_copy = it->second.fade_instances;
   }
 
-  const FadeControlPipelineIdentity pipeline_identity{pipeline.device,
-      pipeline.application_pipeline, pipeline.incarnation_id,
-      pipeline.context_hash, pipeline.shader_hash};
   for (std::size_t i = 0; i < instances_copy.size(); ++i) {
     const auto primitive_index = static_cast<std::uint32_t>(i);
     const auto& observation = instances_copy[i];
-    SampleOneRole(trace, route, pipeline_identity, primitive_index,
+    SampleOneRole(trace, route, pipeline, primitive_index,
         FadeControlRole::Predicate,
         FromGatePredicateEvidence(observation.instance.gate_predicate),
         session_id);
     if (observation.pre_fade) {
-      SampleOneRole(trace, route, pipeline_identity, primitive_index,
+      SampleOneRole(trace, route, pipeline, primitive_index,
           FadeControlRole::PreFadeOperandOne,
           FromPreFadeOperand(observation.pre_fade->operand_one), session_id);
-      SampleOneRole(trace, route, pipeline_identity, primitive_index,
+      SampleOneRole(trace, route, pipeline, primitive_index,
           FadeControlRole::PreFadeOperandTwo,
           FromPreFadeOperand(observation.pre_fade->operand_two), session_id);
     }

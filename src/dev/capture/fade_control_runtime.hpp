@@ -43,6 +43,6 @@ bool WriteFadeControlSnapshotExport(
 
 void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route,
-    const TracePipelineInfo& pipeline);
+    const wuwa_tfr::ExecutionPipelineIdentity& pipeline);
 
 }
