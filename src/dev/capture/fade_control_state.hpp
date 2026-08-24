@@ -29,6 +29,7 @@ constexpr std::uint16_t kFadeControlReasonDynamicOffsetUnresolved = 1u << 5;
 constexpr std::uint16_t kFadeControlReasonStaleDescriptorBinding = 1u << 6;
 constexpr std::uint16_t kFadeControlReasonDescriptorUnknown = 1u << 7;
 constexpr std::uint16_t kFadeControlReasonPushConstantBacked = 1u << 8;
+constexpr std::uint16_t kFadeControlReasonDeclaredCbvRangeExceeded = 1u << 9;
 
 enum class FadeControlBindingRoute : std::uint8_t {
   Unresolved,
@@ -50,6 +51,15 @@ constexpr bool FadeControlByteOffsetInMappedRegion(std::uint64_t byte_offset,
   if (byte_offset < mapped_offset) return false;
   const std::uint64_t relative = byte_offset - mapped_offset;
   return relative <= mapped_size && mapped_size - relative >= 4;
+}
+
+// Same bounds arithmetic as FadeControlByteOffsetInMappedRegion, applied to
+// a CBV's own declared range instead of the physical mapped extent -- kept
+// as a separate, purpose-named predicate since the two extents are
+// independent constraints a scalar sample must satisfy simultaneously.
+constexpr bool FadeControlByteOffsetInDeclaredCbvRange(std::uint64_t byte_offset,
+    std::uint64_t cbv_offset, std::uint64_t declared_size) noexcept {
+  return FadeControlByteOffsetInMappedRegion(byte_offset, cbv_offset, declared_size);
 }
 
 struct FadeControlValueSample {

@@ -316,8 +316,19 @@ void TryCaptureFadeControlSnapshot(const FadeControlRecordKey& key,
 
 void ObserveMappedCbvValue(const FadeControlRecordKey& key,
     RecordedTraceDraw& draw, std::uint64_t resource_handle,
-    std::uint64_t range_offset, std::uint32_t vector_index,
-    std::uint32_t component) {
+    std::uint64_t range_offset, std::uint64_t range_size,
+    std::uint32_t vector_index, std::uint32_t component) {
+  const std::uint64_t byte_offset =
+      ResolveFadeControlByteOffset(range_offset, vector_index, component);
+
+  if (range_size != UINT64_MAX &&
+      !FadeControlByteOffsetInDeclaredCbvRange(
+          byte_offset, range_offset, range_size)) {
+    draw.pending_fade_observations.push_back(
+        {key, Unavailable(kFadeControlReasonDeclaredCbvRangeExceeded)});
+    return;
+  }
+
   const auto mapped_it = g_mapped_buffers.find(resource_handle);
   if (mapped_it == g_mapped_buffers.end()) {
     draw.pending_fade_observations.push_back(
@@ -325,8 +336,6 @@ void ObserveMappedCbvValue(const FadeControlRecordKey& key,
     return;
   }
 
-  const std::uint64_t byte_offset =
-      ResolveFadeControlByteOffset(range_offset, vector_index, component);
   if (!FadeControlByteOffsetInMappedRegion(
           byte_offset, mapped_it->second.offset, mapped_it->second.size)) {
     draw.pending_fade_observations.push_back(
@@ -409,7 +418,7 @@ bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
   key.runtime_resource_incarnation = binding.resource_incarnation;
   key.runtime_range_offset = binding.offset;
   ObserveMappedCbvValue(key, draw, binding.resource_handle, binding.offset,
-      source.vector_index, source.component);
+      binding.size, source.vector_index, source.component);
   return true;
 }
 
@@ -459,7 +468,7 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
   key.runtime_resource_incarnation = content->resource_incarnation;
   key.runtime_range_offset = content->offset;
   ObserveMappedCbvValue(key, draw, content->resource_handle, content->offset,
-      source.vector_index, source.component);
+      content->size, source.vector_index, source.component);
   return true;
 }
 
@@ -654,7 +663,16 @@ bool WriteFadeControlExport(
       "1_not_mapped_2_out_of_range_4_binding_unresolved_8_source_"
       "unresolved_16_unsupported_binding_route_32_dynamic_offset_"
       "unresolved_64_stale_descriptor_binding_128_descriptor_unknown_"
-      "256_push_constant_backed\n";
+      "256_push_constant_backed_512_declared_cbv_range_exceeded\n";
+  report << "declared_cbv_range_policy\t"
+      "a_resolved_scalar_is_available_only_if_its_byte_offset_plus_4_bytes_"
+      "fits_both_the_mapped_resources_real_extent_and_the_bound_cbvs_own_"
+      "declared_size_when_that_size_is_known_d3d12_root_and_push_cbv_"
+      "descriptors_carry_no_declared_size_at_all_so_this_check_is_a_no_op_"
+      "for_the_root_push_descriptors_binding_route_and_only_the_mapped_"
+      "resource_extent_applies_there_see_reason_bit_512_this_bound_is_"
+      "never_applied_to_manual_fade_snapshots_tsv_which_stays_clamped_to_"
+      "the_mapped_resource_extent_only_see_that_exports_cbv_range_caveat\n";
   report << "dynamic_offset_policy\t"
       "the_d3d12_addon_backend_always_passes_dynamic_offset_count_zero_to_"
       "bind_descriptor_tables_a_nonzero_count_is_still_treated_as_"

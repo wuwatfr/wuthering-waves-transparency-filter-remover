@@ -11,6 +11,7 @@ namespace {
 
 using wuwa_tfr::ExecutionPipelineIdentity;
 using wuwa_tfr::dev::FadeControlAccumulator;
+using wuwa_tfr::dev::FadeControlByteOffsetInDeclaredCbvRange;
 using wuwa_tfr::dev::FadeControlRecordKey;
 using wuwa_tfr::dev::FadeControlRole;
 using wuwa_tfr::dev::FadeControlValueSample;
@@ -96,6 +97,40 @@ int main() {
     CHECK(FadeControlByteOffsetInMappedRegion(120, 100, 24));
     // Non-zero mapped_offset, value out of range.
     CHECK(!FadeControlByteOffsetInMappedRegion(121, 100, 24));
+  }
+
+  // 5b. Declared-CBV-range bounds checking: the same shape of check as the
+  // mapped-region one, applied to the bound CBV's own declared size --
+  // stricter than (and independent of) the mapped region, which may be a
+  // much larger upload buffer the app suballocates several CBVs from.
+  {
+    using wuwa_tfr::dev::FadeControlByteOffsetInMappedRegion;
+    // Fully inside a declared CBV starting at a non-zero offset.
+    CHECK(FadeControlByteOffsetInDeclaredCbvRange(120, 100, 32));
+    // Last valid 4-byte scalar: ends exactly at the declared range's end.
+    CHECK(FadeControlByteOffsetInDeclaredCbvRange(128, 100, 32));
+    // One byte past what fits -- rejected even though it would still be a
+    // valid read of a larger mapped buffer.
+    CHECK(!FadeControlByteOffsetInDeclaredCbvRange(129, 100, 32));
+    // Entirely before the declared range.
+    CHECK(!FadeControlByteOffsetInDeclaredCbvRange(50, 100, 32));
+    // Mapped region is far larger than the declared CBV: the logical CBV
+    // bound still rejects a scalar that the mapped-region check alone would
+    // have accepted.
+    CHECK(FadeControlByteOffsetInMappedRegion(5000, 0, 1u << 20));
+    CHECK(!FadeControlByteOffsetInDeclaredCbvRange(5000, 100, 32));
+    // Overflow-safe at the extreme end of the address space: neither the
+    // relative-offset subtraction nor the remaining-size subtraction wraps.
+    CHECK(FadeControlByteOffsetInDeclaredCbvRange(
+        UINT64_MAX - 4, UINT64_MAX - 4, 4));
+    CHECK(!FadeControlByteOffsetInDeclaredCbvRange(
+        UINT64_MAX - 3, UINT64_MAX - 4, 4));
+    // declared_size == UINT64_MAX (the "no declared size" sentinel a D3D12
+    // root/push CBV descriptor reports) never rejects on its own -- callers
+    // are expected to skip this check entirely for that case, exactly as
+    // ObserveMappedCbvValue does.
+    CHECK(FadeControlByteOffsetInDeclaredCbvRange(
+        UINT64_MAX - 4, 0, UINT64_MAX));
   }
 
   // 6/7/8: repeated observations of the same control source aggregate,
