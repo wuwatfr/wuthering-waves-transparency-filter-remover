@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
-//
-// The Dev variant implementation of addon_variant.hpp. Owns Dev's own
-// startup config, event registration, and overlay content; addon.cpp knows
-// nothing about any of it beyond calling these five functions.
 
 #include "addon_variant.hpp"
 
@@ -80,10 +76,6 @@ void LogVariantStartup() {
       "; config=" + ConfigPath().string());
 }
 
-// Dev's shader-inspection state is entirely populated through
-// g_dev_antifade_runtime's observer seam now, with no DXC instance of its
-// own to tear down here; nothing else in Dev owns last-device-destroyed
-// state either.
 void OnLastDeviceDestroyed() {}
 
 }  // namespace wuwa_tfr::variant

@@ -23,19 +23,12 @@ bool IsNormalOnlyRimSkipRow(const ConcreteTraceRow& row) noexcept {
       wuwa_tfr::TraceNormalOnlySubmissionCandidate(row.windows);
 }
 
-// --- Pipeline lifecycle (trace observation only) ---
-
 void OnInitTracePipeline(
     device* owner,
     pipeline_layout layout,
     std::uint32_t subobject_count,
     const pipeline_subobject* subobjects,
     pipeline handle) {
-  // g_dev_antifade_runtime (dev/dev_runtime.hpp) is the sole fade-primitive
-  // replacement owner; its own internal replacement-pipeline create/destroy
-  // re-fires this same event, and dev_runtime.cpp holds this flag for the
-  // duration of that call so this independent trace observer never mistakes
-  // a replacement pipeline for a genuine application one.
   if (g_dev_runtime_internal_pipeline_event) return;
   if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
       handle.handle == 0)
@@ -54,17 +47,6 @@ void OnInitTracePipeline(
     g_trace_pipelines.erase(key);
     return;
   }
-
-  // No inspection call needed here: g_dev_antifade_runtime's own
-  // OnInitPipeline (dev/dev_runtime.hpp) also runs for this same
-  // init_pipeline event, and its observer (dev/dev_inspection.hpp) populates
-  // g_inspections for shaders that reach the canonical FadePrimitiveRuntime
-  // preparation path -- this trace observer no longer needs a disassembly of
-  // its own. That coverage is not guaranteed for every shader trace
-  // observes here: PipelineReplacementCoordinator may reject the callback
-  // (e.g. a differing shader hash for an already-live application handle)
-  // before its Build/Prepare lambda -- and therefore OnShaderPrepared --
-  // ever runs.
 
   TracePipelineInfo pipeline_info = DescribeTracePipeline(
       subobject_count, subobjects, shader_hash);
@@ -118,8 +100,6 @@ void OnDestroyTracePipeline(device* owner, pipeline handle) {
   g_trace_pso_incarnations.Destroy(key);
   g_trace_pipelines.erase(key);
 }
-
-// --- Resources / resource views ---
 
 TraceResourceIdentity ResourceIdentity(
     const resource_desc& desc, resource_usage initial_usage) noexcept {
@@ -215,8 +195,6 @@ void OnDestroyTraceResourceView(device* owner, resource_view view) {
   std::lock_guard lock(g_trace_mutex);
   g_trace_view_incarnations.Destroy({DeviceKey(owner), view.handle});
 }
-
-// --- Command lists ---
 
 void OnInitTraceCommandList(command_list* cmd_list) {
   if (!g_target_process || !cmd_list) return;
@@ -436,9 +414,6 @@ void OnPushTraceDescriptors(
     TraceHashValue(trace->pushed_cbv_fingerprint, ranges[i].buffer.handle);
     TraceHashValue(trace->pushed_cbv_fingerprint, ranges[i].offset);
     TraceHashValue(trace->pushed_cbv_fingerprint, ranges[i].size);
-    // Current-state binding for the Dev-only Fade control-value tracer
-    // (dev/capture/fade_control_runtime.*): overwritten on rebind, unlike
-    // the accumulated event fingerprint above.
     const RootCbvKey binding_key{
         layout.handle, layout_param, update.binding + i};
     if (ranges[i].buffer.handle == 0) {
@@ -480,11 +455,6 @@ void OnBindTraceDescriptorTables(
             sizeof(std::uint32_t));
   trace->observed_bindings |= 0x4;
 
-  // Current-state binding for the Dev-only Fade control-value tracer
-  // (dev/capture/fade_control_runtime.*): overwritten on rebind, unlike the
-  // accumulated fingerprint above. No lock needed: this only mutates the
-  // command-list-private trace object, exactly like the fingerprint update
-  // right above it.
   const bool dynamic_offsets_present = dynamic_offset_count != 0;
   for (std::uint32_t i = 0; i < count; ++i) {
     const BoundDescriptorTableKey key{layout.handle, first + i};
@@ -535,11 +505,6 @@ bool RecordOrSuppressTraceDraw(command_list* cmd_list,
   }
   ++draw->second.commands;
 
-  // Optional Dev-only value-tracing hook: reuses this exact Draw/PSO/pass
-  // provenance instead of a second Draw instrumentation chain. Gated by a
-  // single atomic load so it costs nothing when no manual capture is
-  // sampling control values (see fade_control_runtime.hpp's module
-  // comment).
   SampleFadeControlValuesOnDraw(*trace, concrete, draw->second.pipeline);
 
   return false;

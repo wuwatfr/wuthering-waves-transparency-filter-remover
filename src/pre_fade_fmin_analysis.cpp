@@ -16,11 +16,6 @@
 namespace wuwa_tfr {
 namespace {
 
-// This analyzer independently re-derives and re-verifies, from raw text,
-// exactly the structure it reports on -- it never reuses or trusts
-// fade_primitive_detector.cpp's internal (anonymous-namespace, private)
-// parsed graph from a prior pass.
-
 constexpr std::size_t kBackwardSliceLimit = 1024;
 
 bool IsSsaCharacter(char value) noexcept {
@@ -196,14 +191,6 @@ bool ConsumeToken(std::string_view text, std::size_t& cursor, std::string_view t
   return true;
 }
 
-// A sequence of instruction metadata attachments, each `, !name !N`.
-//
-// Deliberately the same semantics as fade_primitive_detector.cpp's
-// HasOnlyMetadataAttachments(): a comma, a non-empty `!name`, mandatory
-// whitespace, then a non-empty `!<digits>` reference. Both parsers must
-// accept exactly the same attachment syntax; the two copies are kept in step
-// by hand rather than by a shared parsing layer, which this release does not
-// introduce. An empty sequence is well formed.
 bool HasOnlyMetadataAttachments(std::string_view trailing) noexcept {
   std::size_t cursor = 0;
   while (cursor < trailing.size()) {
@@ -236,19 +223,6 @@ bool HasOnlyMetadataAttachments(std::string_view trailing) noexcept {
   return true;
 }
 
-// Exactly what a call instruction may carry after its closing parenthesis,
-// validated in full rather than by its first character:
-//
-//   <nothing> | #N | #N <attachments> | <attachments>
-//
-// where <attachments> is HasOnlyMetadataAttachments' comma-led form. An
-// attribute-group reference is `#` followed by at least one digit, and it may
-// only appear first -- metadata attachments are instruction metadata and
-// always carry their leading comma, so a bare `!dbg !1` is not valid call
-// syntax and is rejected. Line comments are already stripped upstream.
-// Anything else -- `#garbage`, `#0 garbage`, `, garbage`, `, !dbg`,
-// `, !dbg garbage`, a stray extra operand -- is malformed trailing syntax and
-// fails closed rather than being silently ignored.
 bool IsWellFormedCallSuffix(std::string_view rest) noexcept {
   rest = Trim(rest);
   if (rest.empty()) return true;
@@ -257,16 +231,13 @@ bool IsWellFormedCallSuffix(std::string_view rest) noexcept {
     while (cursor < rest.size() &&
         std::isdigit(static_cast<unsigned char>(rest[cursor])) != 0)
       ++cursor;
-    if (cursor == 1) return false;  // `#` with no attribute-group number
+    if (cursor == 1) return false;
     rest = Trim(rest.substr(cursor));
     if (rest.empty()) return true;
   }
   return HasOnlyMetadataAttachments(rest);
 }
 
-// Parses a decimal literal, unsigned and bounded to 32 bits. Used only for
-// diagnostic coordinates -- a false return leaves the coordinate unavailable,
-// it never rejects an otherwise structurally valid source.
 bool ParseDecimalU32(std::string_view text, std::uint32_t& value) noexcept {
   if (text.empty()) return false;
   std::uint64_t parsed = 0;
@@ -279,22 +250,12 @@ bool ParseDecimalU32(std::string_view text, std::uint32_t& value) noexcept {
   return true;
 }
 
-// Structural validation of a constant-buffer index operand: it must be a
-// well-formed i32 operand -- either a decimal literal or an SSA value, since
-// a dynamically indexed row/offset is still a direct scalar CBV load.
-// Whether its *value* is statically known is a separate, diagnostic-only
-// question answered by ParseDecimalU32.
 bool IsWellFormedIndexOperand(std::string_view text) noexcept {
   if (text.empty()) return false;
   std::uint32_t ignored = 0;
   return ParseDecimalU32(text, ignored) || IsSsaValue(text);
 }
 
-// The structural half of a dx.op.cbufferLoadLegacy.f32 call: exact return
-// type, exact intrinsic name, exact opcode, and an SSA %dx.types.Handle. The
-// row is validated only as a well-formed i32 operand; its literal *value* is
-// diagnostic-only and may legitimately be unavailable (a dynamic row index),
-// which must not disqualify the load.
 struct CBufferLoadLegacy {
   std::string_view handle;
   bool row_resolved = false;
@@ -323,7 +284,7 @@ bool ParseCBufferLoadLegacy(std::string_view rhs, CBufferLoadLegacy& out) {
     ++cursor;
   start = cursor;
   while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
-  if (cursor == rhs.size()) return false;  // no closing parenthesis
+  if (cursor == rhs.size()) return false;
   const std::string_view row_text = Trim(rhs.substr(start, cursor - start));
   if (!IsWellFormedIndexOperand(row_text)) return false;
   if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
@@ -331,10 +292,6 @@ bool ParseCBufferLoadLegacy(std::string_view rhs, CBufferLoadLegacy& out) {
   return true;
 }
 
-// The byte-addressed form, dx.op.cbufferLoad.f32. Same split as the legacy
-// form: structure (return type, intrinsic, opcode, SSA handle, and the exact
-// operand arity DXC's validator requires) is proof; the literal byte offset
-// is diagnostic-only.
 struct CBufferLoadByte {
   std::string_view handle;
   bool byte_offset_resolved = false;
@@ -361,9 +318,6 @@ bool ParseCBufferLoadByte(std::string_view rhs, CBufferLoadByte& out) {
   while (cursor < rhs.size() && std::isspace(static_cast<unsigned char>(rhs[cursor])) != 0)
     ++cursor;
   start = cursor;
-  // dx.op.cbufferLoad is exactly (opcode, handle, byteOffset, alignment) --
-  // DxilInst_CBufferLoad::isArgumentListValid() requires all four -- so the
-  // alignment operand must be there. Any other arity is not this intrinsic.
   while (cursor < rhs.size() && rhs[cursor] != ')' && rhs[cursor] != ',') ++cursor;
   if (cursor == rhs.size() || rhs[cursor] != ',') return false;
   const std::string_view offset_text = Trim(rhs.substr(start, cursor - start));
@@ -374,11 +328,7 @@ bool ParseCBufferLoadByte(std::string_view rhs, CBufferLoadByte& out) {
     ++cursor;
   start = cursor;
   while (cursor < rhs.size() && rhs[cursor] != ')') ++cursor;
-  if (cursor == rhs.size()) return false;  // no closing parenthesis
-  // Unlike byteOffset, alignment is not an index: DXIL requires a constant,
-  // and DxilInst_CBufferLoad::get_alignment_val() reads it as a ConstantInt.
-  // A dynamic alignment is not this intrinsic. Scanning to the closing paren
-  // also means a stray fifth operand lands inside this text and fails here.
+  if (cursor == rhs.size()) return false;
   std::uint32_t alignment = 0;
   if (!ParseDecimalU32(Trim(rhs.substr(start, cursor - start)), alignment)) return false;
   if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
@@ -386,10 +336,6 @@ bool ParseCBufferLoadByte(std::string_view rhs, CBufferLoadByte& out) {
   return true;
 }
 
-// `extractvalue %dx.types.CBufRet.f32 %agg, <component>` -- the aggregate
-// operand only. The opcode token and the aggregate type are matched exactly,
-// so neither a longer identifier that merely starts with "extractvalue" nor
-// an extraction from some other aggregate type can be mistaken for one.
 bool ParseExtractValueAggregate(std::string_view rhs, std::string_view& aggregate) {
   std::size_t cursor = 0;
   if (!ConsumeToken(rhs, cursor, "extractvalue ") ||
@@ -403,10 +349,6 @@ bool ParseExtractValueAggregate(std::string_view rhs, std::string_view& aggregat
   return true;
 }
 
-// Resolves an FMin operand *directly* to its constant-buffer origin:
-// extractvalue-of-cbufferLoadLegacy.f32, or a bare cbufferLoad.f32 call. No
-// bitcast/phi/select/freeze copy-chain is followed: an indirect path is not
-// "direct" and must not qualify.
 bool ResolveDirectOrigin(const ParsedFunction& function, std::string_view operand,
     PreFadeOperandSource& source) {
   if (!IsSsaValue(operand)) return false;
@@ -423,8 +365,6 @@ bool ResolveDirectOrigin(const ParsedFunction& function, std::string_view operan
     source.legacy_form = true;
     source.row_resolved = legacy.row_resolved;
     source.row = legacy.row;
-    // The extractvalue's own component index is filled in by the caller,
-    // which has the operand's own (not the aggregate's) definition in hand.
     return true;
   }
   CBufferLoadByte byte_form;
@@ -439,8 +379,6 @@ bool ResolveDirectOrigin(const ParsedFunction& function, std::string_view operan
   return false;
 }
 
-// Diagnostic-only: the extractvalue's component index. A false return leaves
-// the component unavailable; it never disqualifies the source.
 bool ParseExtractValueComponent(std::string_view rhs, std::uint32_t& component) {
   const std::size_t comma = rhs.rfind(',');
   if (comma == std::string_view::npos) return false;
@@ -450,7 +388,6 @@ bool ParseExtractValueComponent(std::string_view rhs, std::uint32_t& component) 
   return true;
 }
 
-// call float @dx.op.binary.f32(i32 36, float <A>, float <B>)
 bool ParseFMinOperands(std::string_view rhs, std::string_view& operand_a,
     std::string_view& operand_b) {
   std::size_t cursor = 0;
@@ -475,15 +412,8 @@ bool ParseFMinOperands(std::string_view rhs, std::string_view& operand_a,
   operand_b = Trim(rhs.substr(start, cursor - start));
   if (cursor == rhs.size() || rhs[cursor] != ')') return false;
   if (!IsWellFormedCallSuffix(rhs.substr(cursor + 1))) return false;
-  // Deliberately no SSA test here: this parses the instruction, it does not
-  // judge the operands. Requiring a *direct scalar CBV load* -- which implies
-  // an SSA operand -- is ResolveDirectOrigin's job, and post-patch
-  // verification has to be able to read back an FMin whose operand 1 is the
-  // rewritten literal.
   return !operand_a.empty() && !operand_b.empty();
 }
-
-// ---------- best-effort, diagnostic-only CBV space/register resolution ----------
 
 bool ParseCreateHandleRangeId(std::string_view rhs, std::uint32_t& range_id) {
   std::size_t cursor = 0;
@@ -622,8 +552,6 @@ void ResolveRegisterBestEffort(
   source.cbuffer_register = binding.cbuffer_register;
 }
 
-// ---------- phi re-derivation (independent of target_dither_bypass.cpp) ----------
-
 struct PhiArm {
   std::string_view value;
   std::string_view predecessor;
@@ -732,10 +660,6 @@ std::vector<FMinCandidate> FindQualifyingFMinCandidates(
         !ResolveDirectOrigin(function, operand_b, source_b) ||
         source_a.handle_value != source_b.handle_value)
       continue;
-    // Everything above this point is the Production proof: a direct scalar
-    // CBV load per operand, and one shared CBV handle. Everything below is
-    // diagnostic enrichment, and none of it can disqualify a candidate --
-    // each coordinate simply stays unavailable when it cannot be derived.
     if (source_a.legacy_form) {
       const FunctionLine* definition = Definition(function, operand_a);
       std::uint32_t component = 0;
@@ -763,7 +687,7 @@ std::vector<FMinCandidate> FindQualifyingFMinCandidates(
   return candidates;
 }
 
-}  // namespace
+}
 
 const char* PreFadeFMinStatusName(PreFadeFMinStatus status) noexcept {
   switch (status) {
@@ -781,8 +705,6 @@ const char* PreFadeFMinStatusName(PreFadeFMinStatus status) noexcept {
 
 bool PreFadeFMinAnalysisIsStructurallyComplete(
     const PreFadeFMinAnalysis& analysis) noexcept {
-  // Both the per-stage flags and the status are required to agree: a caller
-  // must not be able to satisfy this by any single field being stale.
   return analysis.instance_identity_verified && analysis.function_located &&
       analysis.function_parsed && analysis.backward_slice_complete &&
       (analysis.status == PreFadeFMinStatus::Matched ||
@@ -797,15 +719,6 @@ bool PreFadeFMinProvesNoQualifyingCandidate(
       analysis.qualifying_fmin_count == 0 && !analysis.success;
 }
 
-// !dx.resources = !{ !SRVs, !UAVs, !CBVs, !Samplers }; !CBVs is a list of
-// refs to 8-field CBuffer tuples: {ID, GV, name, space, register, range
-// size, cbuffer size, tag}. Best-effort, diagnostic-only: any ambiguity
-// (duplicate/missing metadata, more than one entry matching range_id) simply
-// leaves the result unresolved. The single, shared implementation of this
-// walk -- both ResolvePreFadeCbvRegisters (for a matched FMin's two
-// operands) and ResolveGatePredicateCbvRegister (for a verified instance's
-// gate-predicate evidence, fade_primitive_detector.hpp) call this, rather
-// than each maintaining an independent copy.
 CbvRegisterBinding ResolveCbvRangeId(
     const std::string& llvm_ir, std::uint32_t range_id) {
   CbvRegisterBinding result;
@@ -855,7 +768,7 @@ CbvRegisterBinding ResolveCbvRangeId(
     std::uint32_t entry_range_id = 0;
     if (!ParseTypedU32(entry_fields[0], entry_range_id)) return {};
     if (entry_range_id != range_id) continue;
-    if (matched) return {};  // ambiguous
+    if (matched) return {};
     if (!ParseTypedU32(entry_fields[3], space) || !ParseTypedU32(entry_fields[4], reg)) return {};
     matched = true;
   }
@@ -987,11 +900,6 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
   result.operand_two.source_end = result.operand_two.source_start + candidate.operand_b.size();
   result.operand_two.source_text = std::string(candidate.operand_b);
 
-  // Diagnostic-only, byte-precise adjacency classification: adjacent means
-  // exactly one float (4 bytes) apart in the flattened constant-buffer
-  // layout, whether that stays within one legacy row or crosses a 16-byte
-  // row boundary; anything else -- including same-row but non-adjacent
-  // components -- is NonAdjacent.
   const bool legacy_coordinates_available = result.operand_one.row_resolved &&
       result.operand_one.component_resolved && result.operand_two.row_resolved &&
       result.operand_two.component_resolved;
@@ -1029,4 +937,4 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
   return result;
 }
 
-}  // namespace wuwa_tfr
+}

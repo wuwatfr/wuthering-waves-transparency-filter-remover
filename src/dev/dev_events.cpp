@@ -82,10 +82,6 @@ void RegisterDevEvents() {
       OnExecuteTrace);
   reshade::register_event<reshade::addon_event::present>(OnTracePresent);
 
-  // The shared FadePrimitiveRuntime's own lifecycle, registered as additional
-  // handlers alongside the trace/experiment ones above. It is a second,
-  // independent object of the same class Production uses -- see
-  // dev/dev_runtime.hpp.
   reshade::register_event<reshade::addon_event::init_device>(
       OnInitDevRuntimeDevice);
   reshade::register_event<reshade::addon_event::destroy_device>(

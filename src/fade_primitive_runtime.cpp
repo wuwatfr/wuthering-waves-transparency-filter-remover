@@ -63,10 +63,6 @@ constexpr std::size_t kDxcContextPoolCapacity = 4;
 } // namespace
 
 struct FadePrimitiveRuntime::Impl {
-  // Lock order is activity -> single-flight cache -> DXC pool. The cache lock
-  // is released before a context is acquired or any DXC call begins. Last-
-  // device teardown holds activity exclusively, then drains the pool; it never
-  // takes the cache lock, so it cannot wait in a lock cycle with a callback.
   SingleFlightCache<std::uint64_t, PreparedShader, std::hash<std::uint64_t>,
       PreparedShaderPayloadBytes> prepared;
   std::filesystem::path dxc_runtime_directory;
@@ -75,13 +71,7 @@ struct FadePrimitiveRuntime::Impl {
   DeviceActivityState<DeviceId> activity;
   PipelineReplacementCoordinator<DeviceId, pipeline> replacements;
   std::atomic<bool> enabled{false};
-  // Optional, read-only, initialization-time configuration -- see
-  // set_observer()'s own documentation. Not owned; never null-checked under
-  // any lock, since it is never written after the initialization window
-  // set_observer() documents.
   FadePrimitiveRuntimeObserver* observer = nullptr;
-  // These are cumulative runtime activity counters, not retained-object
-  // gauges. Telemetry snapshots only load them and never increment them.
   std::atomic<std::uint64_t> matched_shaders{0};
   std::atomic<std::uint64_t> prepared_shaders{0};
   std::atomic<std::uint64_t> replacements_created{0};
@@ -90,19 +80,12 @@ struct FadePrimitiveRuntime::Impl {
 
   Impl()
       : dxc_pool(kDxcContextPoolCapacity, [this] {
-          // DxcBridge owns its own module, COM interfaces, assembler, and
-          // validator. A leased instance is never called concurrently.
           return std::make_unique<DxcBridge>(dxc_runtime_directory);
         }) {}
 
   PreparedShader PrepareOne(std::uint64_t hash, const shader_desc& original) {
     PreparedShader state;
     state.attempted = true;
-    // Declared here, rather than in the blocks below where each is actually
-    // computed, purely so an observer -- if one is installed -- can still
-    // see them after those blocks close. This changes no decision-making
-    // logic: every condition and assignment below is otherwise unchanged
-    // from before this observation seam existed.
     std::optional<DxilInspectionOutput> inspected;
     FadePrimitiveDiagnostic diagnostic;
     std::optional<TargetDitherBypassResult> patched;
@@ -152,12 +135,6 @@ struct FadePrimitiveRuntime::Impl {
     if (!state.bytecode)
       replacements_failed.fetch_add(1, std::memory_order_relaxed);
 
-    // Reported from here -- after every decision above has already been
-    // made and `dxc` (the leased context) has already gone out of scope --
-    // so this can only observe outcomes, never influence them. Guarded on
-    // `observer` so an absent observer costs nothing beyond the branch
-    // itself: no extra copy of the diagnostic, the evidence vector, or the
-    // IR text is ever made.
     if (observer) {
       FadePrimitiveRuntimeObserver::ShaderPreparationObservation observation;
       observation.original_shader_hash = hash;
@@ -226,9 +203,6 @@ void FadePrimitiveRuntime::OnDestroyDevice(device* owner) {
     owner->destroy_pipeline(replacement);
   });
   if (impl_->device_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-    // Deactivate holds activity exclusively, so all callers that can lease a
-    // DXC context have returned. Drain also protects against future changes
-    // that add a preparation path outside this callback.
     impl_->dxc_pool.Drain();
   }
 }
@@ -238,23 +212,10 @@ void FadePrimitiveRuntime::OnInitPipeline(device* owner, pipeline_layout layout,
   if (g_internal_create || !owner || application.handle == 0) return;
   auto active = impl_->activity.Acquire(DeviceKey(owner));
   if (!active) return;
-  // D3D12 PSOs are immutable: the live (device, application handle) pair is
-  // the canonical identity of all application pipeline state. A differing
-  // observed shader hash for that same live handle is contradictory evidence,
-  // so the coordinator disables replacement selection rather than replacing
-  // or destroying an object that may still be referenced by command lists.
   const shader_desc* original = nullptr;
   std::uint64_t hash = 0;
   const bool has_pixel_shader =
       FindDxilPixelShader(count, subobjects, original, hash);
-  // Reported here, immediately after identification and before any
-  // replacement-selection decision is made from it, so this can only
-  // observe what was identified, never influence what happens with it.
-  // This sits inside the same `active` shared/reader lock already held for
-  // this entire function -- not a new lock scope -- which already tolerates
-  // far heavier work below (a DXC compile via impl_->Prepare); it excludes
-  // only concurrent device teardown, never other concurrent OnInitPipeline
-  // or OnBindPipeline calls.
   if (impl_->observer) {
     FadePrimitiveRuntimeObserver::PipelineInitObservation observation;
     observation.device = owner;
@@ -340,9 +301,6 @@ void FadePrimitiveRuntime::set_enabled(bool enabled) {
 
 FadePrimitiveRuntimeTelemetrySnapshot
 FadePrimitiveRuntime::memory_telemetry_snapshot() const {
-  // GetSnapshot() releases the single-flight cache lock before this function
-  // separately obtains the replacement-state lock via RetainedSize(). Do not
-  // combine these two snapshots under nested locks.
   const auto cache = impl_->prepared.GetSnapshot();
   const auto replacement_count = impl_->replacements.RetainedSize();
   return {

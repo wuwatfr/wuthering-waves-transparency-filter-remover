@@ -69,7 +69,6 @@ std::unordered_map<std::string, Presence> ReadSubmissionPresence(
       presence.partial |= std::stoull(fields[partial->second]) != 0;
       presence.full |= std::stoull(fields[full->second]) != 0;
     } catch (const std::exception&) {
-      // A malformed trace row is unavailable evidence, never a positive mask.
     }
   }
   return result;

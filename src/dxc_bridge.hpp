@@ -23,9 +23,6 @@ struct DxilAssemblyValidationOutput {
   bool validation_succeeded = false;
 };
 
-// Generic DXC/LLVM bridge. It knows how to disassemble original shader
-// containers and how to assemble+validate caller-supplied LLVM text, but it
-// contains no game classifier, matcher, or rewrite policy.
 class DxcBridge {
  public:
   explicit DxcBridge(const std::filesystem::path& addon_directory);

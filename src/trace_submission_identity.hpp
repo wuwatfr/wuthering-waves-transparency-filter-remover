@@ -159,8 +159,6 @@ struct TraceVersionedSlotUpdate {
   bool replaced = false;
 };
 
-// Descriptor slots may be rewritten without a destroy event. A changed
-// identity is a new content version of the same slot, not a lifecycle error.
 template <typename Identity>
 TraceVersionedSlotUpdate UpdateTraceVersionedSlot(
     TraceIncarnationIndex<Identity>& index, TraceLiveHandleKey key,
@@ -275,7 +273,6 @@ struct TraceIndexBinding {
       default;
 };
 
-// Binding identity only: dynamic/shared resource contents are not observed.
 struct TraceGeometryKey {
   TraceDrawKind kind = TraceDrawKind::Direct;
   std::array<std::uint64_t, 5> arguments{};
@@ -340,9 +337,6 @@ struct TraceConcreteDrawKeyHash {
   }
 };
 
-// Same observed geometry and exact render pass, deliberately independent of
-// PSO incarnation so a material/PSO switch can be followed without merging
-// unrelated depth, shadow or color passes.
 struct TraceDrawRouteKey {
   TraceGeometryKey geometry;
   std::uint64_t pass_fingerprint = 0;

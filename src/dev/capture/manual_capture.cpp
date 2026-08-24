@@ -26,16 +26,6 @@ namespace wuwa_tfr::dev {
 
 namespace {
 
-// All state below is either protected by g_trace_mutex (see
-// dev/trace/trace_state.hpp, reused here per the task's concurrency
-// guidance) or only ever touched from the ImGui render thread, matching how
-// dev/trace/trace_report.cpp's g_trace_ui_status is handled. The one
-// exception is g_manual_capture_session_token (manual_capture_state.hpp),
-// which is intentionally its own lock-free atomic so this file's hot path
-// -- and every other participating channel's -- costs nothing when idle;
-// it is set/cleared here in lockstep with g_manual_capture.Start()/Stop()
-// and re-checked under the lock (via g_manual_capture.state()) before any
-// state mutation.
 ManualCaptureAccumulator g_manual_capture;
 std::uint64_t g_manual_capture_generation = 0;
 std::uint64_t g_manual_capture_frame_counter = 0;
@@ -44,11 +34,6 @@ std::uintptr_t g_manual_capture_swapchain = 0;
 std::string g_manual_capture_status = "idle";
 std::string g_manual_capture_last_export;
 
-// UI-thread-only (the checkbox and StartManualCapture() both run on the
-// ImGui render thread, same as g_dev_antifade_runtime's toggle elsewhere in
-// Dev): the pending choice for the *next* session. Start() snapshots this
-// into the session itself, which is the value that actually governs
-// filtering -- this variable only ever feeds a new Start().
 bool g_manual_capture_filter_pending_verified_only = true;
 
 const char* ShaderFilterName(ManualCaptureShaderFilter filter) {
@@ -84,9 +69,6 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
     const std::string& timestamp, std::filesystem::path& out_path) {
   const auto directory = DumpDir();
   if (directory.empty()) return false;
-  // LocalExportTimestamp() only has second precision, so two captures
-  // stopped within the same second need a numbered suffix to avoid
-  // silently overwriting each other via std::ios::trunc below.
   const std::string filename = AllocateExportFilename(
       "manual-capture-" + timestamp, ".tsv",
       [&directory](const std::string& candidate) {
@@ -210,12 +192,6 @@ bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
   return static_cast<bool>(report);
 }
 
-// Fully verified: the shader has a successful inspection carrying at least
-// one fully verified Fade Primitive v1 instance. Reuses the existing Dev
-// inspection cache as the source of truth (dev/dev_inspection.hpp) instead
-// of running the matcher again here -- same success criterion the read-only
-// diagnostics panel already uses (dev/dev_overlay.cpp's
-// DrawFadePrimitiveTargetModes).
 bool IsVerifiedFadePrimitiveShaderLocked(std::uint64_t shader_hash) {
   const auto it = g_inspections.find(shader_hash);
   return it != g_inspections.end() && it->second.inspection_succeeded &&
@@ -233,15 +209,6 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
           !trace->recorded_draw_capacity_exceeded))
     return;
 
-  // Snapshot the session's fixed filter mode without holding g_trace_mutex
-  // across the g_inspection_mutex lookups below -- lock order must never
-  // nest g_inspection_mutex inside g_trace_mutex. IsLiveSession (not just
-  // state() == Capturing) is required here and again at the final
-  // accumulation lock below: without it, a Stop() immediately followed by a
-  // new Start() in between these two locked sections would leave state()
-  // Capturing again by the time this function re-acquires the lock, and
-  // filter_mode/eligible_shader_hashes computed for the OLD session would
-  // silently be committed into the NEW one.
   ManualCaptureShaderFilter filter_mode;
   {
     std::lock_guard lock(g_trace_mutex);
@@ -315,9 +282,6 @@ void RegisterManualCaptureEvents() {
 }
 
 void StartManualCapture() {
-  // Read on the ImGui render thread, same as the checkbox that sets it;
-  // Start() below copies the value into the session, which is what actually
-  // governs filtering from this point on.
   const auto filter_mode = g_manual_capture_filter_pending_verified_only
       ? ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly
       : ManualCaptureShaderFilter::AllObservedPixelShaders;
@@ -330,16 +294,7 @@ void StartManualCapture() {
   g_manual_capture_swapchain = 0;
   g_manual_capture.Start(g_manual_capture_generation, 0, filter_mode);
   g_manual_capture_status = "capturing";
-  // Fade control has its own mutex/accumulators (see
-  // fade_control_runtime.hpp) but no independent session lifecycle of its
-  // own: it participates in this same session via
-  // g_manual_capture_session_token below, and is simply told here whether
-  // it was opted into this particular one. This must run before the token
-  // is published: once it becomes visible to a concurrent Draw-time hot
-  // path, every participating channel must already be initialized for the
-  // new session, not still mid-reset.
   StartFadeControlCapture(g_manual_capture_generation, fade_control_enabled);
-  // Published last, only once every channel above is ready.
   g_manual_capture_session_token.Start(g_manual_capture_generation);
 }
 
@@ -349,15 +304,11 @@ bool StopAndExportManualCapture() {
     std::lock_guard lock(g_trace_mutex);
     if (g_manual_capture.state() != ManualCaptureState::Capturing)
       return false;
-    // Closes admission first: cleared before either channel's state is
-    // frozen, so no Draw/Present hot-path check newly entering can observe
-    // this session as still live, even momentarily.
     g_manual_capture_session_token.Stop();
     snapshot = g_manual_capture.Stop(g_manual_capture_frame_counter);
   }
   const bool fade_control_was_enabled = StopFadeControlCapture();
 
-  // File I/O deliberately happens after the locks above are released.
   const std::string timestamp = LocalExportTimestamp();
   std::filesystem::path export_path;
   const bool exported =

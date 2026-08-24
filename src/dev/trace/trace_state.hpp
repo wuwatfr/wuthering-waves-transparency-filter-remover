@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
-//
-// Dev-only runtime differential trace: data structures and process-wide
-// state for the three-window (normal / partial-fade / full-fade) PSO,
-// resource, and draw-submission capture used for manual investigation. See
-// dev/trace/trace_events.* for the ReShade event handlers that populate this
-// state and dev/trace/trace_report.* for the TSV exporters that read it.
 
 #pragma once
 
@@ -214,12 +208,6 @@ struct RootConstantKeyHash {
   }
 };
 
-// Same key shape as RootConstantKey, minus the per-4-byte-word dimension:
-// one entry per (layout, root parameter, array slot). Used only by the
-// Dev-only Fade control-value tracer (dev/capture/fade_control_runtime.*)
-// to resolve a *live* CBV binding for a structurally proven cbuffer
-// register -- unrelated to pushed_cbv_fingerprint's accumulated
-// binding-event-fingerprint semantics below, which remain untouched.
 struct RootCbvKey {
   std::uint64_t layout = 0;
   std::uint32_t parameter = 0;
@@ -237,10 +225,6 @@ struct RootCbvKeyHash {
   }
 };
 
-// Current (not accumulated-history) pushed-CBV binding for one root
-// parameter slot: overwritten on rebind, never appended. resource_handle is
-// the raw handle (for mapped-memory lookup); resource_incarnation is the
-// same lifecycle-safe identity the rest of this trace uses.
 struct RootCbvBinding {
   std::uint64_t resource_handle = 0;
   std::uint64_t resource_incarnation = 0;
@@ -248,13 +232,6 @@ struct RootCbvBinding {
   std::uint64_t size = 0;
 };
 
-// Same key shape as RootCbvKey, minus the sub-array binding dimension: one
-// entry per (layout, root parameter), the root parameter itself only ever
-// bound to a single descriptor table at a time. Used only by the Dev-only
-// Fade control-value tracer to resolve a *live* descriptor-table-backed CBV
-// for a structurally proven cbuffer register -- unrelated to
-// descriptor_table_fingerprint's accumulated binding-event-fingerprint
-// semantics below, which remain untouched.
 struct BoundDescriptorTableKey {
   std::uint64_t layout = 0;
   std::uint32_t parameter = 0;
@@ -272,17 +249,8 @@ struct BoundDescriptorTableKeyHash {
   }
 };
 
-// Current (not accumulated-history) descriptor-table binding for one root
-// parameter slot: overwritten on rebind, never appended.
 struct BoundDescriptorTable {
   std::uint64_t table_handle = 0;
-  // True when the bind_descriptor_tables call that established this binding
-  // carried a nonzero dynamic_offset_count. The D3D12 backend always passes
-  // 0 (there is no native D3D12 equivalent of a Vulkan dynamic-offset
-  // descriptor) -- see descriptor_table_state.hpp's
-  // DescriptorTableBindingHasExactDynamicOffsets. A nonzero count means the
-  // exact offset correspondence for this binding cannot be proven, and the
-  // Fade control tracer must report it unresolved rather than assume zero.
   bool dynamic_offsets_present = false;
 };
 
@@ -413,10 +381,6 @@ extern std::uintptr_t g_trace_swapchain;
 extern std::array<bool, kTraceWindowCount> g_trace_capture_complete;
 extern int g_trace_window_length;
 extern std::string g_trace_ui_status;
-
-// --- Small shared helpers used by both trace_events.cpp and trace_report.cpp
-// (and, for the hash helpers, by the recipe/experiments modules' fingerprint
-// computations) ---
 
 void TraceHashAppend(
     std::uint64_t& hash, const void* data, std::size_t size) noexcept;

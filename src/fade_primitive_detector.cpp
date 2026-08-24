@@ -41,8 +41,6 @@ bool ParseLoadInputF32(
     std::string_view line, LoadInputF32Call& result) noexcept;
 
 struct Instruction {
-  // Only comment-free LLVM code is used to build the SSA graph or authorize
-  // a replacement. The comment remains diagnostic text only.
   std::string code;
   std::string comment;
   std::string lhs;
@@ -89,8 +87,6 @@ struct CodeAndComment {
   std::string_view comment;
 };
 
-// A semicolon in an LLVM metadata string is not a comment delimiter. Outside
-// a quoted string, retain the comment separately and never tokenize it.
 CodeAndComment SplitCodeAndComment(std::string_view text) noexcept {
   bool quoted = false;
   for (std::size_t index = 0; index < text.size(); ++index) {
@@ -152,10 +148,6 @@ void AddInstruction(Function& function, std::string_view raw,
   if (!instruction.lhs.empty() &&
       !function.definitions.emplace(instruction.lhs, index).second)
     function.complete = false;
-  // For an SSA definition the LHS names the value being defined; it is not
-  // one of that instruction's operands and must never become a synthetic
-  // self-user. Instructions without an LHS are terminal users, so their full
-  // comment-free code remains the operand source.
   const std::string_view operands = instruction.lhs.empty()
       ? std::string_view(instruction.code)
       : std::string_view(instruction.rhs);
@@ -433,22 +425,6 @@ bool ParseConditionalBranch(
   return false;
 }
 
-// ---- best-effort gate-predicate evidence (diagnostic only; see
-// FadePrimitiveGatePredicateEvidence's own comment) ----
-//
-// Structural parsers for the same DXIL call shapes
-// pre_fade_fmin_analysis.hpp's ResolveDirectOrigin recognizes for the FMin
-// operands. Deliberately not shared with it: this file must never depend
-// on pre_fade_fmin_analysis.hpp, and depending on it here would pull
-// FMin-operand-specific assumptions into the matcher's own gate-
-// verification path. (space, register) resolution for the range id these
-// parsers extract is the one part that IS shared -- see
-// pre_fade_fmin_analysis.hpp's ResolveGatePredicateCbvRegister, called
-// later by Dev, never from here. Every literal-value coordinate below is
-// diagnostic-only -- see the per-field comments -- and a false
-// return only ever leaves a coordinate unavailable, never disqualifies an
-// otherwise structurally valid call.
-
 bool IsWellFormedIndexOperand(std::string_view text) noexcept {
   if (text.empty()) return false;
   std::size_t cursor = 0;
@@ -463,8 +439,6 @@ struct CbufferLoadLegacyOperands {
   std::uint32_t row = 0;
 };
 
-// call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59,
-//     %dx.types.Handle %h, i32 <row>)
 bool ParseCbufferLoadLegacyOperands(
     std::string_view rhs, CbufferLoadLegacyOperands& result) noexcept {
   std::size_t cursor = 0;
@@ -511,8 +485,6 @@ struct CbufferLoadByteOperands {
   std::uint32_t byte_offset = 0;
 };
 
-// call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %h,
-//     i32 <byteOffset>, i32 <alignment>)
 bool ParseCbufferLoadByteOperands(
     std::string_view rhs, CbufferLoadByteOperands& result) noexcept {
   std::size_t cursor = 0;
@@ -541,8 +513,6 @@ bool ParseCbufferLoadByteOperands(
   const std::size_t offset_start = cursor;
   while (cursor < rhs.size() && rhs[cursor] != ',' && rhs[cursor] != ')')
     ++cursor;
-  // dx.op.cbufferLoad is exactly (opcode, handle, byteOffset, alignment) --
-  // the alignment operand must follow, so a bare ')' here is not this call.
   if (cursor == rhs.size() || rhs[cursor] != ',') return false;
   const std::string_view offset_text =
       Trim(rhs.substr(offset_start, cursor - offset_start));
@@ -562,10 +532,6 @@ bool ParseCbufferLoadByteOperands(
   return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
 }
 
-// extractvalue %dx.types.CBufRet.f32 %agg, <component> -- the aggregate
-// operand only; matches even when the trailing component index itself
-// does not parse as the diagnostic-only 0-3 literal ParseExtractValue
-// Component below requires.
 bool ParseExtractValueAggregate(
     std::string_view rhs, std::string_view& aggregate) noexcept {
   std::size_t cursor = 0;
@@ -580,9 +546,6 @@ bool ParseExtractValueAggregate(
   return true;
 }
 
-// Diagnostic-only: the extractvalue's literal component index. A false
-// return leaves the component unavailable; it never disqualifies the
-// aggregate match above.
 bool ParseExtractValueComponent(
     std::string_view rhs, std::uint32_t& component) noexcept {
   const std::size_t comma = rhs.rfind(',');
@@ -603,10 +566,6 @@ struct CreateHandleOperands {
   std::uint32_t range_id = 0;
 };
 
-// call %dx.types.Handle @dx.op.createHandle(i32 57, i8 <resourceClass>,
-//     i32 <rangeId>, ...) -- only the leading operands this evidence needs
-// are validated; the remainder (index, non-uniform flag) is not, since
-// nothing here depends on it.
 bool ParseCreateHandleOperands(
     std::string_view rhs, CreateHandleOperands& result) noexcept {
   std::size_t cursor = 0;
@@ -630,12 +589,6 @@ bool ParseCreateHandleOperands(
   return true;
 }
 
-// Extracted from the SAME gate_slice the boolean gate check already
-// computed -- never a second backward slice. Requires exactly one direct
-// scalar CBV load reachable in the slice, behind a literally-typed CBV
-// createHandle; zero or more than one candidate (including an ambiguous
-// legacy load with more than one consuming extractvalue) leaves `resolved`
-// false rather than guessing.
 FadePrimitiveGatePredicateEvidence ResolveGatePredicateEvidence(
     const Function& function, std::string_view condition,
     const Slice& gate_slice) {
@@ -656,10 +609,6 @@ FadePrimitiveGatePredicateEvidence ResolveGatePredicateEvidence(
     std::uint32_t byte_offset = 0;
   };
 
-  // Pass 1: every direct-CBV-load-shaped call reachable in the slice.
-  // Legacy-form loads are aggregates and only become genuine candidates
-  // once pass 2 finds exactly one extractvalue consuming them; byte-form
-  // loads are already scalar and are candidates immediately.
   std::unordered_map<std::string_view, CbufferLoadLegacyOperands> legacy_loads;
   std::vector<Candidate> candidates;
   for (const std::string& value : gate_slice.values) {
@@ -680,9 +629,6 @@ FadePrimitiveGatePredicateEvidence ResolveGatePredicateEvidence(
     }
   }
 
-  // Pass 2: for each legacy load, exactly one extractvalue reachable in
-  // the same slice consuming its result -- more than one is ambiguous and
-  // that load is dropped as a candidate entirely.
   std::unordered_map<std::string_view, std::size_t> extract_counts;
   std::unordered_map<std::string_view, std::uint32_t> extract_components;
   std::unordered_map<std::string_view, bool> extract_component_resolved;
@@ -714,12 +660,6 @@ FadePrimitiveGatePredicateEvidence ResolveGatePredicateEvidence(
   if (candidates.size() != 1) return evidence;
   const Candidate& winner = candidates.front();
 
-  // Handle validation: the winning candidate's handle must resolve to a
-  // literally-typed createHandle(resourceClass=CBV) call. Structurally
-  // unreachable for valid DXIL -- the load opcode itself already implies a
-  // CBV handle -- but never assumed; a handle that fails this leaves
-  // evidence unresolved entirely rather than reporting a coordinate for a
-  // source that was never proven to be a CBV.
   const Instruction* handle_definition = Definition(function, winner.handle);
   if (!handle_definition) return evidence;
   CreateHandleOperands handle_call;
@@ -746,17 +686,6 @@ struct GateVerification {
   FadePrimitiveGatePredicateEvidence evidence;
 };
 
-// Preserves the exact original boolean semantics of what was
-// HasCbufferControlledGate() while additionally deriving best-effort
-// predicate evidence from the SAME gate branch and backward slice, without
-// a second analysis pass. `gate_proven` is byte-for-byte the same decision
-// the old bare-bool function made: exactly the first (in instruction
-// order) candidate branch into `enabled_predecessor` whose backward slice
-// is complete and reachably contains a cbufferLoadLegacy.f32 or
-// cbufferLoad.f32 call. An incomplete slice on that first candidate still
-// aborts immediately without considering any later candidate, exactly as
-// before -- this refactor changes nothing about when an instance is
-// accepted or rejected, only what is additionally recorded when it is.
 GateVerification VerifyCbufferControlledGate(
     const Function& function, std::string_view enabled_predecessor) {
   GateVerification result;
@@ -915,16 +844,10 @@ bool IsFloatLoadFromPointer(
   if (!Consume(rhs, cursor, "float") || !Consume(rhs, cursor, "*"))
     return false;
   SkipWhitespace(rhs, cursor);
-  // The exact pointer token is the sole load operand. An adjacent SSA
-  // character would continue a different, longer name (e.g. %ptr2), and
-  // that ambiguity must not authorize the load.
   if (!rhs.substr(cursor).starts_with(expected_pointer)) return false;
   cursor += expected_pointer.size();
   if (cursor < rhs.size() && IsSsaCharacter(rhs[cursor])) return false;
 
-  // The standard alignment suffix, if present, must come before any DXC
-  // metadata attachments (!tbaa, !noalias, and similar) and is otherwise
-  // treated as absent rather than partially consumed.
   std::size_t align_cursor = cursor;
   if (ConsumeComma(rhs, align_cursor)) {
     std::size_t candidate = align_cursor;
@@ -935,10 +858,6 @@ bool IsFloatLoadFromPointer(
         ParseUnsigned(rhs, candidate, alignment))
       cursor = candidate;
   }
-  // Only well-formed metadata attachments may follow the pointer operand or
-  // its optional alignment; any other trailing syntax (extra operands,
-  // unmatched suffixes) is ambiguous evidence and must not authorize a
-  // Production rewrite.
   return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
 }
 
@@ -1330,9 +1249,6 @@ bool HasUniqueSignatureSemantic(const Module& module,
     const MetadataParseResult parsed =
         ParseMetadataDefinition(global.code, definition);
     if (parsed == MetadataParseResult::Malformed) {
-      // An unrelated malformed metadata node is not evidence about this
-      // semantic. A malformed node that claims the semantic is directly
-      // relevant and therefore fails closed.
       if (global.code.find(expected) != std::string::npos) return false;
       continue;
     }
@@ -1367,9 +1283,6 @@ bool IsDiscardCandidate(std::string_view code) noexcept {
   return Trim(code).starts_with("call void @dx.op.discard(");
 }
 
-// A single well-typed float operand: an SSA value or a literal, with no
-// further value hiding behind it. The exact delimiter (',' or ')') that ends
-// it is left in place for the caller to consume.
 bool ParseFloatOperand(std::string_view rhs, std::size_t& cursor) noexcept {
   SkipWhitespace(rhs, cursor);
   if (!Consume(rhs, cursor, "float") || cursor == rhs.size() ||
@@ -1382,10 +1295,6 @@ bool ParseFloatOperand(std::string_view rhs, std::size_t& cursor) noexcept {
   return !Trim(rhs.substr(value_start, cursor - value_start)).empty();
 }
 
-// call float @dx.op.binary.f32(i32 <opcode>, float <a>, float <b>)
-// Exact callee, exact float return type, exact opcode field, exactly two
-// typed float operands, and only valid metadata attachments may follow the
-// closing parenthesis.
 bool ParseDxOpBinaryF32(std::string_view rhs, std::uint32_t& opcode) noexcept {
   rhs = Trim(rhs);
   constexpr std::string_view prefix = "call float @dx.op.binary.f32(";
@@ -1403,8 +1312,6 @@ bool ParseDxOpBinaryF32(std::string_view rhs, std::uint32_t& opcode) noexcept {
   return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
 }
 
-// call float @dx.op.unary.f32(i32 <opcode>, float <value>)
-// Same exactness requirements as the binary form, with exactly one operand.
 bool ParseDxOpUnaryF32(std::string_view rhs, std::uint32_t& opcode) noexcept {
   rhs = Trim(rhs);
   constexpr std::string_view prefix = "call float @dx.op.unary.f32(";
@@ -1418,17 +1325,10 @@ bool ParseDxOpUnaryF32(std::string_view rhs, std::uint32_t& opcode) noexcept {
   return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
 }
 
-// Exactly two pure, side-effect-free DXIL intrinsics are recognized as
-// primitive propagation beyond plain LLVM arithmetic: FMin (dx.op.binary.f32
-// opcode 36), which the verified coverage expression already requires
-// elsewhere in the fade primitive, and Saturate (dx.op.unary.f32 opcode 7).
-// No other dx.op.binary/unary opcode, and no other call of any kind, is
-// trusted: an unrecognized or malformed call falls through to the caller's
-// fail-closed catch-all instead of silently authorizing propagation.
 bool IsRecognizedPureDxOpCall(std::string_view rhs) noexcept {
   std::uint32_t opcode = 0;
-  if (ParseDxOpBinaryF32(rhs, opcode)) return opcode == 36;  // FMin(a, b)
-  if (ParseDxOpUnaryF32(rhs, opcode)) return opcode == 7;    // Saturate(value)
+  if (ParseDxOpBinaryF32(rhs, opcode)) return opcode == 36;
+  if (ParseDxOpUnaryF32(rhs, opcode)) return opcode == 7;
   return false;
 }
 
@@ -1477,9 +1377,6 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
         DiscardCall discard_call;
         if (!ParseDiscardCall(user.code, discard_call) ||
             discard_call.predicate != value) {
-          // A malformed discard-looking use is not silently ignored: it is
-          // ambiguous visibility evidence and therefore cannot authorize a
-          // Production patch.
           other_output = true;
         } else {
           discard = true;
@@ -1493,9 +1390,6 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
             output.row != 0 || !IsSvTargetSignature(module, output.signature)) {
           other_output = true;
         } else if (output.column == 3) {
-          // The complete alpha use must be unambiguous. A second matching
-          // store (even to the same signature) could represent a distinct
-          // output path, so it is not Production-authorized.
           if (target_alpha) other_output = true;
           target_alpha = true;
         } else if (output.column < 3) {
@@ -1516,9 +1410,6 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
         pending.push_back(user.lhs);
         continue;
       }
-      // No reachable use is implicitly harmless. Calls, stores, branches,
-      // side-effecting instructions, unsupported value producers, and every
-      // other terminal use make the Production authorization ambiguous.
       other_output = true;
     }
     if (visited.size() >= kConsumerTraversalLimit && !pending.empty())
@@ -1536,7 +1427,7 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
   return {FadePrimitiveConsumer::Unknown};
 }
 
-} // namespace
+}
 
 FadePrimitiveDiagnostic AnalyzeFadePrimitiveV1(const std::string& llvm_ir) {
   FadePrimitiveDiagnostic diagnostic;

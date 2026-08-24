@@ -24,37 +24,15 @@ namespace wuwa_tfr::dev {
 
 namespace {
 
-// All state below is protected by g_fade_control_mutex -- deliberately its
-// own mutex, never nested with g_trace_mutex or g_inspection_mutex (see
-// this module's header comment).
 std::mutex g_fade_control_mutex;
 FadeControlAccumulator g_fade_control_accumulator;
-// Strictly additive: captured only after a value already sampled via
-// g_fade_control_accumulator above succeeds; shares its session lifecycle
-// (Start/Stop) and its g_fade_control_mutex, never a separate one.
 FadeControlSnapshotAccumulator g_fade_control_snapshot_accumulator;
 bool g_fade_control_session_enabled = false;
 
-// Fast unlocked check so the Draw-time hook costs nothing when this
-// session didn't opt into tracing -- combined on the hot path with the
-// shared g_manual_capture_session_token (manual_capture_state.hpp) for
-// "is a session even running", so this flag only ever needs to answer "did
-// the current session want tracing". Set once per session, at Start; never
-// touched at Stop -- once the shared token goes to 0, the hot path is
-// already a no-op regardless of this value.
 std::atomic<bool> g_fade_control_enabled_for_session{false};
 
-// UI-thread-only; never touched off that thread.
 bool g_fade_control_pending_enabled = true;
 
-// A pipeline layout's declared CBV ranges for one binding mechanism, for
-// exact (space, register) -> (param, table/binding-relative offset)
-// resolution via descriptor_table_state.hpp's ResolveDescriptorTableCbvSlot.
-// `ranges_truncated` means this layout declared more CBV ranges than
-// kMaxDescriptorRangesPerLayout: since ambiguity can only be ruled out by
-// seeing *every* range, a truncated layout's CBVs for that mechanism are
-// always reported unresolved rather than risking a false "exact" match
-// against an incomplete range list.
 struct LayoutCbvRangeInfo {
   std::vector<DescriptorCbvRangeInfo> ranges;
   bool ranges_truncated = false;
@@ -63,58 +41,20 @@ struct LayoutCbvRangeInfo {
 constexpr std::size_t kMaxTrackedFadeControlLayouts = 4096;
 constexpr std::size_t kMaxDescriptorRangesPerLayout = 256;
 
-// Root-parameter-pushed CBVs: pipeline_layout_param_type::push_descriptors
-// (a single CBV, D3D12 root signature version 1.0) and
-// push_descriptors_with_ranges(_and_flags) (D3D12 root signature version
-// 1.1/1.2 -- see reshade's d3d12_device.cpp
-// invoke_create_and_init_pipeline_layout_event: a real root CBV descriptor
-// is classified as push_descriptors only under root signature 1.0, and as
-// push_descriptors_with_ranges_and_flags under 1.1/1.2, which is what most
-// modern engines -- including Unreal Engine's D3D12 RHI -- actually create).
-// All three forms are populated by the identical push_descriptors runtime
-// event (OnPushTraceDescriptors), so they share the same live-binding
-// lookup: CommandListTrace::root_cbv_bindings.
 std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutCbvRangeInfo,
     wuwa_tfr::TraceLiveHandleKeyHash>
     g_layout_push_cbv_ranges;
 
-// Descriptor-table-backed CBVs: pipeline_layout_param_type::descriptor_table
-// and descriptor_table_with_flags. Live content comes from
-// g_descriptor_table_slots (populated by OnUpdateFadeControlDescriptorTables/
-// OnCopyFadeControlDescriptorTables below) plus the currently bound table
-// for this layout's parameter (CommandListTrace::bound_descriptor_tables).
 std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutCbvRangeInfo,
     wuwa_tfr::TraceLiveHandleKeyHash>
     g_layout_descriptor_cbv_ranges;
 
-// Diagnostic only: pipeline_layout_param_type::push_constants ranges,
-// tracked so that a register which resolves to neither of the two maps
-// above can be positively identified as root-constant-backed rather than
-// left as a generic "unsupported" verdict -- see
-// kFadeControlReasonPushConstantBacked. Root constants are not a Constant
-// Buffer View (no descriptor, no GPU-visible memory, just 32-bit values
-// embedded directly in the command list) and are never sampled here.
 std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutCbvRangeInfo,
     wuwa_tfr::TraceLiveHandleKeyHash>
     g_layout_push_constant_ranges;
 
-// Current content of individual descriptor-table slots, as last written by
-// update_descriptor_tables or propagated by copy_descriptor_tables. Device-
-// level state (these events carry no command_list), so it is not scoped to
-// any CommandListTrace.
 DescriptorSlotTable g_descriptor_table_slots;
 
-// This module's own resource-incarnation tracking, deliberately a separate
-// instance from dev/trace/trace_state.hpp's g_trace_resource_incarnations
-// (which is g_trace_mutex-protected): dev/capture/manual_capture.cpp's
-// StartManualCapture() already establishes g_trace_mutex (outer) ->
-// g_fade_control_mutex (inner) as this codebase's lock order, so the
-// Draw-time sampling path below -- which runs under g_fade_control_mutex --
-// must never acquire g_trace_mutex itself (that would invert the order and
-// risk deadlock). Reusing the SAME TraceIncarnationIndex class (not the
-// same object) still gets the identical handle-reuse safety guarantee
-// dev-wide incarnation tracking is built on, entirely within this module's
-// own lock.
 wuwa_tfr::TraceIncarnationIndex<int> g_fade_control_resource_incarnations;
 
 std::uint64_t CurrentFadeControlResourceIncarnationLocked(
@@ -146,12 +86,6 @@ void OnInitFadeControlResource(device* owner, const resource_desc&,
       {DeviceKey(owner), handle.handle}, 0);
 }
 
-// Records one descriptor_table/descriptor_table_with_flags range as a CBV
-// candidate for exact resolution, or silently drops it (never guessed at)
-// when its shape can't be resolved unambiguously later: a zero or unbounded
-// (UINT32_MAX) count, or (defensively) an array_size other than 1 -- D3D
-// requires array_size == 1 per range (see reshade_api_pipeline.hpp), so this
-// only ever fires for a form this backend cannot actually produce today.
 void AppendDescriptorCbvRange(std::uint32_t param_index,
     const descriptor_range& range,
     std::vector<DescriptorCbvRangeInfo>& ranges, bool& truncated) {
@@ -166,9 +100,6 @@ void AppendDescriptorCbvRange(std::uint32_t param_index,
       range.dx_register_space, range.dx_register_index, range.count});
 }
 
-// Stores `ranges`/`truncated` into `target[key]` only if there is anything
-// to store, respecting the shared per-layout capacity cap (an already-
-// tracked key may always be updated/replaced).
 void StoreLayoutCbvRanges(
     std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutCbvRangeInfo,
         wuwa_tfr::TraceLiveHandleKeyHash>& target,
@@ -188,15 +119,6 @@ void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
   auto active = g_device_activity.Acquire(DeviceKey(owner));
   if (!active) return;
 
-  // Three independent binding mechanisms are recognized, per D3D12's actual
-  // root-parameter types (see this file's g_layout_push_cbv_ranges /
-  // g_layout_descriptor_cbv_ranges / g_layout_push_constant_ranges comments
-  // for exactly which D3D12 root parameter each maps to):
-  //  - push_descriptors, push_descriptors_with_ranges,
-  //    push_descriptors_with_ranges_and_flags -> push CBV ranges.
-  //  - descriptor_table, descriptor_table_with_flags -> descriptor-table
-  //    CBV ranges.
-  //  - push_constants -> diagnostic-only root-constant ranges.
   std::vector<DescriptorCbvRangeInfo> push_ranges;
   std::vector<DescriptorCbvRangeInfo> descriptor_ranges;
   std::vector<DescriptorCbvRangeInfo> push_constant_ranges;
@@ -207,9 +129,6 @@ void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
     const auto& param = params[i];
     switch (param.type) {
       case pipeline_layout_param_type::push_descriptors:
-        // Always exactly one CBV at table-relative offset 0 (D3D12 root
-        // signature version 1.0's translation of a root CBV descriptor --
-        // see d3d12_device.cpp's invoke_create_and_init_pipeline_layout_event).
         AppendDescriptorCbvRange(i, param.push_descriptors, push_ranges,
             push_ranges_truncated);
         break;
@@ -219,9 +138,6 @@ void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
               push_ranges, push_ranges_truncated);
         break;
       case pipeline_layout_param_type::push_descriptors_with_ranges_and_flags:
-        // The form a D3D12 root signature version 1.1/1.2's root CBV
-        // descriptor actually takes -- always exactly one range, at
-        // table-relative offset 0, per the same backend translation code.
         for (std::uint32_t r = 0; r < param.descriptor_table_with_flags.count;
              ++r)
           AppendDescriptorCbvRange(i,
@@ -245,8 +161,6 @@ void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
           push_constant_ranges_truncated = true;
           break;
         }
-        // binding_start is unused for this diagnostic-only purpose (root
-        // constants have no descriptor-table slot concept); left at 0.
         push_constant_ranges.push_back(DescriptorCbvRangeInfo{i, 0,
             param.push_constants.dx_register_space,
             param.push_constants.dx_register_index,
@@ -282,30 +196,10 @@ void OnMapFadeControlBuffer(device* owner, resource resource_handle,
   if (!g_target_process || !owner || resource_handle.handle == 0 || !data ||
       !*data)
     return;
-  // read_only and write_discard are structurally unreachable here: verified
-  // against ReShade's D3D12 buffer Map hook (source/d3d12/d3d12_resource.cpp,
-  // ID3D12Resource_Map), which reports ONLY write_only (the app passed a
-  // non-null, empty D3D12_RANGE -- an explicit "I will not read this"
-  // declaration) or read_write (every other case, including a null
-  // pReadRange). write_only is still real, currently valid, CPU-visible
-  // memory backing a real resource -- the app's declared intent not to read
-  // it has no bearing on whether an external observer safely can; D3D12
-  // requires CPU-visible heaps to support CPU reads regardless of the
-  // upload-only access pattern the app itself intends. This is exactly the
-  // persistent-write-only-upload-buffer case investigated for this tracer:
-  // rejecting it would make every such CBV permanently report not_mapped
-  // even though the pointer is demonstrably safe to read. read_only/
-  // write_discard are kept rejected defensively, since we have no equivalent
-  // evidence for them on this backend.
   if (access != map_access::read_only && access != map_access::read_write &&
       access != map_access::write_only)
     return;
 
-  // The D3D12 buffer Map hook always passes UINT64_MAX for `size` (never the
-  // documented "0 means whole resource" convention some other backends use)
-  // -- resolve the authoritative size from the resource description in
-  // either case rather than trusting a sentinel that would otherwise make
-  // every bounds check below vacuously true.
   std::uint64_t resolved_size = size;
   if (resolved_size == 0 || resolved_size == UINT64_MAX) {
     resolved_size = owner->get_resource_desc(resource_handle).buffer.size;
@@ -334,10 +228,6 @@ void OnDestroyFadeControlResource(device* owner, resource resource_handle) {
     g_fade_control_resource_incarnations.Destroy(
         {DeviceKey(owner), resource_handle.handle});
   }
-  // Scrubs every descriptor-table slot that cached this handle, so a later,
-  // unrelated resource that happens to reuse the same handle value can
-  // never be misattributed to a slot recorded before this destroy -- see
-  // descriptor_table_state.hpp's InvalidateDescriptorTableSlotsForResource.
   InvalidateDescriptorTableSlotsForResource(
       g_descriptor_table_slots, resource_handle.handle);
 }
@@ -405,14 +295,6 @@ FadeControlValueSample Unavailable(std::uint16_t reason) noexcept {
   return FadeControlValueSample{false, 0, reason};
 }
 
-// Strictly additive to the single-value sample above: attempts a bounded
-// byte-window snapshot around `predicate_vector` for a Predicate-role
-// source whose value was JUST successfully read from mapped memory. A
-// no-op unless capturing is active and this exact (key) has not already
-// been captured this session (see FadeControlSnapshotAccumulator::
-// ShouldCapture) -- checked first specifically so an already-satisfied
-// dedup never pays for the window/copy work below. Must be called while
-// g_fade_control_mutex is already held.
 void TryCaptureFadeControlSnapshot(const FadeControlRecordKey& key,
     const FadeControlPipelineIdentity& pipeline_identity,
     std::uint64_t cbv_offset, std::uint32_t predicate_vector,
@@ -436,10 +318,6 @@ void TryCaptureFadeControlSnapshot(const FadeControlRecordKey& key,
   g_fade_control_snapshot_accumulator.Commit(key, record);
 }
 
-// Shared tail of both binding routes below: given a resolved live resource
-// handle + range offset, looks up the currently mapped region (if any),
-// bounds-checks the target 4 bytes, and folds the sample into the bounded
-// aggregate. Must be called while g_fade_control_mutex is already held.
 void ObserveMappedCbvValue(const FadeControlRecordKey& key,
     const FadeControlPipelineIdentity& pipeline_identity,
     std::uint64_t resource_handle, std::uint64_t range_offset,
@@ -473,14 +351,6 @@ void ObserveMappedCbvValue(const FadeControlRecordKey& key,
   }
 }
 
-// A resolved CBV scalar coordinate ready for runtime sampling: whichever
-// canonical source supplied it -- gate-predicate evidence
-// (fade_primitive_detector.hpp) or a matched pre-Fade FMin operand
-// (pre_fade_fmin_analysis.hpp) -- sampling only ever needs this uniform
-// shape. Legacy-row form only: neither canonical source has ever resolved
-// to byte form for any real matched instance (see this project's Step 5/6B
-// corpus audit), and a byte-form source is reported unavailable rather than
-// sampled, matching the scope this sampling infrastructure has always had.
 struct ResolvedCbvSource {
   bool resolved = false;
   std::uint32_t cbuffer_space = 0;
@@ -518,14 +388,6 @@ ResolvedCbvSource FromPreFadeOperand(
   return source;
 }
 
-// Attempts the root/pushed-CBV route: does `source`'s register resolve
-// (unambiguously) among this layout's push_descriptors /
-// push_descriptors_with_ranges / push_descriptors_with_ranges_and_flags CBV
-// ranges, and if so, is that exact (param, binding) currently pushed?
-// Returns true (and has already recorded an observation, available or not)
-// once this route claims the register -- callers must not also attempt the
-// descriptor-table route in that case, even if the live binding itself
-// turned out unresolved/unmapped.
 bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
     FadeControlRecordKey key, const FadeControlPipelineIdentity& pipeline_identity,
     const ResolvedCbvSource& source) {
@@ -555,14 +417,6 @@ bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
   return true;
 }
 
-// Attempts the descriptor-table route: is `source`'s register declared in
-// one of this layout's descriptor_table/descriptor_table_with_flags CBV
-// ranges (unambiguously)? If not, returns false so the caller can still
-// check the push-constant diagnostic classification. Once the register IS
-// claimed by this route, every subsequent "no" (table not bound, dynamic
-// offsets present, slot content unknown, stale resource) reports a
-// distinct, honest unavailable reason rather than guessing, and the
-// function always returns true.
 bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
     FadeControlRecordKey key, const FadeControlPipelineIdentity& pipeline_identity,
     const ResolvedCbvSource& source) {
@@ -594,9 +448,6 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
   const auto content =
       FindDescriptorTableSlot(g_descriptor_table_slots, descriptor_key);
   if (!content) {
-    // The root parameter's table IS bound (unlike the BindingUnresolved
-    // case above) -- this exact slot within it has simply never been
-    // observed via update_descriptor_tables/copy_descriptor_tables.
     g_fade_control_accumulator.Observe(key, pipeline_identity,
         Unavailable(kFadeControlReasonDescriptorUnknown));
     return true;
@@ -616,12 +467,6 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
   return true;
 }
 
-// Diagnostic only: does `source`'s register resolve among this layout's
-// push_constants ranges? Root constants are not a CBV (no descriptor, no
-// GPU-visible memory) and are never sampled -- this exists purely so a real
-// capture can positively identify this exact cause instead of leaving it
-// folded into a generic "unsupported" verdict. See
-// kFadeControlReasonPushConstantBacked.
 bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
     const FadeControlRecordKey& key,
     const FadeControlPipelineIdentity& pipeline_identity,
@@ -640,20 +485,6 @@ bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
   return true;
 }
 
-// Resolves and samples one control role for one Draw, then folds the
-// result into the bounded aggregate. Holds g_fade_control_mutex for the
-// whole binding-resolution + sample + Observe sequence -- it is the only
-// lock touched here (g_inspection_mutex was already released by the caller
-// before this runs; see SampleFadeControlValuesOnDraw). Never acquires
-// g_trace_mutex: see g_fade_control_resource_incarnations' comment for why.
-//
-// `session_id` is the session SampleFadeControlValuesOnDraw captured before
-// doing any of the unlocked work (the inspection cache lookup) leading up
-// to this call. Re-checked against the shared token immediately after
-// acquiring the lock, before any Observe/sample mutation below: without
-// this, a session ending (or a new one starting) in the gap between that
-// capture and this lock acquisition could commit a Draw begun under the
-// old session into whichever session happens to be live now.
 void SampleOneRole(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route,
     const FadeControlPipelineIdentity& pipeline_identity,
@@ -797,11 +628,6 @@ bool WriteFadeControlExport(
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
 
-  // v2: the old "coverage" role is gone -- it never resolved for any real
-  // matched instance (see this project's Step 5/6B investigation) and is
-  // replaced by the two structurally proven pre-Fade FMin operands. A v1
-  // consumer expecting exactly {predicate, coverage} in control_role must
-  // not silently misinterpret v2 data.
   report << "format\twuwa_tfr_manual_fade_control_capture_v2\n";
   report << "capture_type\tmanual_targeted_fade_control_value_trace\n";
   report << "session_id\t" << snapshot.session_id << '\n';
@@ -873,10 +699,6 @@ bool WriteFadeControlExport(
       "\tunavailable_reason_mask\n";
 
   for (const auto& [key, record] : snapshot.records) {
-    // The binding mechanism itself, recorded directly at resolution time
-    // (see FadeControlBindingRoute) -- exactly why a given observation was
-    // or wasn't readable is separately carried, per observation, by
-    // unavailable_reason_mask.
     const char* binding_route =
         key.binding_route == FadeControlBindingRoute::RootPushDescriptors
         ? "root_push_descriptors"
@@ -1047,11 +869,6 @@ void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
   if (!g_fade_control_enabled_for_session.load(std::memory_order_acquire))
     return;
 
-  // Lookup only: the canonical Fade Primitive/gate/pre-Fade analysis, plus
-  // its diagnostic (space, register) enrichment, was already performed once,
-  // at pipeline inspection time (dev/dev_inspection.cpp). g_inspection_mutex
-  // is taken and released here, strictly before g_fade_control_mutex is ever
-  // acquired below (via SampleOneRole) -- never nested with it.
   std::vector<FadeInstanceObservation> instances_copy;
   {
     std::lock_guard lock(g_inspection_mutex);
@@ -1070,9 +887,6 @@ void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
         FadeControlRole::Predicate,
         FromGatePredicateEvidence(observation.instance.gate_predicate),
         session_id);
-    // Only present when this instance also reached a Matched pre-Fade FMin
-    // analysis -- see FadeInstanceObservation's own comment. Absence here
-    // is never sampled as "unresolved": there is no operand to report.
     if (observation.pre_fade) {
       SampleOneRole(trace, route, pipeline_identity, primitive_index,
           FadeControlRole::PreFadeOperandOne,

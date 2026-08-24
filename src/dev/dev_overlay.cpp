@@ -28,10 +28,6 @@ void DrawFadePrimitiveTargetModes() {
           "Dev transparency-filter target modes", ImGuiTreeNodeFlags_DefaultOpen))
     return;
 
-  // g_dev_antifade_runtime is the sole replacement owner (see
-  // dev/dev_runtime.hpp): a second, independent instance of the same
-  // FadePrimitiveRuntime class Production uses. It has no per-hash selection
-  // concept -- when enabled, it evaluates every observed DXIL pixel shader.
   bool enabled = g_dev_antifade_runtime.enabled();
   if (ImGui::Checkbox("Remove Transparency Filter", &enabled))
     g_dev_antifade_runtime.set_enabled(enabled);
@@ -61,19 +57,8 @@ void DrawFadePrimitiveTargetModes() {
   struct DisplayRow {
     std::uint64_t shader_hash = 0;
     std::size_t live_application_psos = 0;
-    // Verified Fade Primitive instances -- independent of whether each one
-    // has patch evidence, patched, or fully prepared; see
-    // dev/dev_inspection.hpp's InspectionRecord.
     std::uint32_t instances = 0;
     std::string consumers;
-    // Instances whose FadeInstanceObservation::pre_fade is present.
-    // TargetDitherBypassResult::instance_evidence -- the source this is
-    // copied from -- only ever contains an instance whose analysis reached
-    // PreFadeFMinStatus::Matched (see its own doc comment), so under the
-    // current contract "has evidence" and "qualifying" are the same state:
-    // there is no separate qualifying count, and no present-but-unmatched
-    // case to report. The adjacency coordinate is diagnostic-only and never
-    // a Production matching criterion.
     std::uint32_t patch_evidence = 0;
     std::string adjacency;
     std::string fail_reasons;

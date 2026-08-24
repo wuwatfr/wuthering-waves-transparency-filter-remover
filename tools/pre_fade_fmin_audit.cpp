@@ -1,19 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
-//
-// Offline regression-analysis tool: scans a directory of dumped
-// `<hash>.original.ll` pixel shaders (the format written by Dev's capture
-// tooling, dev/dev_inspection.cpp's WriteCapture), and reports the canonical
-// pre-Fade FMin analysis (pre_fade_fmin_analysis.hpp) for every already
-// v1-verified Fade Primitive instance found, plus the end-to-end outcome of
-// the canonical Production patch (target_dither_bypass.hpp) for the shader.
-// Never linked into either addon target; Production and Dev runtime behavior
-// do not depend on this tool.
-//
-// Intended for regression analysis after a Wuthering Waves update: verified
-// Fade Primitive population, qualifying pre-Fade FMin coverage, ambiguity and
-// shared-rewrite-range outliers, adjacency distribution, and any new
-// fail-closed shapes.
 
 #include "fade_primitive_detector.hpp"
 #include "pre_fade_fmin_analysis.hpp"
@@ -92,16 +78,11 @@ int main(int argc, char** argv) {
     if (diagnostic.instances.empty()) continue;
     ++shaders_with_primitive;
 
-    // Every operand-1 rewrite range this shader's instances resolve to; two
-    // instances landing on the same range is the multi-instance interference
-    // case Production rejects, so it is reported explicitly.
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> rewrite_ranges;
     for (const wuwa_tfr::FadePrimitiveInstance& instance : diagnostic.instances) {
       ++verified_instances;
       wuwa_tfr::PreFadeFMinAnalysis analysis =
           wuwa_tfr::AnalyzePreFadeFMinForInstance(ir, instance);
-      // Audit-only enrichment, the same call Dev makes; Production's patch
-      // path deliberately does not walk module metadata for this.
       wuwa_tfr::ResolvePreFadeCbvRegisters(ir, instance, analysis);
       ++status_distribution[wuwa_tfr::PreFadeFMinStatusName(analysis.status)];
       if (wuwa_tfr::PreFadeFMinAnalysisIsStructurallyComplete(analysis)) {
@@ -140,8 +121,6 @@ int main(int argc, char** argv) {
       shared_rewrite_range_shaders.push_back(hash);
     }
 
-    // End-to-end: exactly what Production does, including the strict
-    // post-patch re-verification.
     const wuwa_tfr::TargetDitherBypassResult patched =
         wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir);
     if (patched.success) {

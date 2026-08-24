@@ -10,9 +10,6 @@
 
 namespace wuwa_tfr {
 
-// Serializes create/init/destroy callbacks against teardown for a logical
-// graphics device. Bind callbacks deliberately do not use this gate; pipeline
-// replacement state provides their shorter reader lifetime protection.
 template <typename DeviceId>
 class DeviceActivityState {
  public:
