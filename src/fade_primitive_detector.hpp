@@ -52,11 +52,20 @@ struct FadePrimitiveGatePredicateEvidence {
   bool legacy_form = false;   // structural: legacy row form vs byte form
 
   // The createHandle's own literal range id -- raw material for a later,
-  // separate !dx.resources walk (a predicate counterpart to
-  // pre_fade_fmin_analysis.hpp's ResolvePreFadeCbvRegisters). Never
-  // resolved to (space, register) here.
+  // separate !dx.resources walk (pre_fade_fmin_analysis.hpp's
+  // ResolveGatePredicateCbvRegister). Never resolved to (space, register)
+  // here -- that walk costs several passes over the whole IR text and must
+  // never enter the matcher's own acceptance path.
   bool range_id_resolved = false;
   std::uint32_t range_id = 0;
+
+  // Diagnostic-only, and populated only by an explicit
+  // pre_fade_fmin_analysis.hpp::ResolveGatePredicateCbvRegister() call --
+  // never by the canonical matcher, which does not walk module metadata.
+  // Mirrors PreFadeOperandSource::register_resolved.
+  bool register_resolved = false;
+  std::uint32_t cbuffer_space = 0;
+  std::uint32_t cbuffer_register = 0;
 
   bool row_resolved = false;          // diagnostic-only, legacy form
   std::uint32_t row = 0;

@@ -9,10 +9,12 @@
 // (fade_primitive_runtime_observer.hpp) that InspectionObserver() implements
 // and dev_runtime.cpp's InitializeDevRuntime() installs on
 // g_dev_antifade_runtime. This module runs no DXC of its own and no
-// independent Fade Primitive or pre-Fade matcher; the only analysis it still
-// performs synchronously, on the observation's original_ir, is genuinely
-// Dev-only: spatial/dither diagnostics, the fade-control static source
-// analysis, and the shader-dump file write.
+// independent Fade Primitive, pre-Fade, or gate-predicate matcher/analyzer;
+// the only analysis it still performs synchronously, on the observation's
+// original_ir, is genuinely Dev-only (spatial/dither diagnostics, the
+// shader-dump file write) plus diagnostic (space, register) enrichment of
+// canonical evidence the matcher already extracted -- see OnShaderPrepared's
+// own comment for exactly which calls those are.
 //
 // DXIL pixel-shader identification is not this module's concern either: it
 // is delivered here as an already-resolved hash on the observation, and
@@ -31,7 +33,6 @@
 
 #include <reshade.hpp>
 
-#include "dev/capture/fade_control_analysis.hpp"
 #include "dxil_dither_diagnostic.hpp"
 #include "fade_primitive_detector.hpp"
 #include "fade_primitive_runtime_observer.hpp"
@@ -46,6 +47,10 @@ namespace wuwa_tfr::dev {
 // instance that was verified but never reached a Matched pre-Fade analysis
 // (e.g. the shader failed closed on a later instance, or on a later
 // structural check) carries std::nullopt here, never a synthesized failure.
+// `instance.gate_predicate` and (when pre_fade is present)
+// `pre_fade->operand_one`/`operand_two` are enriched in place with
+// (space, register), when resolvable, by OnShaderPrepared -- see its own
+// comment.
 struct FadeInstanceObservation {
   wuwa_tfr::FadePrimitiveInstance instance;
   std::optional<wuwa_tfr::PreFadeFMinAnalysis> pre_fade;
@@ -58,12 +63,16 @@ struct FadeInstanceObservation {
 // is inferred from another, and none is fabricated when its own upstream
 // stage did not reach it.
 struct InspectionRecord {
-  // ---- from the canonical ShaderPreparationObservation, unmodified ----
+  // ---- from the canonical ShaderPreparationObservation, unmodified except
+  // for each instance's own diagnostic (space, register) enrichment ----
   bool inspection_succeeded = false;
   std::string inspection_error;
   std::size_t bytecode_size = 0;
   // One entry per wuwa_tfr::FadePrimitiveDiagnostic::instances element from
-  // the observation, same order -- fade_control below shares that order.
+  // the observation, same order. The runtime sampling channel
+  // (dev/capture/fade_control_runtime.cpp) reads gate-predicate and
+  // pre-Fade-operand sources directly from here -- there is no separate
+  // control-source vector.
   std::vector<FadeInstanceObservation> fade_instances;
   bool patch_succeeded = false;
   std::string patch_failure;
@@ -72,10 +81,6 @@ struct InspectionRecord {
 
   // ---- genuinely Dev-only, computed synchronously from original_ir ----
   wuwa_tfr::SpatialDitherDiagnostic dither;
-  // Diagnostic-only static control-source analysis (dev/capture/
-  // fade_control_analysis.hpp), same order as fade_instances. Never affects
-  // Production matching or patch eligibility.
-  std::vector<FadeControlInstanceSources> fade_control;
   bool dumped = false;
 };
 

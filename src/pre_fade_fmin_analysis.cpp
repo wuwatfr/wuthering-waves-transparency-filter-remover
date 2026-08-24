@@ -609,75 +609,17 @@ bool FindMetadataDefinition(
   return found;
 }
 
-// !dx.resources = !{ !SRVs, !UAVs, !CBVs, !Samplers }; !CBVs is a list of
-// refs to 8-field CBuffer tuples: {ID, GV, name, space, register, range
-// size, cbuffer size, tag}. Best-effort, diagnostic-only: any ambiguity
-// (duplicate/missing metadata, more than one entry matching range_id) simply
-// leaves the caller's source.register_resolved false.
-void ResolveCbvRangeIdBestEffort(
-    const std::string& llvm_ir, std::uint32_t range_id, PreFadeOperandSource& source) {
-  std::uint32_t resources_id = 0;
-  bool found_resources_line = false;
-  for (std::size_t start = 0; start <= llvm_ir.size();) {
-    const std::size_t newline = llvm_ir.find('\n', start);
-    const std::size_t end = newline == std::string::npos ? llvm_ir.size() : newline;
-    const std::string_view line = Trim(StripComment(
-        std::string_view(llvm_ir.data() + start, end - start)));
-    constexpr std::string_view prefix = "!dx.resources = !{";
-    if (line.starts_with(prefix) && !line.empty() && line.back() == '}') {
-      if (found_resources_line) return;
-      const std::size_t brace = line.find('{');
-      std::vector<std::string_view> fields;
-      if (brace == std::string_view::npos || !SplitMetadataFields(line.substr(brace), fields) ||
-          fields.size() != 1 || !ParseMetadataRef(fields[0], resources_id))
-        return;
-      found_resources_line = true;
-    }
-    if (newline == std::string::npos) break;
-    start = newline + 1;
-  }
-  if (!found_resources_line) return;
-
-  std::vector<std::string_view> resource_group_fields;
-  if (!FindMetadataDefinition(llvm_ir, resources_id, resource_group_fields) ||
-      resource_group_fields.size() != 4)
-    return;
-  const std::string_view cbv_list_field = resource_group_fields[2];
-  if (Trim(cbv_list_field) == "null") return;
-  std::uint32_t cbv_list_id = 0;
-  if (!ParseMetadataRef(cbv_list_field, cbv_list_id)) return;
-
-  std::vector<std::string_view> cbv_refs;
-  if (!FindMetadataDefinition(llvm_ir, cbv_list_id, cbv_refs)) return;
-
-  bool matched = false;
-  std::uint32_t space = 0, reg = 0;
-  for (const std::string_view ref : cbv_refs) {
-    std::uint32_t entry_id = 0;
-    if (!ParseMetadataRef(ref, entry_id)) return;
-    std::vector<std::string_view> entry_fields;
-    if (!FindMetadataDefinition(llvm_ir, entry_id, entry_fields) || entry_fields.size() < 5)
-      return;
-    std::uint32_t entry_range_id = 0;
-    if (!ParseTypedU32(entry_fields[0], entry_range_id)) return;
-    if (entry_range_id != range_id) continue;
-    if (matched) return;  // ambiguous
-    if (!ParseTypedU32(entry_fields[3], space) || !ParseTypedU32(entry_fields[4], reg)) return;
-    matched = true;
-  }
-  if (!matched) return;
-  source.register_resolved = true;
-  source.cbuffer_space = space;
-  source.cbuffer_register = reg;
-}
-
 void ResolveRegisterBestEffort(
     const ParsedFunction& function, const std::string& llvm_ir, PreFadeOperandSource& source) {
   const FunctionLine* handle_definition = Definition(function, source.handle_value);
   if (!handle_definition) return;
   std::uint32_t range_id = 0;
   if (!ParseCreateHandleRangeId(handle_definition->rhs, range_id)) return;
-  ResolveCbvRangeIdBestEffort(llvm_ir, range_id, source);
+  const CbvRegisterBinding binding = ResolveCbvRangeId(llvm_ir, range_id);
+  if (!binding.resolved) return;
+  source.register_resolved = true;
+  source.cbuffer_space = binding.cbuffer_space;
+  source.cbuffer_register = binding.cbuffer_register;
 }
 
 // ---------- phi re-derivation (independent of target_dither_bypass.cpp) ----------
@@ -855,6 +797,75 @@ bool PreFadeFMinProvesNoQualifyingCandidate(
       analysis.qualifying_fmin_count == 0 && !analysis.success;
 }
 
+// !dx.resources = !{ !SRVs, !UAVs, !CBVs, !Samplers }; !CBVs is a list of
+// refs to 8-field CBuffer tuples: {ID, GV, name, space, register, range
+// size, cbuffer size, tag}. Best-effort, diagnostic-only: any ambiguity
+// (duplicate/missing metadata, more than one entry matching range_id) simply
+// leaves the result unresolved. The single, shared implementation of this
+// walk -- both ResolvePreFadeCbvRegisters (for a matched FMin's two
+// operands) and ResolveGatePredicateCbvRegister (for a verified instance's
+// gate-predicate evidence, fade_primitive_detector.hpp) call this, rather
+// than each maintaining an independent copy.
+CbvRegisterBinding ResolveCbvRangeId(
+    const std::string& llvm_ir, std::uint32_t range_id) {
+  CbvRegisterBinding result;
+
+  std::uint32_t resources_id = 0;
+  bool found_resources_line = false;
+  for (std::size_t start = 0; start <= llvm_ir.size();) {
+    const std::size_t newline = llvm_ir.find('\n', start);
+    const std::size_t end = newline == std::string::npos ? llvm_ir.size() : newline;
+    const std::string_view line = Trim(StripComment(
+        std::string_view(llvm_ir.data() + start, end - start)));
+    constexpr std::string_view prefix = "!dx.resources = !{";
+    if (line.starts_with(prefix) && !line.empty() && line.back() == '}') {
+      if (found_resources_line) return {};
+      const std::size_t brace = line.find('{');
+      std::vector<std::string_view> fields;
+      if (brace == std::string_view::npos || !SplitMetadataFields(line.substr(brace), fields) ||
+          fields.size() != 1 || !ParseMetadataRef(fields[0], resources_id))
+        return {};
+      found_resources_line = true;
+    }
+    if (newline == std::string::npos) break;
+    start = newline + 1;
+  }
+  if (!found_resources_line) return result;
+
+  std::vector<std::string_view> resource_group_fields;
+  if (!FindMetadataDefinition(llvm_ir, resources_id, resource_group_fields) ||
+      resource_group_fields.size() != 4)
+    return result;
+  const std::string_view cbv_list_field = resource_group_fields[2];
+  if (Trim(cbv_list_field) == "null") return result;
+  std::uint32_t cbv_list_id = 0;
+  if (!ParseMetadataRef(cbv_list_field, cbv_list_id)) return result;
+
+  std::vector<std::string_view> cbv_refs;
+  if (!FindMetadataDefinition(llvm_ir, cbv_list_id, cbv_refs)) return result;
+
+  bool matched = false;
+  std::uint32_t space = 0, reg = 0;
+  for (const std::string_view ref : cbv_refs) {
+    std::uint32_t entry_id = 0;
+    if (!ParseMetadataRef(ref, entry_id)) return {};
+    std::vector<std::string_view> entry_fields;
+    if (!FindMetadataDefinition(llvm_ir, entry_id, entry_fields) || entry_fields.size() < 5)
+      return {};
+    std::uint32_t entry_range_id = 0;
+    if (!ParseTypedU32(entry_fields[0], entry_range_id)) return {};
+    if (entry_range_id != range_id) continue;
+    if (matched) return {};  // ambiguous
+    if (!ParseTypedU32(entry_fields[3], space) || !ParseTypedU32(entry_fields[4], reg)) return {};
+    matched = true;
+  }
+  if (!matched) return result;
+  result.resolved = true;
+  result.cbuffer_space = space;
+  result.cbuffer_register = reg;
+  return result;
+}
+
 void ResolvePreFadeCbvRegisters(const std::string& llvm_ir,
     const FadePrimitiveInstance& instance, PreFadeFMinAnalysis& analysis) {
   if (analysis.status != PreFadeFMinStatus::Matched) return;
@@ -867,6 +878,16 @@ void ResolvePreFadeCbvRegisters(const std::string& llvm_ir,
   if (!function.complete) return;
   ResolveRegisterBestEffort(function, llvm_ir, analysis.operand_one);
   ResolveRegisterBestEffort(function, llvm_ir, analysis.operand_two);
+}
+
+void ResolveGatePredicateCbvRegister(
+    const std::string& llvm_ir, FadePrimitiveGatePredicateEvidence& evidence) {
+  if (!evidence.resolved || !evidence.range_id_resolved) return;
+  const CbvRegisterBinding binding = ResolveCbvRangeId(llvm_ir, evidence.range_id);
+  if (!binding.resolved) return;
+  evidence.register_resolved = true;
+  evidence.cbuffer_space = binding.cbuffer_space;
+  evidence.cbuffer_register = binding.cbuffer_register;
 }
 
 bool VerifyPreFadeFMinOperandOneRewritten(const std::string& patched_llvm_ir,

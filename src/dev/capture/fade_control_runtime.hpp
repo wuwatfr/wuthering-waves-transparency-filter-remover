@@ -2,14 +2,18 @@
 // Copyright (C) 2026 WuwaTFR contributors
 //
 // Dev-only, investigation-only: the ReShade-facing half of the targeted
-// Fade control-value tracer. Layers on top of dev/capture/
-// fade_control_analysis.* (static DXIL source identity) and
-// dev/capture/fade_control_state.* (bounded aggregation) to answer one
-// question -- does the same verified Fade Primitive receive distinguishable
-// runtime control values under camera-proximity fade vs. scripted/animation
-// invisibility? It does not implement, and must never be treated as
-// evidence for, any Production runtime switching, conditional patching, or
-// matcher/heuristic change.
+// Fade control-value tracer. Samples runtime CBV values for the three roles
+// dev/dev_inspection.cpp already resolved statically, once, at pipeline
+// inspection time -- the verified instance's gate-predicate evidence
+// (fade_primitive_detector.hpp) and, when the instance also reached a
+// Matched pre-Fade FMin, that FMin's two direct-scalar-CBV operands
+// (pre_fade_fmin_analysis.hpp). This module performs no DXIL analysis of
+// its own; layered on dev/capture/fade_control_state.* (bounded aggregation)
+// to answer one question -- does the same verified Fade Primitive receive
+// distinguishable runtime control values under camera-proximity fade vs.
+// scripted/animation invisibility? It does not implement, and must never be
+// treated as evidence for, any Production runtime switching, conditional
+// patching, or matcher/heuristic change.
 //
 // value_observation semantics (repeated verbatim in every export's
 // metadata; read this before trusting any sampled value):

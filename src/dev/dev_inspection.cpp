@@ -140,10 +140,21 @@ class InspectionObserverImpl final : public wuwa_tfr::FadePrimitiveRuntimeObserv
     if (observation.inspection_succeeded && observation.original_ir) {
       const std::string& original_ir = *observation.original_ir;
       record.dither = wuwa_tfr::AnalyzeSpatialDitherDiagnostic(original_ir);
-      // Diagnostic-only; never influences fade_instances or patch
-      // eligibility above.
-      record.fade_control = AnalyzeFadeControlSources(
-          original_ir, observation.fade_primitive);
+
+      // Diagnostic-only (space, register) enrichment of canonical evidence
+      // the matcher itself already extracted -- never a second Fade
+      // Primitive/gate/pre-Fade analysis pass, and never influences
+      // fade_instances' presence/absence or patch eligibility above. The
+      // shared !dx.resources walk (pre_fade_fmin_analysis.hpp's
+      // ResolveCbvRangeId) is the single implementation both calls use.
+      for (auto& fade_instance : record.fade_instances) {
+        wuwa_tfr::ResolveGatePredicateCbvRegister(
+            original_ir, fade_instance.instance.gate_predicate);
+        if (fade_instance.pre_fade) {
+          wuwa_tfr::ResolvePreFadeCbvRegisters(
+              original_ir, fade_instance.instance, *fade_instance.pre_fade);
+        }
+      }
 
       if (record.dither.discard_calls != 0)
         g_discard_shader_count.fetch_add(1, std::memory_order_relaxed);

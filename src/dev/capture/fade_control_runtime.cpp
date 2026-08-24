@@ -473,6 +473,51 @@ void ObserveMappedCbvValue(const FadeControlRecordKey& key,
   }
 }
 
+// A resolved CBV scalar coordinate ready for runtime sampling: whichever
+// canonical source supplied it -- gate-predicate evidence
+// (fade_primitive_detector.hpp) or a matched pre-Fade FMin operand
+// (pre_fade_fmin_analysis.hpp) -- sampling only ever needs this uniform
+// shape. Legacy-row form only: neither canonical source has ever resolved
+// to byte form for any real matched instance (see this project's Step 5/6B
+// corpus audit), and a byte-form source is reported unavailable rather than
+// sampled, matching the scope this sampling infrastructure has always had.
+struct ResolvedCbvSource {
+  bool resolved = false;
+  std::uint32_t cbuffer_space = 0;
+  std::uint32_t cbuffer_register = 0;
+  std::uint32_t vector_index = 0;
+  std::uint32_t component = 0;
+};
+
+ResolvedCbvSource FromGatePredicateEvidence(
+    const wuwa_tfr::FadePrimitiveGatePredicateEvidence& evidence) {
+  ResolvedCbvSource source;
+  if (!evidence.resolved || !evidence.legacy_form ||
+      !evidence.register_resolved || !evidence.row_resolved ||
+      !evidence.component_resolved)
+    return source;
+  source.resolved = true;
+  source.cbuffer_space = evidence.cbuffer_space;
+  source.cbuffer_register = evidence.cbuffer_register;
+  source.vector_index = evidence.row;
+  source.component = evidence.component;
+  return source;
+}
+
+ResolvedCbvSource FromPreFadeOperand(
+    const wuwa_tfr::PreFadeOperandSource& operand) {
+  ResolvedCbvSource source;
+  if (!operand.resolved || !operand.legacy_form || !operand.register_resolved ||
+      !operand.row_resolved || !operand.component_resolved)
+    return source;
+  source.resolved = true;
+  source.cbuffer_space = operand.cbuffer_space;
+  source.cbuffer_register = operand.cbuffer_register;
+  source.vector_index = operand.row;
+  source.component = operand.component;
+  return source;
+}
+
 // Attempts the root/pushed-CBV route: does `source`'s register resolve
 // (unambiguously) among this layout's push_descriptors /
 // push_descriptors_with_ranges / push_descriptors_with_ranges_and_flags CBV
@@ -483,7 +528,7 @@ void ObserveMappedCbvValue(const FadeControlRecordKey& key,
 // turned out unresolved/unmapped.
 bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
     FadeControlRecordKey key, const FadeControlPipelineIdentity& pipeline_identity,
-    const FadeControlSource& source) {
+    const ResolvedCbvSource& source) {
   const auto layout_it = g_layout_push_cbv_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
   if (layout_it == g_layout_push_cbv_ranges.end() ||
@@ -520,7 +565,7 @@ bool TrySampleRootPushDescriptorsRoute(const CommandListTrace& trace,
 // function always returns true.
 bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
     FadeControlRecordKey key, const FadeControlPipelineIdentity& pipeline_identity,
-    const FadeControlSource& source) {
+    const ResolvedCbvSource& source) {
   const auto layout_it = g_layout_descriptor_cbv_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
   if (layout_it == g_layout_descriptor_cbv_ranges.end() ||
@@ -580,7 +625,7 @@ bool TrySampleDescriptorTableRoute(const CommandListTrace& trace,
 bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
     const FadeControlRecordKey& key,
     const FadeControlPipelineIdentity& pipeline_identity,
-    const FadeControlSource& source) {
+    const ResolvedCbvSource& source) {
   const auto layout_it = g_layout_push_constant_ranges.find(
       wuwa_tfr::TraceLiveHandleKey{trace.device, trace.bound_layout});
   if (layout_it == g_layout_push_constant_ranges.end() ||
@@ -613,7 +658,7 @@ void SampleOneRole(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route,
     const FadeControlPipelineIdentity& pipeline_identity,
     std::uint32_t primitive_index, FadeControlRole role,
-    const FadeControlSource& source, std::uint64_t session_id) {
+    const ResolvedCbvSource& source, std::uint64_t session_id) {
   FadeControlRecordKey key;
   key.route = route;
   key.primitive_index = primitive_index;
@@ -752,7 +797,12 @@ bool WriteFadeControlExport(
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
 
-  report << "format\twuwa_tfr_manual_fade_control_capture_v1\n";
+  // v2: the old "coverage" role is gone -- it never resolved for any real
+  // matched instance (see this project's Step 5/6B investigation) and is
+  // replaced by the two structurally proven pre-Fade FMin operands. A v1
+  // consumer expecting exactly {predicate, coverage} in control_role must
+  // not silently misinterpret v2 data.
+  report << "format\twuwa_tfr_manual_fade_control_capture_v2\n";
   report << "capture_type\tmanual_targeted_fade_control_value_trace\n";
   report << "session_id\t" << snapshot.session_id << '\n';
   report << "record_count\t" << snapshot.records.size() << '\n';
@@ -772,9 +822,13 @@ bool WriteFadeControlExport(
       "control_role_plus_proven_static_source_plus_resolved_runtime_cbv_"
       "binding\n";
   report << "control_source_semantics\t"
-      "predicate_is_the_value_gating_entry_to_the_fade_arm_coverage_is_"
-      "the_non_identity_fade_value_itself_both_structurally_proven_from_"
-      "dxil_or_absent\n";
+      "predicate_is_the_cbv_value_gating_entry_to_the_fade_arm_"
+      "pre_fade_operand_one_is_the_matched_pre_fade_fmins_first_operand_"
+      "the_exact_value_productions_patch_rewrites_to_1_0_"
+      "pre_fade_operand_two_is_that_same_fmins_second_operand_left_"
+      "byte_identical_by_the_patch_all_three_structurally_proven_from_"
+      "dxil_or_absent_pre_fade_operand_one_two_are_only_ever_present_when_"
+      "this_instance_also_reached_a_matched_pre_fade_fmin_analysis\n";
   report << "resolved_binding_scope\t"
       "all_five_d3d12_cbv_forms_resolved_push_descriptors_push_descriptors_"
       "with_ranges_push_descriptors_with_ranges_and_flags_descriptor_table_"
@@ -841,7 +895,9 @@ bool WriteFadeControlExport(
            << '\t' << Hex64(key.route.pass_fingerprint) << '\t'
            << key.primitive_index << '\t'
            << (key.role == FadeControlRole::Predicate ? "predicate"
-                                                        : "coverage")
+                  : key.role == FadeControlRole::PreFadeOperandOne
+                      ? "pre_fade_operand_one"
+                      : "pre_fade_operand_two")
            << '\t' << key.cbuffer_space << '\t' << key.cbuffer_register
            << '\t' << key.vector_index << '\t' << key.component << '\t'
            << binding_route << '\t' << key.runtime_resource_incarnation
@@ -911,7 +967,7 @@ bool WriteFadeControlSnapshotExport(
       "synchronization\n";
   report << "scope\t"
       "predicate_role_sources_only_that_already_successfully_resolved_and_"
-      "sampled_via_manual_fade_controls_tsv_coverage_sources_and_"
+      "sampled_via_manual_fade_controls_tsv_pre_fade_operand_sources_and_"
       "unavailable_predicates_are_never_snapshotted\n";
   report << "dedup_policy\t"
       "at_most_one_snapshot_per_unique_route_primitive_control_role_static_"
@@ -991,27 +1047,40 @@ void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
   if (!g_fade_control_enabled_for_session.load(std::memory_order_acquire))
     return;
 
-  // Lookup only: the DXIL analysis was already performed once, at pipeline
-  // inspection time (dev/dev_inspection.cpp). g_inspection_mutex is taken
-  // and released here, strictly before g_fade_control_mutex is ever
+  // Lookup only: the canonical Fade Primitive/gate/pre-Fade analysis, plus
+  // its diagnostic (space, register) enrichment, was already performed once,
+  // at pipeline inspection time (dev/dev_inspection.cpp). g_inspection_mutex
+  // is taken and released here, strictly before g_fade_control_mutex is ever
   // acquired below (via SampleOneRole) -- never nested with it.
-  std::vector<FadeControlInstanceSources> sources_copy;
+  std::vector<FadeInstanceObservation> instances_copy;
   {
     std::lock_guard lock(g_inspection_mutex);
     const auto it = g_inspections.find(pipeline.shader_hash);
-    if (it == g_inspections.end() || it->second.fade_control.empty()) return;
-    sources_copy = it->second.fade_control;
+    if (it == g_inspections.end() || it->second.fade_instances.empty()) return;
+    instances_copy = it->second.fade_instances;
   }
 
   const FadeControlPipelineIdentity pipeline_identity{pipeline.device,
       pipeline.application_pipeline, pipeline.incarnation_id,
       pipeline.context_hash, pipeline.shader_hash};
-  for (std::size_t i = 0; i < sources_copy.size(); ++i) {
+  for (std::size_t i = 0; i < instances_copy.size(); ++i) {
     const auto primitive_index = static_cast<std::uint32_t>(i);
+    const auto& observation = instances_copy[i];
     SampleOneRole(trace, route, pipeline_identity, primitive_index,
-        FadeControlRole::Predicate, sources_copy[i].predicate, session_id);
-    SampleOneRole(trace, route, pipeline_identity, primitive_index,
-        FadeControlRole::Coverage, sources_copy[i].coverage, session_id);
+        FadeControlRole::Predicate,
+        FromGatePredicateEvidence(observation.instance.gate_predicate),
+        session_id);
+    // Only present when this instance also reached a Matched pre-Fade FMin
+    // analysis -- see FadeInstanceObservation's own comment. Absence here
+    // is never sampled as "unresolved": there is no operand to report.
+    if (observation.pre_fade) {
+      SampleOneRole(trace, route, pipeline_identity, primitive_index,
+          FadeControlRole::PreFadeOperandOne,
+          FromPreFadeOperand(observation.pre_fade->operand_one), session_id);
+      SampleOneRole(trace, route, pipeline_identity, primitive_index,
+          FadeControlRole::PreFadeOperandTwo,
+          FromPreFadeOperand(observation.pre_fade->operand_two), session_id);
+    }
   }
 }
 

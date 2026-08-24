@@ -76,12 +76,6 @@ add_executable(target_dither_bypass_tests
   src/fade_primitive_detector.cpp)
 target_include_directories(target_dither_bypass_tests PRIVATE src)
 
-add_executable(fade_control_analysis_tests
-  tests/test_fade_control_analysis.cpp
-  src/dev/capture/fade_control_analysis.cpp
-  src/fade_primitive_detector.cpp)
-target_include_directories(fade_control_analysis_tests PRIVATE src)
-
 add_executable(fade_control_state_tests
   tests/test_fade_control_state.cpp
   src/dev/capture/fade_control_state.cpp)
@@ -123,7 +117,6 @@ add_test(NAME dxil_dither_diagnostic_tests COMMAND dxil_dither_diagnostic_tests)
 add_test(NAME fade_primitive_detector_tests COMMAND fade_primitive_detector_tests)
 add_test(NAME pre_fade_fmin_analysis_tests COMMAND pre_fade_fmin_analysis_tests)
 add_test(NAME target_dither_bypass_tests COMMAND target_dither_bypass_tests)
-add_test(NAME fade_control_analysis_tests COMMAND fade_control_analysis_tests)
 add_test(NAME fade_control_state_tests COMMAND fade_control_state_tests)
 add_test(NAME descriptor_table_state_tests COMMAND descriptor_table_state_tests)
 add_test(NAME fade_control_snapshot_tests COMMAND fade_control_snapshot_tests)
@@ -154,7 +147,6 @@ if(WIN32)
           src/fade_primitive_runtime.cpp
           src/dxil_dither_diagnostic.cpp
           src/dev/capture/descriptor_table_state.cpp
-          src/dev/capture/fade_control_analysis.cpp
           src/dev/capture/fade_control_runtime.cpp
           src/dev/capture/fade_control_snapshot.cpp
           src/dev/capture/fade_control_state.cpp

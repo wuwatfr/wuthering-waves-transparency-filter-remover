@@ -130,6 +130,26 @@ bool PreFadeFMinAnalysisIsStructurallyComplete(
 bool PreFadeFMinProvesNoQualifyingCandidate(
     const PreFadeFMinAnalysis& analysis) noexcept;
 
+// A resolved (space, register) binding for one !dx.resources CBuffer range
+// id, or an explicitly unresolved result -- ambiguous/missing metadata is
+// never guessed. Diagnostic-only: never part of Production matching.
+struct CbvRegisterBinding {
+  bool resolved = false;
+  std::uint32_t cbuffer_space = 0;
+  std::uint32_t cbuffer_register = 0;
+};
+
+// Resolves one createHandle's literal range id to its declared (space,
+// register) via the module's !dx.resources CBuffer metadata list. The
+// single, shared implementation of this walk: both ResolvePreFadeCbvRegisters
+// and ResolveGatePredicateCbvRegister below call this rather than each
+// maintaining an independent metadata parser. Requires a unique !dx.resources
+// line, a unique CBV list, and a unique entry whose ID field equals
+// `range_id`; any ambiguity or missing metadata leaves the result unresolved
+// rather than guessed.
+CbvRegisterBinding ResolveCbvRangeId(
+    const std::string& llvm_ir, std::uint32_t range_id);
+
 // Diagnostic enrichment, for Dev reporting and the offline audit only: fills
 // in `operand_one`/`operand_two`'s cbuffer_space/cbuffer_register from
 // !dx.resources when they can be resolved unambiguously, leaving
@@ -142,6 +162,16 @@ bool PreFadeFMinProvesNoQualifyingCandidate(
 // else leaves it untouched.
 void ResolvePreFadeCbvRegisters(const std::string& llvm_ir,
     const FadePrimitiveInstance& instance, PreFadeFMinAnalysis& analysis);
+
+// Diagnostic enrichment, for Dev reporting only: fills in a verified
+// instance's gate-predicate evidence (fade_primitive_detector.hpp)
+// cbuffer_space/cbuffer_register from the same !dx.resources walk above,
+// using the range id the matcher's own evidence extraction already
+// recorded -- no function re-location or handle re-derivation needed here,
+// unlike ResolvePreFadeCbvRegisters. `evidence` must have `resolved` and
+// `range_id_resolved` both true; anything else leaves it untouched.
+void ResolveGatePredicateCbvRegister(
+    const std::string& llvm_ir, FadePrimitiveGatePredicateEvidence& evidence);
 
 // Post-patch proof that the intended rewrite -- and only it -- happened.
 // `matched` must be a Matched analysis of the *pre-patch* IR, and

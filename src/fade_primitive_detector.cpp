@@ -436,14 +436,16 @@ bool ParseConditionalBranch(
 // ---- best-effort gate-predicate evidence (diagnostic only; see
 // FadePrimitiveGatePredicateEvidence's own comment) ----
 //
-// Structural parsers for the exact same three DXIL call shapes
-// pre_fade_fmin_analysis.hpp's ResolveDirectOrigin and
-// dev/capture/fade_control_analysis.cpp's ResolveControlSource already
-// recognize for other purposes. Deliberately not shared with either: this
-// file must never depend on Dev-only code, and depending on the canonical
-// shared analyzer here would pull FMin-operand-specific assumptions into
-// the matcher's own gate-verification path. Every literal-value coordinate
-// below is diagnostic-only -- see the per-field comments -- and a false
+// Structural parsers for the same DXIL call shapes
+// pre_fade_fmin_analysis.hpp's ResolveDirectOrigin recognizes for the FMin
+// operands. Deliberately not shared with it: this file must never depend
+// on pre_fade_fmin_analysis.hpp, and depending on it here would pull
+// FMin-operand-specific assumptions into the matcher's own gate-
+// verification path. (space, register) resolution for the range id these
+// parsers extract is the one part that IS shared -- see
+// pre_fade_fmin_analysis.hpp's ResolveGatePredicateCbvRegister, called
+// later by Dev, never from here. Every literal-value coordinate below is
+// diagnostic-only -- see the per-field comments -- and a false
 // return only ever leaves a coordinate unavailable, never disqualifies an
 // otherwise structurally valid call.
 

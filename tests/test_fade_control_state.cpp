@@ -189,7 +189,7 @@ int main() {
     accumulator.Observe(MakeKey(1, /*primitive_index=*/1), pipeline,
         Available(1.0f));  // distinct primitive
     accumulator.Observe(
-        MakeKey(1, 0, FadeControlRole::Coverage), pipeline,
+        MakeKey(1, 0, FadeControlRole::PreFadeOperandOne), pipeline,
         Available(1.0f));  // distinct role
     accumulator.Observe(
         MakeKey(1, 0, FadeControlRole::Predicate, /*cbuffer_space=*/1),

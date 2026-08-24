@@ -21,14 +21,23 @@
 #include <utility>
 #include <vector>
 
-#include "dev/capture/fade_control_analysis.hpp"
 #include "trace_submission_identity.hpp"
 
 namespace wuwa_tfr::dev {
 
+// Predicate is the CBV value gating entry to the Fade arm (the matcher's
+// own gate-predicate evidence, fade_primitive_detector.hpp). PreFadeOperand
+// One/Two are the two direct-scalar-CBV operands of the verified instance's
+// matched pre-Fade FMin (pre_fade_fmin_analysis.hpp) -- the values Production
+// itself reads/rewrites, structurally proven. There is no single "coverage"
+// source: an earlier Dev-only analyzer modeled one, but it resolved to
+// neither operand for any real matched instance (its own single-CBV-load
+// search was structurally guaranteed to find the FMin's two loads and treat
+// that as ambiguous) -- see this project's Step 5/6B investigation.
 enum class FadeControlRole : std::uint8_t {
   Predicate,
-  Coverage,
+  PreFadeOperandOne,
+  PreFadeOperandTwo,
 };
 
 // Bit flags: a single value observation can only be unavailable for one
