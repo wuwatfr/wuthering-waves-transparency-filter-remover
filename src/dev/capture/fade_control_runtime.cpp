@@ -642,7 +642,7 @@ bool WriteFadeControlExport(
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
 
-  report << "format\twuwa_tfr_manual_fade_control_capture_v4\n";
+  report << "format\twuwa_tfr_manual_fade_control_capture_v3\n";
   report << "capture_type\tmanual_targeted_fade_control_value_trace\n";
   report << "session_id\t" << snapshot.session_id << '\n';
   report << "record_count\t" << snapshot.records.size() << '\n';
@@ -827,7 +827,7 @@ bool WriteFadeControlSnapshotExport(
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
 
-  report << "format\twuwa_tfr_manual_fade_control_snapshot_v3\n";
+  report << "format\twuwa_tfr_manual_fade_control_snapshot_v2\n";
   report << "capture_type\tmanual_targeted_fade_predicate_cbv_byte_window\n";
   report << "session_id\t" << snapshot_set.session_id << '\n';
   report << "record_count\t" << snapshot_set.snapshots.size() << '\n';
