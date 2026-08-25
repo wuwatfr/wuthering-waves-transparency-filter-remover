@@ -26,6 +26,7 @@ using wuwa_tfr::dev::DestroyResourceLifecycle;
 using wuwa_tfr::dev::DestroyResourceLifecycleForDevice;
 using wuwa_tfr::dev::FindActiveResourceLifecycle;
 using wuwa_tfr::dev::PruneResourceLifecycleTo;
+using wuwa_tfr::dev::ResourceLifecycleCapacityTaintSnapshot;
 using wuwa_tfr::dev::TraceResourceIdentity;
 
 constexpr std::uintptr_t kDeviceA = 1;
@@ -40,6 +41,13 @@ TraceResourceIdentity Identity(std::uint64_t fingerprint,
 }  // namespace
 
 int main() {
+  // 0. Nothing has pruned yet in this process, so the capacity taint starts
+  // clean. Captured before any other test runs, so test 8 below can observe
+  // the one-way transition rather than assuming it.
+  const auto initial_taint = ResourceLifecycleCapacityTaintSnapshot();
+  CHECK(!initial_taint.evidence_dropped);
+  CHECK(initial_taint.prune_generation == 0);
+
   // 1. Normal init/destroy/re-init: destroying an incarnation and then
   // re-initializing the same handle produces a genuinely new incarnation
   // id, not a stale one. Uses kDeviceC, never torn down by a later test,
@@ -151,6 +159,30 @@ int main() {
     // The very last activation before pruning is certainly among the 4
     // most recently created records and must survive.
     CHECK(FindActiveResourceLifecycle(newest).incarnation_id != 0);
+  }
+
+  // 8. The capacity taint is monotonic. Test 7's prune dropped records, so
+  // the flag is now set and the generation advanced; a prune that drops
+  // nothing leaves both untouched; a further real prune advances the
+  // generation again and never un-sets the flag.
+  {
+    const auto after_prune = ResourceLifecycleCapacityTaintSnapshot();
+    CHECK(after_prune.evidence_dropped);
+    CHECK(after_prune.prune_generation > initial_taint.prune_generation);
+
+    // A no-op prune: capacity far above the record count.
+    CHECK(PruneResourceLifecycleTo(1u << 20) == 0);
+    const auto after_noop = ResourceLifecycleCapacityTaintSnapshot();
+    CHECK(after_noop == after_prune);
+
+    // Another real prune: generation advances, flag stays set.
+    for (std::uint64_t i = 0; i < 8; ++i)
+      ActivateResourceLifecycle(
+          TraceLiveHandleKey{kDeviceB, 30000 + i}, Identity(i));
+    CHECK(PruneResourceLifecycleTo(2) > 0);
+    const auto after_second = ResourceLifecycleCapacityTaintSnapshot();
+    CHECK(after_second.evidence_dropped);
+    CHECK(after_second.prune_generation > after_prune.prune_generation);
   }
 
   return 0;

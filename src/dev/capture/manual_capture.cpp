@@ -436,16 +436,20 @@ void DrawManualCaptureOverlay() {
     if (fade_control.descriptor_slot_capacity_loss ||
         fade_control.mapped_buffer_capacity_loss ||
         fade_control.layout_map_capacity_loss ||
-        fade_control.descriptor_range_truncated) {
+        fade_control.descriptor_range_truncated ||
+        fade_control.resource_lifecycle_capacity_loss) {
       ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
-          "Tracker capacity loss (%s%s%s%s); some unavailable rows may "
-          "reflect lost diagnostic state, not a genuine binding miss.",
+          "Evidence capacity loss (%s%s%s%s%s); some unavailable or stale "
+          "rows may reflect lost diagnostic state, not a genuine binding "
+          "miss.",
           fade_control.descriptor_slot_capacity_loss ? "descriptor slots "
                                                        : "",
           fade_control.mapped_buffer_capacity_loss ? "mapped buffers " : "",
           fade_control.layout_map_capacity_loss ? "layout maps " : "",
           fade_control.descriptor_range_truncated ? "descriptor ranges "
-                                                    : "");
+                                                    : "",
+          fade_control.resource_lifecycle_capacity_loss
+              ? "resource lifecycle " : "");
     }
   }
 }

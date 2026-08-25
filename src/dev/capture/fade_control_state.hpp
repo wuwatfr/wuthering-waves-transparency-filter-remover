@@ -176,6 +176,12 @@ struct FadeControlTrackerCapacityDiagnostics {
   bool mapped_buffer_loss = false;
   bool layout_map_loss = false;
   bool descriptor_range_truncated = false;
+  // Not one of Fade-control's own trackers: the canonical resource-lifecycle
+  // owner shared with Trace dropped incarnation records to stay inside its
+  // capacity. Carried on the same provenance path because it taints the same
+  // evidence -- a resolved descriptor slot's staleness check consults that
+  // owner.
+  bool resource_lifecycle_loss = false;
 
   friend bool operator==(const FadeControlTrackerCapacityDiagnostics&,
       const FadeControlTrackerCapacityDiagnostics&) = default;
@@ -188,12 +194,14 @@ constexpr void MergeFadeControlTrackerCapacity(
   target.mapped_buffer_loss |= source.mapped_buffer_loss;
   target.layout_map_loss |= source.layout_map_loss;
   target.descriptor_range_truncated |= source.descriptor_range_truncated;
+  target.resource_lifecycle_loss |= source.resource_lifecycle_loss;
 }
 
 constexpr bool FadeControlTrackerCapacityHasLoss(
     const FadeControlTrackerCapacityDiagnostics& diagnostics) noexcept {
   return diagnostics.descriptor_slot_loss || diagnostics.mapped_buffer_loss ||
-      diagnostics.layout_map_loss || diagnostics.descriptor_range_truncated;
+      diagnostics.layout_map_loss || diagnostics.descriptor_range_truncated ||
+      diagnostics.resource_lifecycle_loss;
 }
 
 // Capture-scoped view of tracker loss. Start clears only what a capture

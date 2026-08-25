@@ -614,6 +614,8 @@ FadeControlDiagnosticCounters GetFadeControlDiagnosticCounters() {
   counters.layout_map_capacity_loss = tracker_capacity.layout_map_loss;
   counters.descriptor_range_truncated =
       tracker_capacity.descriptor_range_truncated;
+  counters.resource_lifecycle_capacity_loss =
+      tracker_capacity.resource_lifecycle_loss;
   return counters;
 }
 
@@ -640,7 +642,7 @@ bool WriteFadeControlExport(
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
 
-  report << "format\twuwa_tfr_manual_fade_control_capture_v3\n";
+  report << "format\twuwa_tfr_manual_fade_control_capture_v4\n";
   report << "capture_type\tmanual_targeted_fade_control_value_trace\n";
   report << "session_id\t" << snapshot.session_id << '\n';
   report << "record_count\t" << snapshot.records.size() << '\n';
@@ -655,18 +657,24 @@ bool WriteFadeControlExport(
   report << "tracker_descriptor_range_truncated\t"
          << static_cast<int>(tracker_capacity.descriptor_range_truncated)
          << '\n';
+  report << "tracker_resource_lifecycle_capacity_loss\t"
+         << static_cast<int>(tracker_capacity.resource_lifecycle_loss) << '\n';
   report << "tracker_capacity_loss_semantics\t"
-      "these_four_flags_report_whether_the_shared_fade_control_runtime_"
-      "trackers_descriptor_slots_mapped_buffers_layout_cbv_range_maps_had_"
-      "already_dropped_or_truncated_state_at_the_moment_a_draw_recorded_the_"
-      "evidence_this_capture_admitted_provenance_is_snapshotted_at_draw_"
-      "record_time_and_or_ed_in_at_command_list_submission_only_for_draws_"
-      "the_session_admits_so_loss_that_never_reached_admitted_evidence_and_"
-      "loss_occurring_after_stop_are_both_excluded_a_true_flag_means_some_"
-      "rows_reason_bits_1_not_mapped_or_128_descriptor_unknown_in_this_"
-      "export_may_reflect_diagnostic_tracker_capacity_loss_rather_than_a_"
-      "genuine_runtime_miss_this_is_never_retroactively_attributed_to_"
-      "individual_records_see_unavailable_reason_bits_for_per_row_detail\n";
+      "these_five_flags_report_whether_diagnostic_evidence_had_already_been_"
+      "dropped_or_truncated_at_the_moment_a_draw_recorded_the_evidence_this_"
+      "capture_admitted_the_first_four_cover_fade_controls_own_runtime_"
+      "trackers_descriptor_slots_mapped_buffers_layout_cbv_range_maps_and_"
+      "the_fifth_covers_the_canonical_resource_lifecycle_owner_shared_with_"
+      "trace_pruning_incarnation_records_to_stay_inside_its_capacity_"
+      "provenance_is_snapshotted_at_draw_record_time_and_or_ed_in_at_command_"
+      "list_submission_only_for_draws_the_session_admits_so_loss_that_never_"
+      "reached_admitted_evidence_and_loss_occurring_after_stop_are_both_"
+      "excluded_a_true_flag_means_some_rows_reason_bits_1_not_mapped_or_128_"
+      "descriptor_unknown_or_64_stale_descriptor_binding_in_this_export_may_"
+      "reflect_diagnostic_evidence_loss_rather_than_a_genuine_runtime_miss_"
+      "this_is_never_retroactively_attributed_to_individual_records_because_"
+      "exact_row_level_causality_is_not_proven_see_unavailable_reason_bits_"
+      "for_per_row_detail\n";
   report << "export_timestamp_local\t" << timestamp << '\n';
   report << "value_observation\t"
       "cpu_command_recording_time_observation_of_mapped_constant_buffer_"
@@ -819,7 +827,7 @@ bool WriteFadeControlSnapshotExport(
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
 
-  report << "format\twuwa_tfr_manual_fade_control_snapshot_v2\n";
+  report << "format\twuwa_tfr_manual_fade_control_snapshot_v3\n";
   report << "capture_type\tmanual_targeted_fade_predicate_cbv_byte_window\n";
   report << "session_id\t" << snapshot_set.session_id << '\n';
   report << "record_count\t" << snapshot_set.snapshots.size() << '\n';
@@ -834,16 +842,21 @@ bool WriteFadeControlSnapshotExport(
   report << "tracker_descriptor_range_truncated\t"
          << static_cast<int>(tracker_capacity.descriptor_range_truncated)
          << '\n';
+  report << "tracker_resource_lifecycle_capacity_loss\t"
+         << static_cast<int>(tracker_capacity.resource_lifecycle_loss) << '\n';
   report << "tracker_capacity_loss_semantics\t"
-      "these_four_flags_report_whether_the_shared_fade_control_runtime_"
-      "trackers_descriptor_slots_mapped_buffers_layout_cbv_range_maps_had_"
-      "already_dropped_or_truncated_state_at_the_moment_a_draw_recorded_the_"
-      "evidence_this_capture_admitted_provenance_is_snapshotted_at_draw_"
-      "record_time_and_or_ed_in_at_command_list_submission_only_for_draws_"
-      "the_session_admits_so_loss_that_never_reached_admitted_evidence_and_"
-      "loss_occurring_after_stop_are_both_excluded_this_is_never_"
-      "retroactively_attributed_to_individual_snapshots_see_manual_fade_"
-      "controls_tsv_for_per_row_unavailable_reason_detail\n";
+      "these_five_flags_report_whether_diagnostic_evidence_had_already_been_"
+      "dropped_or_truncated_at_the_moment_a_draw_recorded_the_evidence_this_"
+      "capture_admitted_the_first_four_cover_fade_controls_own_runtime_"
+      "trackers_descriptor_slots_mapped_buffers_layout_cbv_range_maps_and_"
+      "the_fifth_covers_the_canonical_resource_lifecycle_owner_shared_with_"
+      "trace_pruning_incarnation_records_to_stay_inside_its_capacity_"
+      "provenance_is_snapshotted_at_draw_record_time_and_or_ed_in_at_command_"
+      "list_submission_only_for_draws_the_session_admits_so_loss_that_never_"
+      "reached_admitted_evidence_and_loss_occurring_after_stop_are_both_"
+      "excluded_this_is_never_retroactively_attributed_to_individual_"
+      "snapshots_see_manual_fade_controls_tsv_for_per_row_unavailable_reason_"
+      "detail\n";
   report << "export_timestamp_local\t" << timestamp << '\n';
   report << "value_observation\t"
       "cpu_command_recording_time_observation_of_mapped_constant_buffer_"
@@ -938,8 +951,14 @@ void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
 
   std::lock_guard lock(g_fade_control_mutex);
   for (const auto& source : *sources) SampleOneRole(trace, route, draw, source);
-  MergeFadeControlTrackerCapacity(
-      draw.pending_fade_tracker_taint, g_fade_control_runtime_taint);
+  // Both taint sources are read here, at Draw-record time, and staged with
+  // the evidence they describe. The lifecycle owner is self-locking and never
+  // calls back, so this nests exactly as the sampling above already does when
+  // it consults FindActiveResourceLifecycle; g_trace_mutex is not involved.
+  FadeControlTrackerCapacityDiagnostics taint = g_fade_control_runtime_taint;
+  taint.resource_lifecycle_loss |=
+      ResourceLifecycleCapacityTaintSnapshot().evidence_dropped;
+  MergeFadeControlTrackerCapacity(draw.pending_fade_tracker_taint, taint);
 }
 
 void CommitPendingFadeControlObservations(const RecordedTraceDraw& draw) {

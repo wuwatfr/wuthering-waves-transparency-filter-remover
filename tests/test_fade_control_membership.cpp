@@ -95,6 +95,19 @@ void SimulateRecordDraw(RecordedDrawSim& draw,
   MergeFadeControlTrackerCapacity(draw.pending_tracker_taint, runtime_taint);
 }
 
+// Mirrors how SampleFadeControlValuesOnDraw composes the two independent
+// taint sources at Draw-record time: Fade-control's own tracker taint, plus
+// the canonical resource-lifecycle owner's prune taint read through
+// ResourceLifecycleCapacityTaintSnapshot(). Fade-control never reads Trace's
+// globals to learn the latter.
+FadeControlTrackerCapacityDiagnostics ComposeRecordTimeTaint(
+    const FadeControlTrackerCapacityDiagnostics& tracker_taint,
+    bool lifecycle_evidence_dropped) {
+  FadeControlTrackerCapacityDiagnostics taint = tracker_taint;
+  taint.resource_lifecycle_loss |= lifecycle_evidence_dropped;
+  return taint;
+}
+
 // Mirrors OnManualCaptureExecute's control flow: determine the live manual
 // capture session once, then commit both the Manual Capture draw and that
 // draw's pending Fade observations to that same session -- or commit
@@ -511,6 +524,132 @@ int main() {
     SimulateExecuteCommandList(
         token, manual, fade, fade_snapshots, fade_diagnostics, {second});
     CHECK(fade_diagnostics.Stop().descriptor_slot_loss);
+  }
+
+  // 12. Canonical resource-lifecycle capacity loss travels the same
+  // provenance path as Fade-control's own tracker taint. A Draw recorded
+  // while the lifecycle owner was intact is not retroactively tainted by a
+  // later prune; a Draw recorded after the prune is.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    const FadeControlTrackerCapacityDiagnostics clean_trackers;
+    bool lifecycle_dropped = false;
+
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+
+    RecordedDrawSim before;
+    before.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    before.pipeline = MakePipeline();
+    SimulateRecordDraw(before,
+        ComposeRecordTimeTaint(clean_trackers, lifecycle_dropped),
+        {MakeFadeKey(1), Available(1.0f)});
+    CHECK(!before.pending_tracker_taint.resource_lifecycle_loss);
+
+    // PruneResourceLifecycleTo drops incarnation records only now.
+    lifecycle_dropped = true;
+
+    RecordedDrawSim after;
+    after.manual_key = ManualCaptureRecordKey{2, Geometry(2), 100};
+    after.pipeline = MakePipeline();
+    SimulateRecordDraw(after,
+        ComposeRecordTimeTaint(clean_trackers, lifecycle_dropped),
+        {MakeFadeKey(2), Available(2.0f)});
+    CHECK(after.pending_tracker_taint.resource_lifecycle_loss);
+    // The earlier Draw's staged provenance is untouched by the later prune.
+    CHECK(!before.pending_tracker_taint.resource_lifecycle_loss);
+
+    // Submitting only the clean Draw leaves the capture clean...
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {before});
+    CHECK(!fade_diagnostics.active_diagnostics().resource_lifecycle_loss);
+
+    // ...and submitting the tainted one propagates it, without setting any
+    // of Fade-control's own tracker flags.
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {after});
+    const auto active = fade_diagnostics.active_diagnostics();
+    CHECK(active.resource_lifecycle_loss);
+    CHECK(!active.descriptor_slot_loss && !active.mapped_buffer_loss);
+    CHECK(!active.layout_map_loss && !active.descriptor_range_truncated);
+    CHECK(FadeControlTrackerCapacityHasLoss(active));
+
+    manual.Stop(1);
+    fade.Stop();
+    CHECK(fade_diagnostics.Stop().resource_lifecycle_loss);
+  }
+
+  // 13. A non-live submission contributes no lifecycle taint, and Stop
+  // freezes the flag against later lifecycle loss -- while a subsequent
+  // capture starts clean yet can still inherit the runtime taint, which the
+  // lifecycle owner never clears.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    const FadeControlTrackerCapacityDiagnostics clean_trackers;
+
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+
+    RecordedDrawSim clean;
+    clean.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    clean.pipeline = MakePipeline();
+    SimulateRecordDraw(clean, ComposeRecordTimeTaint(clean_trackers, false),
+        {MakeFadeKey(1), Available(1.0f)});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {clean});
+
+    token.Stop();
+    manual.Stop(1);
+    fade.Stop();
+    const auto frozen = fade_diagnostics.Stop();
+    CHECK(!frozen.resource_lifecycle_loss);
+
+    // The lifecycle owner prunes after Stop, and a stale command list
+    // carrying that taint is submitted late: neither may reach the frozen
+    // capture.
+    RecordedDrawSim stale;
+    stale.manual_key = ManualCaptureRecordKey{2, Geometry(2), 100};
+    stale.pipeline = MakePipeline();
+    SimulateRecordDraw(stale, ComposeRecordTimeTaint(clean_trackers, true),
+        {MakeFadeKey(2), Available(2.0f)});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {stale});
+    CHECK(!fade_diagnostics.last_result().resource_lifecycle_loss);
+    CHECK(fade_diagnostics.last_result() == frozen);
+
+    // A new capture starts clean, but the runtime lifecycle taint survived,
+    // so a Draw recorded now still inherits it.
+    token.Start(2);
+    manual.Start(2, 0, kAllShaders);
+    fade.Start(2);
+    fade_snapshots.Start(2);
+    fade_diagnostics.Start();
+    CHECK(!fade_diagnostics.active_diagnostics().resource_lifecycle_loss);
+
+    RecordedDrawSim fresh;
+    fresh.manual_key = ManualCaptureRecordKey{3, Geometry(3), 100};
+    fresh.pipeline = MakePipeline();
+    SimulateRecordDraw(fresh, ComposeRecordTimeTaint(clean_trackers, true),
+        {MakeFadeKey(3), Available(3.0f)});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {fresh});
+    CHECK(fade_diagnostics.Stop().resource_lifecycle_loss);
   }
 
   return 0;

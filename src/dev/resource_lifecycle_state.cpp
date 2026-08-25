@@ -12,6 +12,7 @@ namespace {
 std::mutex g_resource_lifecycle_mutex;
 wuwa_tfr::TraceIncarnationIndex<TraceResourceIdentity>
     g_resource_lifecycle_index;
+ResourceLifecycleCapacityTaint g_resource_lifecycle_taint;
 
 }  // namespace
 
@@ -43,7 +44,17 @@ ActiveResourceLifecycle FindActiveResourceLifecycle(
 
 std::size_t PruneResourceLifecycleTo(std::size_t maximum_records) {
   std::lock_guard lock(g_resource_lifecycle_mutex);
-  return g_resource_lifecycle_index.PruneTo(maximum_records);
+  const std::size_t pruned = g_resource_lifecycle_index.PruneTo(maximum_records);
+  if (pruned != 0) {
+    g_resource_lifecycle_taint.evidence_dropped = true;
+    ++g_resource_lifecycle_taint.prune_generation;
+  }
+  return pruned;
+}
+
+ResourceLifecycleCapacityTaint ResourceLifecycleCapacityTaintSnapshot() {
+  std::lock_guard lock(g_resource_lifecycle_mutex);
+  return g_resource_lifecycle_taint;
 }
 
 }  // namespace wuwa_tfr::dev
