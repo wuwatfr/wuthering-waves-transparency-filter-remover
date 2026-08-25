@@ -419,6 +419,7 @@ const char* PreFadeFMinStatusName(PreFadeFMinStatus status) noexcept {
     case PreFadeFMinStatus::Matched: return "matched";
     case PreFadeFMinStatus::NoQualifyingCandidate: return "no_qualifying_candidate";
     case PreFadeFMinStatus::AmbiguousCandidates: return "ambiguous_candidates";
+    case PreFadeFMinStatus::OperandsNotAdjacent: return "operands_not_adjacent";
     case PreFadeFMinStatus::InvalidInstanceIdentity: return "invalid_instance_identity";
     case PreFadeFMinStatus::FunctionNotUniquelyLocated:
       return "function_not_uniquely_located";
@@ -434,7 +435,8 @@ bool PreFadeFMinAnalysisIsStructurallyComplete(
       analysis.function_parsed && analysis.backward_slice_complete &&
       (analysis.status == PreFadeFMinStatus::Matched ||
           analysis.status == PreFadeFMinStatus::NoQualifyingCandidate ||
-          analysis.status == PreFadeFMinStatus::AmbiguousCandidates);
+          analysis.status == PreFadeFMinStatus::AmbiguousCandidates ||
+          analysis.status == PreFadeFMinStatus::OperandsNotAdjacent);
 }
 
 bool PreFadeFMinProvesNoQualifyingCandidate(
@@ -655,6 +657,15 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
         : PreFadeAdjacency::NonAdjacent;
   } else {
     result.adjacency = PreFadeAdjacency::Unknown;
+  }
+
+  if (!PreFadeAdjacencyIsProvenAdjacent(result.adjacency)) {
+    result.status = PreFadeFMinStatus::OperandsNotAdjacent;
+    result.error = result.adjacency == PreFadeAdjacency::NonAdjacent
+        ? "qualifying pre-Fade FMin operands are not adjacent scalars of one "
+          "constant buffer"
+        : "qualifying pre-Fade FMin operand adjacency could not be resolved";
+    return result;
   }
 
   result.status = PreFadeFMinStatus::Matched;

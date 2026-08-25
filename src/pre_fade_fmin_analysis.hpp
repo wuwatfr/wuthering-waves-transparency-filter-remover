@@ -16,10 +16,26 @@ inline constexpr std::string_view kPreFadeRewriteLiteral = "1.000000e+00";
 
 enum class PreFadeAdjacency { Unknown, SameRow, CrossRow, NonAdjacent };
 
+// Whether the two resolved operands sit 4 bytes apart in one constant buffer.
+// A Production match requires this: it proves the pair is two neighbouring
+// scalars rather than two unrelated values that happen to share a handle.
+// Both SameRow and CrossRow qualify -- which side of the boundary the pair
+// straddles carries no meaning, and neither does the sign of the difference.
+constexpr bool PreFadeAdjacencyIsProvenAdjacent(
+    PreFadeAdjacency adjacency) noexcept {
+  return adjacency == PreFadeAdjacency::SameRow ||
+      adjacency == PreFadeAdjacency::CrossRow;
+}
+
 enum class PreFadeFMinStatus : std::uint8_t {
   Matched,
   NoQualifyingCandidate,
   AmbiguousCandidates,
+  // A structurally qualifying FMin was found, but its two operands were not
+  // proven to be adjacent scalars of one constant buffer -- either resolved
+  // and far apart, or with coordinates that could not be resolved at all.
+  // Distinct from NoQualifyingCandidate: a candidate did exist.
+  OperandsNotAdjacent,
   InvalidInstanceIdentity,
   FunctionNotUniquelyLocated,
   FunctionNotParsable,

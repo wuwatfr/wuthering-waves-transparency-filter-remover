@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
 //
-// Focused tests for the canonical pre-Fade FMin analyzer's two separable
-// jobs: the *structural* proof that authorizes a Production rewrite (a direct
-// scalar CBV load per operand, one shared CBV handle, a unique candidate in a
-// complete verified slice), and the *diagnostic* coordinates layered on top
-// (legacy row, component, byte offset, register/space, adjacency).
+// Focused tests for the canonical pre-Fade FMin analyzer's structural proof:
+// a direct scalar CBV load per operand, one shared CBV handle, a unique
+// candidate in a complete verified slice, and the two operands proven to be
+// adjacent scalars of that constant buffer.
 //
-// The invariant under test throughout: the diagnostic layer may fail without
-// affecting the structural verdict, and no analysis failure of any kind may
-// ever be read as proof that a qualifying FMin is absent.
+// Operand adjacency used to be a purely diagnostic coordinate that could
+// degrade to Unknown without affecting the verdict. It is now an
+// authorization condition: proving the pair is two neighbouring scalars is
+// what distinguishes a Fade pair from two unrelated values that happen to
+// share a handle. Coordinates that cannot be resolved therefore fail closed,
+// which is the opposite of what this file asserted before. Both SameRow and
+// CrossRow qualify, and the sign of the difference is never consulted -- no
+// claim is made about which operand is the camera side.
+//
+// The invariant that does still hold throughout: no analysis failure of any
+// kind may ever be read as proof that a qualifying FMin is absent.
+//
+// Corpus at the time of the change (2026-08-25, 3250 shaders): 260/260
+// qualifying instances resolved adjacent -- SameRow 203, CrossRow 57,
+// NonAdjacent 0, Unknown 0 -- so the gate rejects nothing observed.
 
 #include "pre_fade_fmin_analysis.hpp"
 
@@ -124,11 +135,72 @@ int main() {
     CHECK(analysis.operand_one.source_text == "%opA0");
   }
 
-  // ================= diagnostic coordinates are not authorization =========
+  // ================= adjacency is an authorization condition ==============
 
-  // A dynamically indexed legacy row: the byte-precise coordinate cannot be
-  // derived, but the source identity -- direct scalar CBV load, same handle --
-  // is exactly as valid, so this must still match and still be patchable.
+  // Legacy cross-row, +4: operand one at row 40 component 3 (byte 652),
+  // operand two at row 41 component 0 (byte 656). The pair straddles a row
+  // boundary, which is exactly as adjacent as a same-row pair.
+  {
+    const std::string ir = BuildIr(
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%pf1 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 41)\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf1, 0\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)");
+    const auto analysis = AnalyzeOnly(ir);
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+    CHECK(analysis.success);
+    CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::CrossRow);
+    const auto patched =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir);
+    CHECK(patched.success);
+    CHECK(patched.patched_instance_count == 1);
+  }
+
+  // Legacy cross-row, -4: the same pair with the two loads swapped, so
+  // operand one is now the HIGHER offset. The gate must not care about the
+  // sign -- it makes no claim about which side is the camera operand.
+  {
+    const std::string ir = BuildIr(
+        "%pf1 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 41)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf1, 0\n"
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)");
+    const auto analysis = AnalyzeOnly(ir);
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+    CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::CrossRow);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir)
+              .success);
+  }
+
+  // Resolved but genuinely far apart: same row, components 0 and 3, 12 bytes
+  // apart. Two scalars of one constant buffer that are not a neighbouring
+  // pair, which is the shape the gate exists to reject.
+  {
+    const std::string ir = BuildIr(
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 0\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)");
+    const auto analysis = AnalyzeOnly(ir);
+    CHECK(analysis.status ==
+        wuwa_tfr::PreFadeFMinStatus::OperandsNotAdjacent);
+    CHECK(!analysis.success);
+    CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::NonAdjacent);
+    // A candidate did exist -- this is not "no qualifying FMin".
+    CHECK(analysis.qualifying_fmin_count == 1);
+    CHECK(analysis.error.find("not adjacent") != std::string::npos);
+    const auto patched =
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir);
+    CHECK(!patched.success);
+    CHECK(patched.patched_instance_count == 0);
+  }
+
+  // A dynamically indexed legacy row: the source identity is intact, but the
+  // coordinates needed to prove adjacency are not derivable. Unproven is not
+  // proven, so this fails closed -- and is reported as an adjacency rejection,
+  // not as an absent candidate.
   {
     const std::string ir = BuildIr(
         "%dynrow = call i32 @dx.op.loadInput.i32(i32 4, i32 3, i32 0, i8 0, i32 undef)\n"
@@ -137,24 +209,20 @@ int main() {
         "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
         "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)");
     const auto analysis = AnalyzeOnly(ir);
-    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+    CHECK(analysis.status ==
+        wuwa_tfr::PreFadeFMinStatus::OperandsNotAdjacent);
+    CHECK(!analysis.success);
+    // The structural source identity is still perfectly valid...
     CHECK(analysis.operand_one.resolved && analysis.operand_two.resolved);
     CHECK(analysis.operand_one.handle_value == analysis.operand_two.handle_value);
-    // Diagnostic coordinate unavailable; the component still is.
+    CHECK(analysis.operand_one.component_resolved);
+    // ...but the row it would need is not, so adjacency stays Unknown.
     CHECK(!analysis.operand_one.row_resolved);
     CHECK(!analysis.operand_two.row_resolved);
-    CHECK(analysis.operand_one.component_resolved);
-    // Adjacency is derived from coordinates, so it must degrade to Unknown
-    // rather than be computed from a row that was never resolved.
     CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::Unknown);
-    // ...and Production still patches it.
-    const auto patched =
-        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir);
-    CHECK(patched.success);
-    CHECK(patched.patched_instance_count == 1);
-    CHECK(patched.llvm_ir.find(
-        "call float @dx.op.binary.f32(i32 36, float 1.000000e+00, float %opB0)") !=
-        std::string::npos);
+    CHECK(analysis.error.find("could not be resolved") != std::string::npos);
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir)
+               .success);
   }
 
   // Same for a dynamically computed byte offset.
@@ -164,10 +232,35 @@ int main() {
         "%opA0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 %dynoff, i32 4)\n"
         "%opB0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 652, i32 4)\n"
         "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
-    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+    CHECK(analysis.status ==
+        wuwa_tfr::PreFadeFMinStatus::OperandsNotAdjacent);
     CHECK(!analysis.operand_one.byte_offset_resolved);
     CHECK(analysis.operand_two.byte_offset_resolved);
     CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::Unknown);
+  }
+
+  // Byte-offset form, resolved and far apart: rejected on the same footing as
+  // the legacy form. Adjacency support is not legacy-only.
+  {
+    const auto analysis = AnalyzeOnly(BuildIr(
+        "%opA0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 648, i32 4)\n"
+        "%opB0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 700, i32 4)\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
+    CHECK(analysis.status ==
+        wuwa_tfr::PreFadeFMinStatus::OperandsNotAdjacent);
+    CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::NonAdjacent);
+    CHECK(analysis.qualifying_fmin_count == 1);
+  }
+
+  // Byte-offset form, -4: operand one at the higher offset. Adjacent either
+  // way round.
+  {
+    const auto analysis = AnalyzeOnly(BuildIr(
+        "%opA0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 652, i32 4)\n"
+        "%opB0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 648, i32 4)\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+    CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::CrossRow);
   }
 
   // Different CBV handles still fail closed -- the one same-handle rule the
@@ -183,16 +276,17 @@ int main() {
     CHECK(analysis.qualifying_fmin_count == 0);
   }
 
-  // Mixed forms from the same handle are still the same handle, but their
-  // coordinate systems are not comparable, so adjacency degrades to Unknown
-  // without disturbing the match.
+  // Mixed forms from the same handle are still the same handle, but a legacy
+  // row/component and a raw byte offset are not comparable coordinates, so
+  // adjacency cannot be proven and the match fails closed.
   {
     const auto analysis = AnalyzeOnly(BuildIr(
         "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
         "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
         "%opB0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 652, i32 4)\n"
         "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
-    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+    CHECK(analysis.status ==
+        wuwa_tfr::PreFadeFMinStatus::OperandsNotAdjacent);
     CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::Unknown);
   }
 

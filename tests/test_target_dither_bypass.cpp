@@ -334,7 +334,20 @@ entry:
         std::string::npos);
   }
 
-  // ---- pre-Fade FMin structural shapes: known non-adjacent census variant ----
+  // ---- pre-Fade FMin structural shapes: non-adjacent now fails closed ----
+  // This shape used to be accepted and patched. Operand adjacency is now an
+  // authorization condition, so two scalars of one constant buffer that are
+  // not a neighbouring pair no longer qualify.
+  //
+  // The block this replaces was labelled a "known non-adjacent census
+  // variant". Nothing in the repository or its history records a census that
+  // actually observed one, and the corpus that label referred to no longer
+  // exists. The 2026-08-25 corpus (3250 shaders, 260 instances) has zero
+  // non-adjacent and zero unresolved, but it is roughly half the size of the
+  // earlier one, so its silence is weaker evidence than the count suggests.
+  // If a real non-adjacent instance does exist in uncaptured content, this
+  // gate makes WuwaTFR leave that shader's filter in place -- fail-closed,
+  // not corrupted.
   {
     std::string non_adjacent = all_instances_ir;
     const std::string same_row_prefix =
@@ -353,10 +366,12 @@ entry:
     non_adjacent.replace(at, same_row_prefix.size(), non_adjacent_prefix);
     const auto result =
         wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(non_adjacent);
-    CHECK(result.success);
-    CHECK(result.llvm_ir.find(
-        "call float @dx.op.binary.f32(i32 36, float 1.000000e+00, float %opB0)") !=
-        std::string::npos);
+    CHECK(!result.success);
+    CHECK(result.patched_instance_count == 0);
+    CHECK(result.llvm_ir.empty());
+    // Rejected for adjacency specifically, not misreported as an absent
+    // candidate: a qualifying FMin was found, it just was not a pair.
+    CHECK(result.error.find("not adjacent") != std::string::npos);
   }
 
   // ---- fail-closed: no qualifying FMin (operand traces to a spatial input) ----
