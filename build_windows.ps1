@@ -20,16 +20,35 @@ $distDev = Join-Path $dist 'dev'
 # running build_windows.cmd when one is required by the network.
 $buildProxy = $env:WUWA_BUILD_PROXY
 
-function Fail([string]$Message) {
+function Fail([string]$Message, [switch]$NoToolchainHint) {
     Write-Host ''
     Write-Host 'BUILD FAILED' -ForegroundColor Red
     Write-Host $Message -ForegroundColor Red
-    Write-Host ''
-    Write-Host 'Required once on this PC:'
-    Write-Host '  Visual Studio 2026/2022 Build Tools'
-    Write-Host '  Workload: Desktop development with C++'
-    Write-Host '  Component: C++ CMake tools for Windows'
+    if (-not $NoToolchainHint) {
+        Write-Host ''
+        Write-Host 'Required once on this PC:'
+        Write-Host '  Visual Studio 2026/2022 Build Tools'
+        Write-Host '  Workload: Desktop development with C++'
+        Write-Host '  Component: C++ CMake tools for Windows'
+    }
     exit 1
+}
+
+# Under $ErrorActionPreference = 'Stop', a bare Remove-Item failure (e.g. a
+# file still held by a running game with a WuwaTFR add-on loaded from
+# dist/) surfaces as an unhandled PowerShell exception with no indication of
+# which file or why. Catch it and fail with a message that names the path
+# and suggests what's likely holding it.
+function Remove-OutputTree([string]$Path, [string]$Hint) {
+    if (-not (Test-Path $Path)) { return }
+    try {
+        Remove-Item -Recurse -Force -LiteralPath $Path -ErrorAction Stop
+    } catch {
+        Fail -NoToolchainHint -Message (
+            "Could not delete: $Path" + [Environment]::NewLine +
+            $_.Exception.Message + [Environment]::NewLine +
+            [Environment]::NewLine + $Hint)
+    }
 }
 
 function Download-And-Expand([string]$Url, [string]$ZipPath, [string]$Destination) {
@@ -66,7 +85,10 @@ if (-not $cmake) {
 }
 
 New-Item -ItemType Directory -Force -Path $deps | Out-Null
-if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
+Remove-OutputTree $dist (
+    'A WuwaTFR add-on from this folder is still loaded by another process.' +
+    [Environment]::NewLine +
+    'Close Wuthering Waves (or whatever has it loaded) and run this again.')
 New-Item -ItemType Directory -Force -Path $dist, $distRelease, $distDev | Out-Null
 
 # Pin all build-time dependencies, including the ReShade add-on API headers.
@@ -102,7 +124,12 @@ Write-Host "ReShade include: $reshadeInclude"
 Write-Host "DXC include:     $dxcInclude"
 Write-Host "ImGui include:   $imguiInclude"
 
-if (Test-Path $build) { Remove-Item -Recurse -Force $build }
+Remove-OutputTree $build (
+    'Something still holds a file inside the build folder.' +
+    [Environment]::NewLine +
+    'Close Visual Studio or VS Code if either has this project open, and' +
+    [Environment]::NewLine +
+    'stop any running test executable, then run this again.')
 
 # Match the CMake Visual Studio generator to the installed Build Tools.
 $generator = $null
@@ -136,13 +163,23 @@ if ($LASTEXITCODE -ne 0) {
 $testTargets = @(
     'pipeline_generation_state_tests',
     'dxc_validation_policy_tests',
+    'shader_preparation_outcome_tests',
     'device_activity_state_tests',
     'dxil_dither_diagnostic_tests',
     'fade_primitive_detector_tests',
+    'dxil_ir_lexer_tests',
+    'pre_fade_fmin_analysis_tests',
     'target_dither_bypass_tests',
+    'fade_control_state_tests',
+    'descriptor_table_state_tests',
+    'fade_control_snapshot_tests',
     'trace_submission_identity_tests',
+    'manual_capture_state_tests',
+    'fade_control_membership_tests',
+    'resource_lifecycle_state_tests',
     'single_flight_cache_tests',
     'memory_telemetry_tests',
+    'trace_submission_presence_tests',
     'complete_dxil_validation_tests'
 )
 
@@ -174,6 +211,14 @@ if ($LASTEXITCODE -ne 0) { Fail 'Production add-on compilation failed. See the c
 Write-Host 'Compiling developer add-on...'
 & $cmake.Source --build $build --config Release --target WuwaTFRDev
 if ($LASTEXITCODE -ne 0) { Fail 'Developer add-on compilation failed. See the compiler errors above.' }
+
+# Offline analysis tools (EXCLUDE_FROM_ALL: they read a directory of dumped
+# shaders, not a build/runtime dependency, so they never ship). Compiled
+# here only so a change to the shared matcher/analysis sources can't
+# silently break them between real uses.
+Write-Host 'Compiling offline audit tools...'
+& $cmake.Source --build $build --config Release --target fade_primitive_audit pre_fade_fmin_audit
+if ($LASTEXITCODE -ne 0) { Fail 'Offline audit tool compilation failed. See the compiler errors above.' }
 
 $addon = Get-ChildItem -Path $build -Recurse -Filter 'WuwaTFR.addon64' -File | Select-Object -First 1
 $devAddon = Get-ChildItem -Path $build -Recurse -Filter 'WuwaTFRDev.addon64' -File | Select-Object -First 1

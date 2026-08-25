@@ -11,15 +11,9 @@
 
 namespace wuwa_tfr {
 
-// A point-in-time view of only the Production runtime objects explicitly
-// retained by WuwaTFR. Cumulative totals retain their existing meanings:
-// matched/prepared count successful structural match and patch preparation;
-// replacements_created counts successful replacement PSO creation;
-// replacements_failed counts fail-closed preparation/replacement outcomes;
-// replacement_binds counts actual replacement bind calls.
+class FadePrimitiveRuntimeObserver;
+
 struct FadePrimitiveRuntimeTelemetrySnapshot {
-  // Completed cache entries include cached fail-closed outcomes. Payload bytes
-  // include only completed entries that retain patched bytecode vectors.
   std::uint64_t shader_cache_entries = 0;
   std::uint64_t shader_cache_bytecode_bytes = 0;
   std::uint64_t preparations_in_flight = 0;
@@ -32,8 +26,6 @@ struct FadePrimitiveRuntimeTelemetrySnapshot {
   std::uint64_t replacement_binds_total = 0;
 };
 
-// Production runtime for the fully verified fade primitive. It intentionally
-// owns no capture, trace, or manual-target state.
 class FadePrimitiveRuntime {
  public:
   FadePrimitiveRuntime();
@@ -51,8 +43,8 @@ class FadePrimitiveRuntime {
       reshade::api::pipeline pipeline);
   void OnBindPipeline(reshade::api::command_list* command_list,
       reshade::api::pipeline_stage stages, reshade::api::pipeline pipeline);
-  // Set during add-on initialization, before ReShade registers callbacks.
   void set_dxc_runtime_directory(std::filesystem::path addon_directory);
+  void set_observer(FadePrimitiveRuntimeObserver* observer);
   bool enabled() const;
   void set_enabled(bool enabled);
   FadePrimitiveRuntimeTelemetrySnapshot memory_telemetry_snapshot() const;
@@ -62,5 +54,5 @@ class FadePrimitiveRuntime {
   Impl* impl_;
 };
 
-} // namespace wuwa_tfr
+}
 #endif

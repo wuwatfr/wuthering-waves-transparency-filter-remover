@@ -17,11 +17,6 @@
 #include <string>
 #include <vector>
 
-// Bridge for the small set of always-compiled, genuinely generic addon
-// bootstrap state (device activity tracking, process/config resolution,
-// logging) shared between this file and both variant modules
-// (production/production_module.cpp, dev/dev_module.cpp). Neither variant's
-// replacement logic depends on this -- it is bootstrap-only.
 #include "addon_shared.hpp"
 
 using namespace reshade::api;
@@ -53,15 +48,13 @@ bool IsWuwaProcess() {
 }
 
 void DrawOverlay(effect_runtime*) {
-  ImGui::TextUnformatted("WuwaTFR");
+  ImGui::TextUnformatted("WuwaTFR " WUWA_TFR_VERSION);
   ImGui::TextDisabled("Build: %s", WUWA_TFR_BUILD_COMMIT);
   wuwa_tfr::variant::DrawVariantOverlay();
 }
 
 } // namespace
 
-// Out-of-line definitions for the shared, externally-linked bridge declared
-// in addon_shared.hpp.
 namespace wuwa_tfr {
 
 DeviceActivityState<DeviceIdentity> g_device_activity;
@@ -115,10 +108,6 @@ std::filesystem::path ConfigPathValue(const wchar_t* key) {
   return result.is_absolute() ? result : std::filesystem::path{};
 }
 
-// Generic device-activity bootstrap: registered unconditionally by DllMain,
-// before either variant registers its own event set. g_d3d12_device_count
-// only exists to know when the *last* D3D12 device in the process has been
-// torn down; nothing else in this file consumes it.
 static std::atomic<std::uint32_t> g_d3d12_device_count{0};
 
 void OnInitDevice(device* owner) {
@@ -147,10 +136,6 @@ void OnDestroyDevice(device* owner) {
 
 }  // namespace wuwa_tfr
 
-// NAME and DESCRIPTION are exported by whichever variant module is linked
-// into this target (production/production_module.cpp or
-// dev/dev_module.cpp); addon.cpp itself makes no Production/Dev distinction.
-
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
   switch (reason) {
     case DLL_PROCESS_ATTACH: {
@@ -171,8 +156,6 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
       break;
     }
     case DLL_PROCESS_DETACH:
-      // Avoid COM and FreeLibrary cleanup under the loader lock during process
-      // termination. A normal explicit unload still unregisters the add-on.
       if (reserved == nullptr) reshade::unregister_addon(module);
       break;
   }

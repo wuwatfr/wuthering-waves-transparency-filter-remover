@@ -3,6 +3,8 @@
 
 #include "fade_primitive_detector.hpp"
 
+#include "dxil_ir_lexer.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -17,19 +19,19 @@
 namespace wuwa_tfr {
 namespace {
 
+using namespace wuwa_tfr::dxil_ir;
+
 constexpr std::size_t kBackwardSliceLimit = 2048;
 constexpr std::size_t kConsumerTraversalLimit = 4096;
 
 bool ParseUnsigned(std::string_view text, std::size_t& cursor,
     std::uint32_t& value) noexcept;
-bool IsSsaValue(std::string_view value) noexcept;
 void SkipWhitespace(std::string_view text, std::size_t& cursor) noexcept;
 bool Consume(std::string_view text, std::size_t& cursor,
     std::string_view expected) noexcept;
 bool ConsumeComma(std::string_view text, std::size_t& cursor) noexcept;
 bool ParseTypedUnsigned(std::string_view text, std::size_t& cursor,
     std::string_view type, std::uint32_t& value) noexcept;
-bool HasOnlyMetadataAttachments(std::string_view trailing) noexcept;
 
 struct LoadInputF32Call {
   std::uint32_t signature = 0;
@@ -41,8 +43,6 @@ bool ParseLoadInputF32(
     std::string_view line, LoadInputF32Call& result) noexcept;
 
 struct Instruction {
-  // Only comment-free LLVM code is used to build the SSA graph or authorize
-  // a replacement. The comment remains diagnostic text only.
   std::string code;
   std::string comment;
   std::string lhs;
@@ -72,64 +72,6 @@ struct Module {
   std::vector<Function> functions;
 };
 
-bool IsSsaCharacter(char value) noexcept {
-  return std::isalnum(static_cast<unsigned char>(value)) != 0 ||
-      value == '_' || value == '.' || value == '$' || value == '-';
-}
-
-std::string_view Trim(std::string_view text) {
-  const std::size_t first = text.find_first_not_of(" \t\r");
-  if (first == std::string_view::npos) return {};
-  const std::size_t last = text.find_last_not_of(" \t\r");
-  return text.substr(first, last - first + 1);
-}
-
-struct CodeAndComment {
-  std::string_view code;
-  std::string_view comment;
-};
-
-// A semicolon in an LLVM metadata string is not a comment delimiter. Outside
-// a quoted string, retain the comment separately and never tokenize it.
-CodeAndComment SplitCodeAndComment(std::string_view text) noexcept {
-  bool quoted = false;
-  for (std::size_t index = 0; index < text.size(); ++index) {
-    if (quoted && text[index] == '\\' && index + 1 < text.size()) {
-      ++index;
-      continue;
-    }
-    if (text[index] == '"') quoted = !quoted;
-    if (!quoted && text[index] == ';')
-      return {text.substr(0, index), text.substr(index + 1)};
-  }
-  return {text, {}};
-}
-
-std::vector<std::string> SsaValues(std::string_view text) {
-  std::vector<std::string> values;
-  for (std::size_t index = 0; index < text.size(); ++index) {
-    if (text[index] != '%' || index + 1 == text.size() ||
-        !IsSsaCharacter(text[index + 1])) continue;
-    const std::size_t first = index++;
-    while (index < text.size() && IsSsaCharacter(text[index])) ++index;
-    values.emplace_back(text.substr(first, index - first));
-    if (index == text.size()) break;
-    --index;
-  }
-  return values;
-}
-
-std::string FunctionIdentity(std::string_view header) {
-  const std::size_t at = header.find('@');
-  const std::size_t open = at == std::string_view::npos ? at :
-      header.find('(', at);
-  if (at == std::string_view::npos || open == std::string_view::npos ||
-      open == at + 1) return {};
-  for (std::size_t index = at + 1; index < open; ++index)
-    if (!IsSsaCharacter(header[index])) return {};
-  return std::string(header.substr(at, open - at));
-}
-
 void AddInstruction(Function& function, std::string_view raw,
     std::size_t start, std::size_t end) {
   const CodeAndComment split = SplitCodeAndComment(raw);
@@ -152,17 +94,13 @@ void AddInstruction(Function& function, std::string_view raw,
   if (!instruction.lhs.empty() &&
       !function.definitions.emplace(instruction.lhs, index).second)
     function.complete = false;
-  // For an SSA definition the LHS names the value being defined; it is not
-  // one of that instruction's operands and must never become a synthetic
-  // self-user. Instructions without an LHS are terminal users, so their full
-  // comment-free code remains the operand source.
   const std::string_view operands = instruction.lhs.empty()
       ? std::string_view(instruction.code)
       : std::string_view(instruction.rhs);
   std::unordered_set<std::string> unique_operands;
-  for (const std::string& value : SsaValues(operands))
-    if (unique_operands.insert(value).second)
-      function.users[value].push_back(index);
+  for (const std::string_view value : SsaValues(operands))
+    if (unique_operands.insert(std::string(value)).second)
+      function.users[std::string(value)].push_back(index);
   function.instructions.push_back(std::move(instruction));
 }
 
@@ -234,8 +172,8 @@ Slice BackwardSlice(const Function& function, std::string_view root,
     if (!slice.values.insert(value).second) continue;
     const Instruction* definition = Definition(function, value);
     if (definition) {
-      for (std::string dependency : SsaValues(definition->rhs))
-        pending.push_back(std::move(dependency));
+      for (const std::string_view dependency : SsaValues(definition->rhs))
+        pending.push_back(std::string(dependency));
     }
     if (slice.values.size() >= limit && !pending.empty()) {
       slice.complete = false;
@@ -362,46 +300,6 @@ bool IsIdentityOne(std::string_view value) {
   return value == "1.000000e+00" || value == "1.0" || value == "1.000000";
 }
 
-bool IsSsaValue(std::string_view value) noexcept {
-  if (value.size() < 2 || value.front() != '%') return false;
-  for (std::size_t index = 1; index < value.size(); ++index)
-    if (!IsSsaCharacter(value[index])) return false;
-  return true;
-}
-
-bool HasOnlyMetadataAttachments(std::string_view trailing) noexcept {
-  std::size_t cursor = 0;
-  while (cursor < trailing.size()) {
-    if (trailing[cursor] != ',') return false;
-    ++cursor;
-    while (cursor < trailing.size() &&
-        std::isspace(static_cast<unsigned char>(trailing[cursor])) != 0)
-      ++cursor;
-
-    if (cursor == trailing.size() || trailing[cursor] != '!') return false;
-    const std::size_t name_start = ++cursor;
-    while (cursor < trailing.size() && IsSsaCharacter(trailing[cursor]))
-      ++cursor;
-    if (cursor == name_start || cursor == trailing.size() ||
-        std::isspace(static_cast<unsigned char>(trailing[cursor])) == 0)
-      return false;
-    while (cursor < trailing.size() &&
-        std::isspace(static_cast<unsigned char>(trailing[cursor])) != 0)
-      ++cursor;
-
-    if (cursor == trailing.size() || trailing[cursor] != '!') return false;
-    const std::size_t reference_start = ++cursor;
-    while (cursor < trailing.size() &&
-        std::isdigit(static_cast<unsigned char>(trailing[cursor])) != 0)
-      ++cursor;
-    if (cursor == reference_start) return false;
-    while (cursor < trailing.size() &&
-        std::isspace(static_cast<unsigned char>(trailing[cursor])) != 0)
-      ++cursor;
-  }
-  return true;
-}
-
 bool ParseConditionalBranch(
     std::string_view line,
     std::string_view& condition,
@@ -433,8 +331,106 @@ bool ParseConditionalBranch(
   return false;
 }
 
-bool HasCbufferControlledGate(const Function& function,
-    std::string_view enabled_predecessor) {
+FadePrimitiveGatePredicateEvidence ResolveGatePredicateEvidence(
+    const Function& function, std::string_view condition,
+    const Slice& gate_slice) {
+  FadePrimitiveGatePredicateEvidence evidence;
+  if (IsSsaValue(condition)) {
+    evidence.condition_identified = true;
+    evidence.condition_value = std::string(condition);
+  }
+
+  struct Candidate {
+    std::string_view handle;
+    bool legacy_form = false;
+    bool row_resolved = false;
+    std::uint32_t row = 0;
+    bool component_resolved = false;
+    std::uint32_t component = 0;
+    bool byte_offset_resolved = false;
+    std::uint32_t byte_offset = 0;
+  };
+
+  std::unordered_map<std::string_view, CbufferLoadLegacyCall> legacy_loads;
+  std::vector<Candidate> candidates;
+  for (const std::string& value : gate_slice.values) {
+    const Instruction* definition = Definition(function, value);
+    if (!definition) continue;
+    CbufferLoadLegacyCall legacy;
+    if (ParseCbufferLoadLegacyCall(definition->rhs, legacy)) {
+      legacy_loads.emplace(std::string_view(definition->lhs), legacy);
+      continue;
+    }
+    CbufferLoadByteCall byte_form;
+    if (ParseCbufferLoadByteCall(definition->rhs, byte_form)) {
+      Candidate candidate;
+      candidate.handle = byte_form.handle;
+      candidate.byte_offset_resolved = byte_form.byte_offset_resolved;
+      candidate.byte_offset = byte_form.byte_offset;
+      candidates.push_back(candidate);
+    }
+  }
+
+  std::unordered_map<std::string_view, std::size_t> extract_counts;
+  std::unordered_map<std::string_view, std::uint32_t> extract_components;
+  std::unordered_map<std::string_view, bool> extract_component_resolved;
+  for (const std::string& value : gate_slice.values) {
+    const Instruction* definition = Definition(function, value);
+    if (!definition) continue;
+    std::string_view aggregate;
+    if (!ParseExtractValueAggregate(definition->rhs, aggregate)) continue;
+    if (!legacy_loads.contains(aggregate)) continue;
+    ++extract_counts[aggregate];
+    std::uint32_t component = 0;
+    extract_component_resolved[aggregate] =
+        ParseExtractValueComponent(definition->rhs, component);
+    extract_components[aggregate] = component;
+  }
+  for (const auto& [load_lhs, load] : legacy_loads) {
+    const auto count_it = extract_counts.find(load_lhs);
+    if (count_it == extract_counts.end() || count_it->second != 1) continue;
+    Candidate candidate;
+    candidate.handle = load.handle;
+    candidate.legacy_form = true;
+    candidate.row_resolved = load.row_resolved;
+    candidate.row = load.row;
+    candidate.component_resolved = extract_component_resolved.at(load_lhs);
+    candidate.component = extract_components.at(load_lhs);
+    candidates.push_back(candidate);
+  }
+
+  if (candidates.size() != 1) return evidence;
+  const Candidate& winner = candidates.front();
+
+  const Instruction* handle_definition = Definition(function, winner.handle);
+  if (!handle_definition) return evidence;
+  CreateHandleCall handle_call;
+  if (!ParseCreateHandleCall(handle_definition->rhs, handle_call) ||
+      !handle_call.resource_class_resolved || handle_call.resource_class != 2)
+    return evidence;
+
+  evidence.resolved = true;
+  evidence.handle_value = std::string(winner.handle);
+  evidence.legacy_form = winner.legacy_form;
+  evidence.range_id_resolved = handle_call.range_id_resolved;
+  evidence.range_id = handle_call.range_id;
+  evidence.row_resolved = winner.row_resolved;
+  evidence.row = winner.row;
+  evidence.component_resolved = winner.component_resolved;
+  evidence.component = winner.component;
+  evidence.byte_offset_resolved = winner.byte_offset_resolved;
+  evidence.byte_offset = winner.byte_offset;
+  return evidence;
+}
+
+struct GateVerification {
+  bool gate_proven = false;
+  FadePrimitiveGatePredicateEvidence evidence;
+};
+
+GateVerification VerifyCbufferControlledGate(
+    const Function& function, std::string_view enabled_predecessor) {
+  GateVerification result;
   for (const Instruction& instruction : function.instructions) {
     const std::string_view line = instruction.code;
     std::string_view condition;
@@ -443,18 +439,25 @@ bool HasCbufferControlledGate(const Function& function,
         successors[0] != enabled_predecessor && successors[1] != enabled_predecessor)
       continue;
     const Slice gate_slice = BackwardSlice(function, condition);
-    if (!gate_slice.complete) return false;
+    if (!gate_slice.complete) return result;
+    bool found_load = false;
     for (const std::string& value : gate_slice.values) {
       const Instruction* definition = Definition(function, value);
       if (definition &&
           (IsDxOpCallWithOpcode(*definition,
                "@dx.op.cbufferLoadLegacy.f32", 59) ||
            IsDxOpCallWithOpcode(*definition,
-               "@dx.op.cbufferLoad.f32", 58)))
-        return true;
+               "@dx.op.cbufferLoad.f32", 58))) {
+        found_load = true;
+        break;
+      }
     }
+    if (!found_load) continue;
+    result.gate_proven = true;
+    result.evidence = ResolveGatePredicateEvidence(function, condition, gate_slice);
+    return result;
   }
-  return false;
+  return result;
 }
 
 struct ThresholdAccess {
@@ -583,16 +586,10 @@ bool IsFloatLoadFromPointer(
   if (!Consume(rhs, cursor, "float") || !Consume(rhs, cursor, "*"))
     return false;
   SkipWhitespace(rhs, cursor);
-  // The exact pointer token is the sole load operand. An adjacent SSA
-  // character would continue a different, longer name (e.g. %ptr2), and
-  // that ambiguity must not authorize the load.
   if (!rhs.substr(cursor).starts_with(expected_pointer)) return false;
   cursor += expected_pointer.size();
   if (cursor < rhs.size() && IsSsaCharacter(rhs[cursor])) return false;
 
-  // The standard alignment suffix, if present, must come before any DXC
-  // metadata attachments (!tbaa, !noalias, and similar) and is otherwise
-  // treated as absent rather than partially consumed.
   std::size_t align_cursor = cursor;
   if (ConsumeComma(rhs, align_cursor)) {
     std::size_t candidate = align_cursor;
@@ -603,10 +600,6 @@ bool IsFloatLoadFromPointer(
         ParseUnsigned(rhs, candidate, alignment))
       cursor = candidate;
   }
-  // Only well-formed metadata attachments may follow the pointer operand or
-  // its optional alignment; any other trailing syntax (extra operands,
-  // unmatched suffixes) is ambiguous evidence and must not authorize a
-  // Production rewrite.
   return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
 }
 
@@ -998,9 +991,6 @@ bool HasUniqueSignatureSemantic(const Module& module,
     const MetadataParseResult parsed =
         ParseMetadataDefinition(global.code, definition);
     if (parsed == MetadataParseResult::Malformed) {
-      // An unrelated malformed metadata node is not evidence about this
-      // semantic. A malformed node that claims the semantic is directly
-      // relevant and therefore fails closed.
       if (global.code.find(expected) != std::string::npos) return false;
       continue;
     }
@@ -1035,68 +1025,10 @@ bool IsDiscardCandidate(std::string_view code) noexcept {
   return Trim(code).starts_with("call void @dx.op.discard(");
 }
 
-// A single well-typed float operand: an SSA value or a literal, with no
-// further value hiding behind it. The exact delimiter (',' or ')') that ends
-// it is left in place for the caller to consume.
-bool ParseFloatOperand(std::string_view rhs, std::size_t& cursor) noexcept {
-  SkipWhitespace(rhs, cursor);
-  if (!Consume(rhs, cursor, "float") || cursor == rhs.size() ||
-      std::isspace(static_cast<unsigned char>(rhs[cursor])) == 0)
-    return false;
-  SkipWhitespace(rhs, cursor);
-  const std::size_t value_start = cursor;
-  while (cursor < rhs.size() && rhs[cursor] != ',' && rhs[cursor] != ')')
-    ++cursor;
-  return !Trim(rhs.substr(value_start, cursor - value_start)).empty();
-}
-
-// call float @dx.op.binary.f32(i32 <opcode>, float <a>, float <b>)
-// Exact callee, exact float return type, exact opcode field, exactly two
-// typed float operands, and only valid metadata attachments may follow the
-// closing parenthesis.
-bool ParseDxOpBinaryF32(std::string_view rhs, std::uint32_t& opcode) noexcept {
-  rhs = Trim(rhs);
-  constexpr std::string_view prefix = "call float @dx.op.binary.f32(";
-  if (!rhs.starts_with(prefix)) return false;
-  std::size_t cursor = prefix.size();
-  if (!ParseTypedUnsigned(rhs, cursor, "i32", opcode) ||
-      !ConsumeComma(rhs, cursor) || !ParseFloatOperand(rhs, cursor) ||
-      cursor == rhs.size() || rhs[cursor] != ',')
-    return false;
-  ++cursor;
-  if (!ParseFloatOperand(rhs, cursor) || cursor == rhs.size() ||
-      rhs[cursor] != ')')
-    return false;
-  ++cursor;
-  return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
-}
-
-// call float @dx.op.unary.f32(i32 <opcode>, float <value>)
-// Same exactness requirements as the binary form, with exactly one operand.
-bool ParseDxOpUnaryF32(std::string_view rhs, std::uint32_t& opcode) noexcept {
-  rhs = Trim(rhs);
-  constexpr std::string_view prefix = "call float @dx.op.unary.f32(";
-  if (!rhs.starts_with(prefix)) return false;
-  std::size_t cursor = prefix.size();
-  if (!ParseTypedUnsigned(rhs, cursor, "i32", opcode) ||
-      !ConsumeComma(rhs, cursor) || !ParseFloatOperand(rhs, cursor) ||
-      cursor == rhs.size() || rhs[cursor] != ')')
-    return false;
-  ++cursor;
-  return HasOnlyMetadataAttachments(Trim(rhs.substr(cursor)));
-}
-
-// Exactly two pure, side-effect-free DXIL intrinsics are recognized as
-// primitive propagation beyond plain LLVM arithmetic: FMin (dx.op.binary.f32
-// opcode 36), which the verified coverage expression already requires
-// elsewhere in the fade primitive, and Saturate (dx.op.unary.f32 opcode 7).
-// No other dx.op.binary/unary opcode, and no other call of any kind, is
-// trusted: an unrecognized or malformed call falls through to the caller's
-// fail-closed catch-all instead of silently authorizing propagation.
 bool IsRecognizedPureDxOpCall(std::string_view rhs) noexcept {
   std::uint32_t opcode = 0;
-  if (ParseDxOpBinaryF32(rhs, opcode)) return opcode == 36;  // FMin(a, b)
-  if (ParseDxOpUnaryF32(rhs, opcode)) return opcode == 7;    // Saturate(value)
+  if (ParseDxOpBinaryF32(rhs, opcode)) return opcode == 36;
+  if (ParseDxOpUnaryF32(rhs, opcode)) return opcode == 7;
   return false;
 }
 
@@ -1145,9 +1077,6 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
         DiscardCall discard_call;
         if (!ParseDiscardCall(user.code, discard_call) ||
             discard_call.predicate != value) {
-          // A malformed discard-looking use is not silently ignored: it is
-          // ambiguous visibility evidence and therefore cannot authorize a
-          // Production patch.
           other_output = true;
         } else {
           discard = true;
@@ -1161,9 +1090,6 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
             output.row != 0 || !IsSvTargetSignature(module, output.signature)) {
           other_output = true;
         } else if (output.column == 3) {
-          // The complete alpha use must be unambiguous. A second matching
-          // store (even to the same signature) could represent a distinct
-          // output path, so it is not Production-authorized.
           if (target_alpha) other_output = true;
           target_alpha = true;
         } else if (output.column < 3) {
@@ -1184,9 +1110,6 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
         pending.push_back(user.lhs);
         continue;
       }
-      // No reachable use is implicitly harmless. Calls, stores, branches,
-      // side-effecting instructions, unsupported value producers, and every
-      // other terminal use make the Production authorization ambiguous.
       other_output = true;
     }
     if (visited.size() >= kConsumerTraversalLimit && !pending.empty())
@@ -1204,7 +1127,7 @@ ConsumerAnalysis ClassifyConsumers(const Function& function, const Module& modul
   return {FadePrimitiveConsumer::Unknown};
 }
 
-} // namespace
+}
 
 FadePrimitiveDiagnostic AnalyzeFadePrimitiveV1(const std::string& llvm_ir) {
   FadePrimitiveDiagnostic diagnostic;
@@ -1233,12 +1156,17 @@ FadePrimitiveDiagnostic AnalyzeFadePrimitiveV1(const std::string& llvm_ir) {
         if (!enabled_slice.complete || !enabled_slice.values.contains(threshold.lhs) ||
             SliceCountInstructionOpcode(function, enabled_slice,
                 "getelementptr") != 1 ||
-            !IsCoverageExpression(function, enabled->value, threshold.lhs) ||
-            !HasCbufferControlledGate(function, enabled->predecessor)) continue;
+            !IsCoverageExpression(function, enabled->value, threshold.lhs))
+          continue;
+        const GateVerification gate =
+            VerifyCbufferControlledGate(function, enabled->predecessor);
+        if (!gate.gate_proven) continue;
         const ConsumerAnalysis consumers = ClassifyConsumers(function, module, phi.lhs);
         if (!consumers.complete) continue;
-        diagnostic.instances.push_back(
-            {consumers.consumer, function.identity, phi.start, phi.end, phi.lhs});
+        FadePrimitiveInstance instance{
+            consumers.consumer, function.identity, phi.start, phi.end, phi.lhs};
+        instance.gate_predicate = gate.evidence;
+        diagnostic.instances.push_back(std::move(instance));
       }
     }
   }

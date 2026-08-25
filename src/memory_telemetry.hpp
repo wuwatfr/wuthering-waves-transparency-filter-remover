@@ -77,9 +77,6 @@ inline std::string FormatMemoryTelemetrySample(
           std::to_string(snapshot.replacement_binds_total);
 }
 
-// The ReShade present callback uses this around every enabled-path operation.
-// Its catch path deliberately allocates and logs nothing, so telemetry cannot
-// propagate memory-pressure exceptions across the host callback boundary.
 template <typename Work>
 bool InvokeMemoryTelemetryNoThrow(Work&& work) noexcept {
   try {
@@ -90,10 +87,6 @@ bool InvokeMemoryTelemetryNoThrow(Work&& work) noexcept {
   }
 }
 
-// Process-local, session-only scheduling state. The caller must check enabled()
-// before reading a clock; TryAcquireSample takes no lock unless a deadline is
-// due. EmitIfCurrent lets a caller suppress a prepared log line if the user
-// disabled telemetry while the scheduled process/runtime queries were running.
 class MemoryTelemetryController {
  public:
   bool enabled() const noexcept {
@@ -102,8 +95,6 @@ class MemoryTelemetryController {
 
   void SetEnabled(bool enabled) {
     if (!enabled) {
-      // This store is deliberately before the lock: present callbacks stop at
-      // their first enabled-state check without waiting for UI work.
       enabled_.store(false, std::memory_order_release);
       std::lock_guard lock(state_mutex_);
       if (!enabled_.load(std::memory_order_acquire)) ResetScheduleLocked();
@@ -126,9 +117,6 @@ class MemoryTelemetryController {
     return ClaimObservedDueSample(monotonic_seconds, *observed_session);
   }
 
-  // This split makes the session boundary deterministic to test. Production
-  // uses the two steps back-to-back; a caller that observed an older session
-  // cannot claim or block a newer session in ClaimObservedDueSample().
   std::optional<std::uint64_t> ObserveDueSession(
       std::uint64_t monotonic_seconds) const noexcept {
     if (!enabled_.load(std::memory_order_acquire)) return std::nullopt;

@@ -1,0 +1,472 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 WuwaTFR contributors
+
+#include "dev/capture/manual_capture.hpp"
+
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+#include <imgui.h>
+
+#include "dev/capture/fade_control_runtime.hpp"
+#include "dev/dev_inspection.hpp"
+#include "dev/diagnostics/dev_diagnostics.hpp"
+#include "dev/trace/trace_report.hpp"
+#include "dev/trace/trace_state.hpp"
+
+using namespace reshade::api;
+
+namespace wuwa_tfr::dev {
+
+namespace {
+
+ManualCaptureAccumulator g_manual_capture;
+std::uint64_t g_manual_capture_generation = 0;
+std::uint64_t g_manual_capture_frame_counter = 0;
+std::uintptr_t g_manual_capture_swapchain = 0;
+
+std::string g_manual_capture_status = "idle";
+std::string g_manual_capture_last_export;
+
+bool g_manual_capture_filter_pending_verified_only = true;
+
+const char* ShaderFilterName(ManualCaptureShaderFilter filter) {
+  return filter == ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly
+      ? "verified_fade_primitive_only"
+      : "all_observed_pixel_shaders";
+}
+
+std::string SerializeVertexBindings(
+    const std::vector<wuwa_tfr::TraceVertexBinding>& bindings) {
+  std::ostringstream stream;
+  for (std::size_t i = 0; i < bindings.size(); ++i) {
+    const auto& binding = bindings[i];
+    if (i != 0) stream << ';';
+    stream << binding.slot << ':' << binding.resource_incarnation << ':'
+           << binding.offset << ':' << binding.stride << ':'
+           << static_cast<int>(binding.dynamic_contents);
+  }
+  return stream.str();
+}
+
+std::string SerializeIndexBinding(
+    const std::optional<wuwa_tfr::TraceIndexBinding>& index_buffer) {
+  if (!index_buffer) return "-";
+  std::ostringstream stream;
+  stream << index_buffer->resource_incarnation << ':' << index_buffer->offset
+         << ':' << index_buffer->index_size << ':'
+         << static_cast<int>(index_buffer->dynamic_contents);
+  return stream.str();
+}
+
+std::string ManualCaptureExportStem(const std::string& timestamp) {
+  return "manual-capture-" + timestamp;
+}
+
+bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
+    const std::string& timestamp, const std::filesystem::path& out_path) {
+  std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
+  if (!report) return false;
+
+  report << "format\twuwa_tfr_manual_execution_capture_v2\n";
+  report << "capture_type\tmanual_user_delimited_session\n";
+  report << "session_id\t" << snapshot.session_id << '\n';
+  report << "start_frame\t" << snapshot.start_frame << '\n';
+  report << "end_frame\t" << snapshot.end_frame << '\n';
+  report << "captured_presents\t" << snapshot.captured_presents << '\n';
+  report << "record_count\t" << snapshot.records.size() << '\n';
+  report << "capacity_exceeded\t"
+         << static_cast<int>(snapshot.capacity_exceeded) << '\n';
+  report << "shader_filter\t" << ShaderFilterName(snapshot.shader_filter)
+         << '\n';
+  report << "export_timestamp_local\t" << timestamp << '\n';
+  report << "membership_boundary\t"
+      "command_list_submitted_while_capturing_not_recording_time\n";
+  report << "record_identity\t"
+      "pso_incarnation_plus_geometry_plus_pass_fingerprint_same_identity_as_"
+      "the_differential_trace_concrete_draw_key_never_shader_hash_alone\n";
+  report << "swapchain_policy\t"
+      "first_present_observed_after_start_capture_all_other_swapchains_"
+      "ignored\n";
+  report << "pso_identity_semantics\t"
+      "application_pso_is_the_application_pipeline_handle_pso_incarnation_"
+      "disambiguates_handle_reuse_pso_fingerprint_is_observed_pipeline_"
+      "creation_identity_pixel_shader_hash_is_the_original_dxil_pixel_"
+      "shader\n";
+  report << "root_constant_fingerprint_meaning\t"
+      "observed_root_constant_state_fingerprint\n";
+  report << "pushed_cbv_fingerprint_meaning\t"
+      "accumulated_binding_event_fingerprint_not_stable_state_not_"
+      "constant_buffer_contents\n";
+  report << "descriptor_table_fingerprint_meaning\t"
+      "accumulated_binding_event_fingerprint_not_stable_state_not_"
+      "constant_buffer_contents\n";
+  report << "binding_summary_semantics\t"
+      "first_last_fingerprint_and_changed_flag_across_every_draw_"
+      "aggregated_into_this_route_not_a_single_draws_binding_state\n";
+  report << "pass_observation\t"
+      "pass_observed_marks_exact_render_pass_proof_per_row_an_unobserved_"
+      "pass_is_never_shown_as_proven_identity\n";
+  report << "direct_args\tvertex_count_instance_count_first_vertex_"
+      "first_instance_unused\n";
+  report << "indexed_args\tindex_count_instance_count_first_index_"
+      "vertex_offset_bits_first_instance\n";
+  report << "mesh_args\tgroup_x_group_y_group_z_unused_unused\n";
+  report << "indirect_args\tunknown_use_indirect_columns\n";
+  report << "limitation\t"
+      "cpu_queue_submission_observation_only_not_gpu_completion_evidence_"
+      "not_proof_of_visible_pixels_not_proof_of_fade_causality\n";
+
+  report << "device\tapplication_pso\tpso_incarnation\tpso_fingerprint"
+      "\tpso_context_hash\tpixel_shader_hash"
+      "\tdraw_kind\tgeometry_fingerprint\targ0\targ1\targ2\targ3\targ4"
+      "\ttopology\tvertex_bindings\tindex_binding"
+      "\tindirect_argument_resource\tindirect_offset"
+      "\tindirect_declared_count\tindirect_stride"
+      "\tpass_fingerprint\tpass_observed"
+      "\tobserved_bindings"
+      "\troot_constant_first_fingerprint\troot_constant_last_fingerprint"
+      "\troot_constant_changed"
+      "\tpushed_cbv_first_fingerprint\tpushed_cbv_last_fingerprint"
+      "\tpushed_cbv_changed"
+      "\tdescriptor_table_first_fingerprint"
+      "\tdescriptor_table_last_fingerprint\tdescriptor_table_changed"
+      "\trt0_blend\talpha_to_coverage\tdepth_test\tdepth_write"
+      "\trender_target_count\tsample_count"
+      "\tcommands\tsubmissions\tfirst_frame\tlast_frame\n";
+
+  for (const auto& [key, record] : snapshot.records) {
+    report << Hex64(record.pipeline.device) << '\t'
+           << Hex64(record.pipeline.application_pipeline) << '\t'
+           << record.pipeline.incarnation_id << '\t'
+           << Hex64(record.pipeline.pso_fingerprint) << '\t'
+           << Hex64(record.pipeline.context_hash) << '\t'
+           << Hex64(record.pipeline.shader_hash) << '\t'
+           << TraceDrawKindName(key.geometry.kind) << '\t'
+           << Hex64(static_cast<std::uint64_t>(
+                  wuwa_tfr::TraceGeometryKeyHash{}(key.geometry)));
+    for (const auto argument : key.geometry.arguments)
+      report << '\t' << argument;
+    report << '\t' << key.geometry.topology << '\t'
+           << SerializeVertexBindings(key.geometry.vertex_buffers) << '\t'
+           << SerializeIndexBinding(key.geometry.index_buffer) << '\t'
+           << key.geometry.indirect_resource_incarnation << '\t'
+           << key.geometry.indirect_offset << '\t'
+           << key.geometry.indirect_declared_count << '\t'
+           << key.geometry.indirect_stride << '\t'
+           << Hex64(key.pass_fingerprint) << '\t'
+           << static_cast<int>(
+                  (key.geometry.observations & wuwa_tfr::TraceObservedPass) !=
+                  0)
+           << '\t' << static_cast<int>(record.observed_bindings) << '\t'
+           << Hex64(record.root_constants.first_fingerprint) << '\t'
+           << Hex64(record.root_constants.last_fingerprint) << '\t'
+           << static_cast<int>(record.root_constants.changed) << '\t'
+           << Hex64(record.pushed_cbvs.first_fingerprint) << '\t'
+           << Hex64(record.pushed_cbvs.last_fingerprint) << '\t'
+           << static_cast<int>(record.pushed_cbvs.changed) << '\t'
+           << Hex64(record.descriptor_tables.first_fingerprint) << '\t'
+           << Hex64(record.descriptor_tables.last_fingerprint) << '\t'
+           << static_cast<int>(record.descriptor_tables.changed) << '\t'
+           << static_cast<int>(record.pipeline.rt0_blend) << '\t'
+           << static_cast<int>(record.pipeline.alpha_to_coverage) << '\t'
+           << static_cast<int>(record.pipeline.depth_test) << '\t'
+           << static_cast<int>(record.pipeline.depth_write) << '\t'
+           << record.pipeline.render_target_count << '\t'
+           << record.pipeline.sample_count << '\t' << record.commands << '\t'
+           << record.submissions << '\t' << record.first_frame << '\t'
+           << record.last_frame << '\n';
+  }
+  report.flush();
+  return static_cast<bool>(report);
+}
+
+bool IsVerifiedFadePrimitiveShaderLocked(std::uint64_t shader_hash) {
+  const auto it = g_inspections.find(shader_hash);
+  return it != g_inspections.end() && it->second.inspection_succeeded &&
+      !it->second.fade_instances.empty();
+}
+
+}  // namespace
+
+void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
+  const std::uint64_t session_id = g_manual_capture_session_token.value();
+  if (session_id == 0 || !cmd_list) return;
+  auto* trace = cmd_list->get_private_data<CommandListTrace>();
+  if (!trace ||
+      (trace->recorded_draws.empty() &&
+          !trace->recorded_draw_capacity_exceeded))
+    return;
+
+  ManualCaptureShaderFilter filter_mode;
+  {
+    std::lock_guard lock(g_trace_mutex);
+    if (!g_manual_capture.IsLiveSession(session_id)) return;
+    filter_mode = g_manual_capture.active().shader_filter;
+  }
+
+  std::unordered_set<std::uint64_t> eligible_shader_hashes;
+  const bool filter_active =
+      filter_mode == ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly;
+  if (filter_active) {
+    std::unordered_set<std::uint64_t> observed_shader_hashes;
+    observed_shader_hashes.reserve(trace->recorded_draws.size());
+    for (const auto& [draw_key, draw] : trace->recorded_draws)
+      observed_shader_hashes.insert(draw.pipeline.shader_hash);
+
+    std::lock_guard inspection_lock(g_inspection_mutex);
+    for (const auto shader_hash : observed_shader_hashes) {
+      if (IsVerifiedFadePrimitiveShaderLocked(shader_hash))
+        eligible_shader_hashes.insert(shader_hash);
+    }
+  }
+
+  std::lock_guard lock(g_trace_mutex);
+  if (!g_manual_capture.IsLiveSession(session_id)) return;
+  if (trace->recorded_draw_capacity_exceeded)
+    g_manual_capture.MarkCapacityExceeded();
+  const bool admit_fade = trace->fade_admitted_manual_session != session_id;
+  if (admit_fade) trace->fade_admitted_manual_session = session_id;
+  const std::uint64_t frame = g_manual_capture_frame_counter;
+  for (const auto& [draw_key, draw] : trace->recorded_draws) {
+    if (admit_fade) CommitPendingFadeControlObservations(draw);
+    if (filter_active &&
+        !eligible_shader_hashes.contains(draw.pipeline.shader_hash))
+      continue;
+    const ManualCaptureRecordKey key{draw_key.concrete.pso_incarnation,
+        draw_key.concrete.geometry, draw_key.concrete.pass_fingerprint};
+    const ManualCaptureBindingObservation binding{draw_key.root_constants,
+        draw_key.pushed_cbvs, draw_key.descriptor_tables,
+        draw_key.observed_bindings};
+    g_manual_capture.Accumulate(
+        key, draw.pipeline, draw.commands, frame, binding);
+  }
+}
+
+void OnManualCapturePresent(command_queue*, swapchain* presented_swapchain,
+    const rect*, const rect*, std::uint32_t, const rect*) {
+  const std::uint64_t session_id = g_manual_capture_session_token.value();
+  if (session_id == 0) return;
+
+  std::lock_guard lock(g_trace_mutex);
+  if (!g_manual_capture.IsLiveSession(session_id)) return;
+  const std::uintptr_t swapchain_id =
+      reinterpret_cast<std::uintptr_t>(presented_swapchain);
+  if (g_manual_capture_swapchain == 0)
+    g_manual_capture_swapchain = swapchain_id;
+  else if (g_manual_capture_swapchain != swapchain_id)
+    return;
+  ++g_manual_capture_frame_counter;
+  g_manual_capture.ObservePresent(g_manual_capture_frame_counter);
+}
+
+void RegisterManualCaptureEvents() {
+  reshade::register_event<reshade::addon_event::execute_command_list>(
+      OnManualCaptureExecute);
+  reshade::register_event<reshade::addon_event::present>(
+      OnManualCapturePresent);
+}
+
+void StartManualCapture() {
+  const auto filter_mode = g_manual_capture_filter_pending_verified_only
+      ? ManualCaptureShaderFilter::VerifiedFadePrimitiveOnly
+      : ManualCaptureShaderFilter::AllObservedPixelShaders;
+
+  const bool fade_control_enabled = FadeControlCapturePending();
+
+  std::lock_guard lock(g_trace_mutex);
+  ++g_manual_capture_generation;
+  g_manual_capture_frame_counter = 0;
+  g_manual_capture_swapchain = 0;
+  g_manual_capture.Start(g_manual_capture_generation, 0, filter_mode);
+  g_manual_capture_status = "capturing";
+  StartFadeControlCapture(g_manual_capture_generation, fade_control_enabled);
+  g_manual_capture_session_token.Start(g_manual_capture_generation);
+}
+
+bool StopAndExportManualCapture() {
+  ManualCaptureSnapshot snapshot;
+  {
+    std::lock_guard lock(g_trace_mutex);
+    if (g_manual_capture.state() != ManualCaptureState::Capturing)
+      return false;
+    g_manual_capture_session_token.Stop();
+    snapshot = g_manual_capture.Stop(g_manual_capture_frame_counter);
+  }
+  const bool fade_control_was_enabled = StopFadeControlCapture();
+
+  const std::string timestamp = LocalExportTimestamp();
+  const auto directory = DumpDir();
+  if (directory.empty()) {
+    g_manual_capture_status = "export failed: check DumpPath";
+    return false;
+  }
+  std::vector<std::string> stems{ManualCaptureExportStem(timestamp)};
+  if (fade_control_was_enabled) {
+    stems.push_back(FadeControlExportStem(timestamp));
+    stems.push_back(FadeControlSnapshotExportStem(timestamp));
+  }
+  const auto filenames = AllocateExportFilenameGroup(
+      stems, ".tsv", [&directory](const std::string& candidate) {
+        return std::filesystem::exists(directory / candidate);
+      });
+  if (!filenames) {
+    g_manual_capture_status = "export failed: check DumpPath";
+    return false;
+  }
+
+  const std::filesystem::path export_path = directory / (*filenames)[0];
+  const bool exported =
+      WriteManualCaptureExport(snapshot, timestamp, export_path);
+  bool fade_control_exported = false;
+  bool fade_snapshot_exported = false;
+  if (fade_control_was_enabled) {
+    fade_control_exported =
+        WriteFadeControlExport(timestamp, directory / (*filenames)[1]);
+    fade_snapshot_exported =
+        WriteFadeControlSnapshotExport(timestamp, directory / (*filenames)[2]);
+  }
+  g_manual_capture_status = exported
+      ? (fade_control_was_enabled
+                ? ((fade_control_exported && fade_snapshot_exported)
+                          ? "exported manual capture + fade control values "
+                            "+ snapshots"
+                          : "exported manual capture; fade control/"
+                            "snapshot export failed: check DumpPath")
+                : "exported manual capture")
+      : "export failed: check DumpPath";
+  if (exported) g_manual_capture_last_export = export_path.filename().string();
+  return exported;
+}
+
+void ClearManualCapture() {
+  std::lock_guard lock(g_trace_mutex);
+  if (g_manual_capture.state() == ManualCaptureState::Capturing) return;
+  g_manual_capture.Clear();
+  g_manual_capture_status = "cleared";
+  g_manual_capture_last_export.clear();
+}
+
+void DrawManualCaptureOverlay() {
+  if (!ImGui::CollapsingHeader("Manual execution capture"))
+    return;
+
+  ImGui::TextDisabled(
+      "Independent of the differential trace above: Start, reproduce one "
+      "state, Stop + export, then repeat for a second state without "
+      "restarting the game.");
+
+  ManualCaptureSummary summary;
+  {
+    std::lock_guard lock(g_trace_mutex);
+    summary = g_manual_capture.Summary();
+  }
+  const bool is_capturing = summary.state == ManualCaptureState::Capturing;
+
+  ImGui::BeginDisabled(is_capturing);
+  ImGui::Checkbox("Verified Fade Primitive only",
+      &g_manual_capture_filter_pending_verified_only);
+  ImGui::EndDisabled();
+  ImGui::TextDisabled(
+      "Snapshotted when Start capture is pressed and fixed for that "
+      "session. Admits a Draw only when its Pixel Shader Hash already has a "
+      "successful inspection with a fully verified Fade Primitive v1 "
+      "instance; the matcher is not re-run here.");
+
+  bool fade_control_pending = FadeControlCapturePending();
+  ImGui::BeginDisabled(is_capturing);
+  if (ImGui::Checkbox("Capture Fade control values", &fade_control_pending))
+    SetFadeControlCapturePending(fade_control_pending);
+  ImGui::EndDisabled();
+  ImGui::TextDisabled(
+      "Snapshotted at Start capture. Only meaningful for verified Fade "
+      "Primitive Draws -- CPU command-recording-time observation of mapped "
+      "constant-buffer memory, never GPU completion evidence. See "
+      "manual-fade-controls-*.tsv for the full disclosure.");
+
+  ImGui::BeginDisabled(is_capturing);
+  if (ImGui::Button("Start capture")) StartManualCapture();
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!is_capturing);
+  if (ImGui::Button("Stop + export")) StopAndExportManualCapture();
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  ImGui::BeginDisabled(is_capturing);
+  if (ImGui::Button("Clear")) ClearManualCapture();
+  ImGui::EndDisabled();
+
+  const char* state_name = summary.state == ManualCaptureState::Idle
+      ? "Idle"
+      : (summary.state == ManualCaptureState::Capturing ? "Capturing"
+                                                          : "Captured");
+  ImGui::Text("State: %s", state_name);
+  ImGui::Text("Filter: %s", ShaderFilterName(summary.shader_filter));
+  ImGui::Text("Session: %llu",
+      static_cast<unsigned long long>(summary.session_id));
+  ImGui::Text("Presents: %llu",
+      static_cast<unsigned long long>(summary.captured_presents));
+  ImGui::Text("Records: %zu", summary.record_count);
+  ImGui::Text(
+      "Capacity exceeded: %s", summary.capacity_exceeded ? "yes" : "no");
+  ImGui::Text("Last export: %s",
+      g_manual_capture_last_export.empty() ? "none"
+                                            : g_manual_capture_last_export.c_str());
+  ImGui::TextDisabled("%s", g_manual_capture_status.c_str());
+  ImGui::TextDisabled(
+      "Pixel Shader Hash, Application PSO, PSO Incarnation, PSO Fingerprint "
+      "and PSO Context are separate identities -- see the exported TSV's "
+      "columns, never a single \"Hash\".");
+  if (summary.capacity_exceeded) {
+    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
+        "Unique-record capacity reached; this capture is incomplete.");
+  }
+
+  const auto fade_control = GetFadeControlDiagnosticCounters();
+  if (fade_control.enabled) {
+    ImGui::Separator();
+    ImGui::Text(
+        "Fade control values: sources=%zu | resolved bindings=%zu | "
+        "sampled=%llu | unavailable=%llu",
+        fade_control.control_sources, fade_control.resolved_bindings,
+        static_cast<unsigned long long>(fade_control.sampled_values),
+        static_cast<unsigned long long>(fade_control.unavailable_values));
+    if (fade_control.capacity_exceeded) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
+          "Fade control value capacity reached; this trace is incomplete.");
+    }
+    ImGui::Text("Predicate CBV snapshots: %zu", fade_control.snapshot_count);
+    if (fade_control.snapshot_capacity_exceeded) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
+          "Snapshot capacity reached; some predicate bindings were not "
+          "snapshotted.");
+    }
+    if (fade_control.descriptor_slot_capacity_loss ||
+        fade_control.mapped_buffer_capacity_loss ||
+        fade_control.layout_map_capacity_loss ||
+        fade_control.descriptor_range_truncated ||
+        fade_control.resource_lifecycle_capacity_loss) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
+          "Evidence capacity loss (%s%s%s%s%s); some unavailable or stale "
+          "rows may reflect lost diagnostic state, not a genuine binding "
+          "miss.",
+          fade_control.descriptor_slot_capacity_loss ? "descriptor slots "
+                                                       : "",
+          fade_control.mapped_buffer_capacity_loss ? "mapped buffers " : "",
+          fade_control.layout_map_capacity_loss ? "layout maps " : "",
+          fade_control.descriptor_range_truncated ? "descriptor ranges "
+                                                    : "",
+          fade_control.resource_lifecycle_capacity_loss
+              ? "resource lifecycle " : "");
+    }
+  }
+}
+
+}  // namespace wuwa_tfr::dev

@@ -14,13 +14,11 @@ namespace wuwa_tfr::dev {
 
 std::mutex g_trace_mutex;
 wuwa_tfr::TraceIncarnationIndex<TracePsoIdentity> g_trace_pso_incarnations;
-wuwa_tfr::TraceIncarnationIndex<TraceResourceIdentity>
-    g_trace_resource_incarnations;
 wuwa_tfr::TraceIncarnationIndex<std::uint64_t> g_trace_view_incarnations;
 TracePsoAmbiguityDiagnostics g_trace_pso_lifecycle_ambiguities;
 TraceResourceAmbiguityDiagnostics g_trace_resource_lifecycle_ambiguities;
 std::uint64_t g_trace_lifecycle_event_serial = 0;
-std::unordered_map<TracePipelineKey, TracePipelineInfo, TracePipelineKeyHash>
+std::unordered_map<TracePipelineKey, wuwa_tfr::ExecutionPipelineIdentity, TracePipelineKeyHash>
     g_trace_pipelines;
 std::unordered_map<std::uint64_t, ShaderTraceRecord> g_trace_shaders;
 std::unordered_map<wuwa_tfr::TraceConcreteDrawKey, ConcreteTraceRecord,
@@ -100,6 +98,8 @@ void EnsureTraceLayout(
   trace.descriptor_table_fingerprint = kTraceFnvOffset;
   trace.observed_bindings = 0;
   trace.root_constants.clear();
+  trace.root_cbv_bindings.clear();
+  trace.bound_descriptor_tables.clear();
 }
 
 bool HasPixelStage(shader_stage stages) noexcept {
@@ -110,11 +110,8 @@ ActiveTraceResource ActiveResourceIncarnationLocked(
     DeviceIdentity device,
     resource handle) {
   if (handle.handle == 0) return {};
-  const auto* record = g_trace_resource_incarnations.FindActive(
-      {device, handle.handle});
-  return record
-      ? ActiveTraceResource{record->id, record->identity.dynamic_contents}
-      : ActiveTraceResource{};
+  const auto active = FindActiveResourceLifecycle({device, handle.handle});
+  return {active.incarnation_id, active.dynamic_contents};
 }
 
 std::uint64_t ActiveViewIncarnationLocked(
@@ -237,13 +234,13 @@ void ResetLifecycleAmbiguityDiagnosticsLocked() {
   g_trace_lifecycle_event_serial = 0;
 }
 
-TracePipelineInfo DescribeTracePipeline(
+wuwa_tfr::ExecutionPipelineIdentity DescribeTracePipeline(
     std::uint32_t subobject_count,
     const pipeline_subobject* subobjects,
     std::uint64_t shader_hash) {
   blend_desc blend{};
   depth_stencil_desc depth{};
-  TracePipelineInfo info;
+  wuwa_tfr::ExecutionPipelineIdentity info;
   info.shader_hash = shader_hash;
   std::uint64_t context_hash = kTraceFnvOffset;
 

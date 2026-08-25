@@ -1,15 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
-//
-// ReShade event handlers for the Dev-only runtime differential trace (PSO,
-// resource, resource-view, command-list, binding, and draw/dispatch/present
-// tracking), plus the window-management and snapshot/list-generation
-// functions the overlay (dev/dev_overlay.*) drives.
-//
-// This is observation only: it never creates, patches, or binds a
-// replacement pipeline. Fade-primitive replacement is owned entirely by
-// g_dev_antifade_runtime (dev/dev_runtime.hpp), a separate, independent
-// instance of the same runtime class Production uses.
 
 #pragma once
 

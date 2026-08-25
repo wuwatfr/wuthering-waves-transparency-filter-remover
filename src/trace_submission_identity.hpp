@@ -39,6 +39,22 @@ struct TraceLiveHandleKeyHash {
   }
 };
 
+struct ExecutionPipelineIdentity {
+  std::uint64_t device = 0;
+  std::uint64_t application_pipeline = 0;
+  std::uint64_t incarnation_id = 0;
+  std::uint64_t pso_fingerprint = 0;
+  std::uint64_t shader_hash = 0;
+  std::uint64_t context_hash = 0;
+  std::uint32_t primitive_topology = 0;
+  bool rt0_blend = false;
+  bool alpha_to_coverage = false;
+  bool depth_test = false;
+  bool depth_write = false;
+  std::uint32_t render_target_count = 0;
+  std::uint32_t sample_count = 1;
+};
+
 template <typename Identity>
 class TraceIncarnationIndex {
  public:
@@ -159,8 +175,6 @@ struct TraceVersionedSlotUpdate {
   bool replaced = false;
 };
 
-// Descriptor slots may be rewritten without a destroy event. A changed
-// identity is a new content version of the same slot, not a lifecycle error.
 template <typename Identity>
 TraceVersionedSlotUpdate UpdateTraceVersionedSlot(
     TraceIncarnationIndex<Identity>& index, TraceLiveHandleKey key,
@@ -275,7 +289,6 @@ struct TraceIndexBinding {
       default;
 };
 
-// Binding identity only: dynamic/shared resource contents are not observed.
 struct TraceGeometryKey {
   TraceDrawKind kind = TraceDrawKind::Direct;
   std::array<std::uint64_t, 5> arguments{};
@@ -340,9 +353,6 @@ struct TraceConcreteDrawKeyHash {
   }
 };
 
-// Same observed geometry and exact render pass, deliberately independent of
-// PSO incarnation so a material/PSO switch can be followed without merging
-// unrelated depth, shadow or color passes.
 struct TraceDrawRouteKey {
   TraceGeometryKey geometry;
   std::uint64_t pass_fingerprint = 0;

@@ -13,10 +13,6 @@
 
 namespace wuwa_tfr {
 
-// Recycles independently owned preparation contexts. Context methods are only
-// used through a Lease, so no Context instance is used concurrently. Drain
-// waits for active leases before destroying idle contexts; callers execute on
-// their existing threads and this class never owns worker threads.
 template <typename Context>
 class PreparationContextPool {
  public:
@@ -97,8 +93,6 @@ class PreparationContextPool {
     return Lease(this, std::move(context));
   }
 
-  // Called only after the device activity layer has blocked new preparation
-  // callbacks. It waits for every active Lease before unloading Context state.
   void Drain() {
     std::unique_lock lock(mutex_);
     draining_ = true;

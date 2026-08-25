@@ -7,19 +7,22 @@
 #include "device_activity_state.hpp"
 #include "dxc_bridge.hpp"
 #include "fade_primitive_detector.hpp"
+#include "fade_primitive_runtime_observer.hpp"
 #include "pipeline_replacement_coordinator.hpp"
+#include "pixel_shader_identity.hpp"
 #include "preparation_context_pool.hpp"
+#include "shader_preparation_outcome.hpp"
 #include "single_flight_cache.hpp"
 #include "target_dither_bypass.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <exception>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace wuwa_tfr {
@@ -29,60 +32,6 @@ using DeviceId = std::uintptr_t;
 
 DeviceId DeviceKey(device* value) noexcept {
   return reinterpret_cast<DeviceId>(value);
-}
-
-std::uint64_t Fnv1a64(const void* data, std::size_t size) {
-  const auto* bytes = static_cast<const std::uint8_t*>(data);
-  std::uint64_t hash = 14695981039346656037ull;
-  for (std::size_t i = 0; i < size; ++i) {
-    hash ^= bytes[i];
-    hash *= 1099511628211ull;
-  }
-  return hash;
-}
-
-bool HasDxilChunk(const void* code, std::size_t size) {
-  if (!code || size < 32) return false;
-  const auto* bytes = static_cast<const std::uint8_t*>(code);
-  if (std::memcmp(bytes, "DXBC", 4) != 0) return false;
-  const auto read_u32 = [bytes](std::size_t offset) {
-    std::uint32_t value = 0;
-    std::memcpy(&value, bytes + offset, sizeof(value));
-    return value;
-  };
-  const std::uint32_t total_size = read_u32(24);
-  const std::uint32_t chunk_count = read_u32(28);
-  if (total_size != size || total_size < 32 ||
-      chunk_count > (total_size - 32) / 4)
-    return false;
-  bool has_dxil = false;
-  for (std::uint32_t i = 0; i < chunk_count; ++i) {
-    const std::uint32_t offset = read_u32(32 + 4 * i);
-    if (offset > total_size || total_size - offset < 8) return false;
-    const std::uint32_t chunk_size = read_u32(offset + 4);
-    if (chunk_size > total_size - offset - 8) return false;
-    has_dxil = has_dxil || std::memcmp(bytes + offset, "DXIL", 4) == 0;
-  }
-  return has_dxil;
-}
-
-bool FindPixelShader(std::uint32_t count, const pipeline_subobject* subobjects,
-    const shader_desc*& shader, std::uint64_t& hash) {
-  shader = nullptr;
-  hash = 0;
-  if (!subobjects) return false;
-  for (std::uint32_t i = 0; i < count; ++i) {
-    if (subobjects[i].type != pipeline_subobject_type::pixel_shader ||
-        !subobjects[i].data)
-      continue;
-    const auto& candidate = *static_cast<const shader_desc*>(subobjects[i].data);
-    if (!HasDxilChunk(candidate.code, candidate.code_size)) continue;
-    const std::uint64_t candidate_hash = Fnv1a64(candidate.code, candidate.code_size);
-    if (shader && hash != candidate_hash) return false;
-    shader = &candidate;
-    hash = candidate_hash;
-  }
-  return shader != nullptr;
 }
 
 class ScopedFlag {
@@ -115,10 +64,6 @@ constexpr std::size_t kDxcContextPoolCapacity = 4;
 } // namespace
 
 struct FadePrimitiveRuntime::Impl {
-  // Lock order is activity -> single-flight cache -> DXC pool. The cache lock
-  // is released before a context is acquired or any DXC call begins. Last-
-  // device teardown holds activity exclusively, then drains the pool; it never
-  // takes the cache lock, so it cannot wait in a lock cycle with a callback.
   SingleFlightCache<std::uint64_t, PreparedShader, std::hash<std::uint64_t>,
       PreparedShaderPayloadBytes> prepared;
   std::filesystem::path dxc_runtime_directory;
@@ -127,8 +72,7 @@ struct FadePrimitiveRuntime::Impl {
   DeviceActivityState<DeviceId> activity;
   PipelineReplacementCoordinator<DeviceId, pipeline> replacements;
   std::atomic<bool> enabled{false};
-  // These are cumulative runtime activity counters, not retained-object
-  // gauges. Telemetry snapshots only load them and never increment them.
+  FadePrimitiveRuntimeObserver* observer = nullptr;
   std::atomic<std::uint64_t> matched_shaders{0};
   std::atomic<std::uint64_t> prepared_shaders{0};
   std::atomic<std::uint64_t> replacements_created{0};
@@ -137,14 +81,16 @@ struct FadePrimitiveRuntime::Impl {
 
   Impl()
       : dxc_pool(kDxcContextPoolCapacity, [this] {
-          // DxcBridge owns its own module, COM interfaces, assembler, and
-          // validator. A leased instance is never called concurrently.
           return std::make_unique<DxcBridge>(dxc_runtime_directory);
         }) {}
 
-  PreparedShader PrepareOne(const shader_desc& original) {
+  PreparedShader PrepareOne(std::uint64_t hash, const shader_desc& original) {
     PreparedShader state;
     state.attempted = true;
+    std::optional<DxilInspectionOutput> inspected;
+    FadePrimitiveDiagnostic diagnostic;
+    std::optional<TargetDitherBypassResult> patched;
+    bool analysis_reached_verdict = false;
     try {
       auto dxc = dxc_pool.Acquire();
       if (!dxc) {
@@ -152,28 +98,29 @@ struct FadePrimitiveRuntime::Impl {
       } else if (!dxc->available()) {
         state.failure = dxc->init_error();
       } else {
-        const auto inspected = dxc->InspectShader(original.code, original.code_size);
-        if (!inspected.success) {
-          state.failure = inspected.error;
+        inspected = dxc->InspectShader(original.code, original.code_size);
+        if (!inspected->success) {
+          state.failure = inspected->error;
         } else {
-          const auto diagnostic = AnalyzeFadePrimitiveV1(inspected.original_ir);
+          diagnostic = AnalyzeFadePrimitiveV1(inspected->original_ir);
+          analysis_reached_verdict = true;
           state.matches = !diagnostic.instances.empty();
           if (!state.matches) {
             state.failure = "no fully verified transparency-filter primitive";
           } else {
             matched_shaders.fetch_add(1, std::memory_order_relaxed);
-            const auto patched = PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-                inspected.original_ir);
-            if (!patched.success ||
-                patched.verified_instance_count != diagnostic.instances.size() ||
-                patched.patched_instance_count != diagnostic.instances.size()) {
-              state.failure = patched.error.empty() ?
-                  "structural verification failed" : patched.error;
+            patched = PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+                inspected->original_ir, diagnostic);
+            if (!patched->success ||
+                patched->verified_instance_count != diagnostic.instances.size() ||
+                patched->patched_instance_count != diagnostic.instances.size()) {
+              state.failure = patched->error.empty() ?
+                  "structural verification failed" : patched->error;
             } else {
               auto bytes = std::make_shared<std::vector<std::uint8_t>>();
               std::string error;
               DxilAssemblyValidationOutput result;
-              if (!dxc->AssembleAndValidate(patched.llvm_ir, *bytes, error, result)) {
+              if (!dxc->AssembleAndValidate(patched->llvm_ir, *bytes, error, result)) {
                 state.failure = error;
               } else {
                 state.bytecode = std::move(bytes);
@@ -188,8 +135,33 @@ struct FadePrimitiveRuntime::Impl {
     } catch (...) {
       state.failure = "preparation exception";
     }
-    if (!state.bytecode)
+    if (ShaderPreparationIsFailure(ClassifyShaderPreparation(
+            analysis_reached_verdict, state.matches,
+            state.bytecode != nullptr)))
       replacements_failed.fetch_add(1, std::memory_order_relaxed);
+
+    if (observer) {
+      FadePrimitiveRuntimeObserver::ShaderPreparationObservation observation;
+      observation.original_shader_hash = hash;
+      observation.original_bytecode_size = original.code_size;
+      observation.inspection_succeeded = inspected.has_value() && inspected->success;
+      if (inspected) {
+        if (!inspected->success) observation.inspection_error = inspected->error;
+      } else {
+        observation.inspection_error = state.failure;
+      }
+      if (observation.inspection_succeeded)
+        observation.original_ir = &inspected->original_ir;
+      observation.fade_primitive = diagnostic;
+      if (patched) {
+        observation.pre_fade_evidence = patched->instance_evidence;
+        observation.patch_succeeded = patched->success;
+        if (!patched->success) observation.patch_failure = state.failure;
+      }
+      observation.prepared_succeeded = state.bytecode != nullptr;
+      observation.prepared_failure = state.failure;
+      observer->OnShaderPrepared(observation);
+    }
     return state;
   }
 
@@ -197,7 +169,7 @@ struct FadePrimitiveRuntime::Impl {
       std::uint64_t hash, const shader_desc& original) {
     const PreparedShader state = prepared.GetOrPrepare(
         hash,
-        [&] { return PrepareOne(original); },
+        [&] { return PrepareOne(hash, original); },
         [&] {
           PreparedShader aborted;
           aborted.attempted = true;
@@ -217,6 +189,10 @@ void FadePrimitiveRuntime::set_dxc_runtime_directory(
   impl_->dxc_runtime_directory = std::move(addon_directory);
 }
 
+void FadePrimitiveRuntime::set_observer(FadePrimitiveRuntimeObserver* observer) {
+  impl_->observer = observer;
+}
+
 void FadePrimitiveRuntime::OnInitDevice(device* owner) {
   if (!owner || owner->get_api() != device_api::d3d12) return;
   if (impl_->activity.Activate(DeviceKey(owner)))
@@ -232,9 +208,6 @@ void FadePrimitiveRuntime::OnDestroyDevice(device* owner) {
     owner->destroy_pipeline(replacement);
   });
   if (impl_->device_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-    // Deactivate holds activity exclusively, so all callers that can lease a
-    // DXC context have returned. Drain also protects against future changes
-    // that add a preparation path outside this callback.
     impl_->dxc_pool.Drain();
   }
 }
@@ -244,14 +217,18 @@ void FadePrimitiveRuntime::OnInitPipeline(device* owner, pipeline_layout layout,
   if (g_internal_create || !owner || application.handle == 0) return;
   auto active = impl_->activity.Acquire(DeviceKey(owner));
   if (!active) return;
-  // D3D12 PSOs are immutable: the live (device, application handle) pair is
-  // the canonical identity of all application pipeline state. A differing
-  // observed shader hash for that same live handle is contradictory evidence,
-  // so the coordinator disables replacement selection rather than replacing
-  // or destroying an object that may still be referenced by command lists.
   const shader_desc* original = nullptr;
   std::uint64_t hash = 0;
-  const bool has_pixel_shader = FindPixelShader(count, subobjects, original, hash);
+  const bool has_pixel_shader =
+      FindDxilPixelShader(count, subobjects, original, hash);
+  if (impl_->observer) {
+    FadePrimitiveRuntimeObserver::PipelineInitObservation observation;
+    observation.device = owner;
+    observation.application_pipeline = application.handle;
+    observation.pixel_shader_identified = has_pixel_shader;
+    observation.pixel_shader_hash = has_pixel_shader ? hash : 0;
+    impl_->observer->OnPipelineInit(observation);
+  }
   const auto destroy_replacement = [owner](pipeline replacement) {
     ScopedFlag internal(g_internal_destroy);
     owner->destroy_pipeline(replacement);
@@ -329,9 +306,6 @@ void FadePrimitiveRuntime::set_enabled(bool enabled) {
 
 FadePrimitiveRuntimeTelemetrySnapshot
 FadePrimitiveRuntime::memory_telemetry_snapshot() const {
-  // GetSnapshot() releases the single-flight cache lock before this function
-  // separately obtains the replacement-state lock via RetainedSize(). Do not
-  // combine these two snapshots under nested locks.
   const auto cache = impl_->prepared.GetSnapshot();
   const auto replacement_count = impl_->replacements.RetainedSize();
   return {

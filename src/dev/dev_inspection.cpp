@@ -6,51 +6,25 @@
 #include <Windows.h>
 
 #include <algorithm>
-#include <cstring>
 #include <cwctype>
 #include <fstream>
 #include <string>
 #include <utility>
 
-#include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
 #include "addon_shared.hpp"
-
-using namespace reshade::api;
 
 namespace wuwa_tfr::dev {
 
 namespace {
 
-bool HasDxilChunk(const std::uint8_t* data, std::size_t size) {
-  if (!data || size < 32 || std::memcmp(data, "DXBC", 4) != 0) return false;
-
-  std::uint32_t total_size = 0;
-  std::uint32_t chunk_count = 0;
-  std::memcpy(&total_size, data + 24, sizeof(total_size));
-  std::memcpy(&chunk_count, data + 28, sizeof(chunk_count));
-  if (chunk_count > 4096 || total_size != size) return false;
-
-  const std::size_t table_end = 32ull + 4ull * chunk_count;
-  if (total_size < table_end) return false;
-
-  bool has_dxil = false;
-  for (std::uint32_t i = 0; i < chunk_count; ++i) {
-    std::uint32_t offset = 0;
-    std::memcpy(&offset, data + 32 + 4ull * i, sizeof(offset));
-    if (static_cast<std::size_t>(offset) + 8 > total_size) return false;
-
-    std::uint32_t chunk_size = 0;
-    std::memcpy(&chunk_size, data + offset + 4, sizeof(chunk_size));
-    const std::size_t chunk_end =
-        static_cast<std::size_t>(offset) + 8ull + chunk_size;
-    if (chunk_end > total_size) return false;
-    if (std::memcmp(data + offset, "DXIL", 4) == 0) has_dxil = true;
-  }
-  return has_dxil;
+bool SameFadePrimitiveInstance(const wuwa_tfr::FadePrimitiveInstance& left,
+    const wuwa_tfr::FadePrimitiveInstance& right) noexcept {
+  return left.function_identity == right.function_identity &&
+      left.merge_value == right.merge_value && left.consumer == right.consumer;
 }
 
-bool WriteCapture(
+bool WriteShaderDump(
     std::uint64_t hash,
     std::size_t bytecode_size,
     const std::string& original_ir,
@@ -74,7 +48,7 @@ bool WriteCapture(
   std::ofstream metadata(metadata_path, std::ios::binary | std::ios::trunc);
   if (!metadata) return false;
   metadata << "format=wuwa_tfr_capture_v1\n";
-  metadata << "source=wuthering_waves_runtime_create_pipeline\n";
+  metadata << "source=wuthering_waves_runtime_init_pipeline\n";
   metadata << "stage=original_pixel_shader\n";
   metadata << "selection=all_unique_dxil_when_dump_enabled\n";
   metadata << "analysis=independent_spatial_dither_diagnostic_v1\n";
@@ -114,10 +88,100 @@ bool EnvFlag(const wchar_t* name) {
       value == L"on";
 }
 
-}  // namespace
+class InspectionObserverImpl final : public wuwa_tfr::FadePrimitiveRuntimeObserver {
+ public:
+  void OnShaderPrepared(const ShaderPreparationObservation& observation) override {
+    g_unique_dxil_shaders.fetch_add(1, std::memory_order_relaxed);
+    if (observation.inspection_succeeded)
+      g_disassembly_successes.fetch_add(1, std::memory_order_relaxed);
+    else
+      g_disassembly_failures.fetch_add(1, std::memory_order_relaxed);
+
+    InspectionRecord record;
+    record.inspection_succeeded = observation.inspection_succeeded;
+    record.inspection_error = observation.inspection_error;
+    record.bytecode_size = observation.original_bytecode_size;
+    record.patch_succeeded = observation.patch_succeeded;
+    record.patch_failure = observation.patch_failure;
+    record.prepared_succeeded = observation.prepared_succeeded;
+    record.prepared_failure = observation.prepared_failure;
+
+    record.fade_instances.reserve(observation.fade_primitive.instances.size());
+    for (const auto& instance : observation.fade_primitive.instances) {
+      FadeInstanceObservation entry;
+      entry.instance = instance;
+      for (const auto& evidence : observation.pre_fade_evidence) {
+        if (SameFadePrimitiveInstance(evidence.instance, instance)) {
+          entry.pre_fade = evidence.analysis;
+          break;
+        }
+      }
+      record.fade_instances.push_back(std::move(entry));
+    }
+
+    if (observation.inspection_succeeded && observation.original_ir) {
+      const std::string& original_ir = *observation.original_ir;
+      record.dither = wuwa_tfr::AnalyzeSpatialDitherDiagnostic(original_ir);
+
+      auto sampling_sources =
+          std::make_shared<std::vector<FadeControlSamplingSource>>();
+      sampling_sources->reserve(record.fade_instances.size() * 3);
+      for (std::size_t i = 0; i < record.fade_instances.size(); ++i) {
+        auto& fade_instance = record.fade_instances[i];
+        wuwa_tfr::ResolveGatePredicateCbvRegister(
+            original_ir, fade_instance.instance.gate_predicate);
+        const auto primitive_index = static_cast<std::uint32_t>(i);
+        sampling_sources->push_back(FadeControlSourceFromGatePredicateEvidence(
+            primitive_index, fade_instance.instance.gate_predicate));
+        if (fade_instance.pre_fade) {
+          wuwa_tfr::ResolvePreFadeCbvRegisters(
+              original_ir, fade_instance.instance, *fade_instance.pre_fade);
+          sampling_sources->push_back(FadeControlSourceFromPreFadeOperand(
+              primitive_index, FadeControlRole::PreFadeOperandOne,
+              fade_instance.pre_fade->operand_one));
+          sampling_sources->push_back(FadeControlSourceFromPreFadeOperand(
+              primitive_index, FadeControlRole::PreFadeOperandTwo,
+              fade_instance.pre_fade->operand_two));
+        }
+      }
+      record.fade_control_sampling_sources = std::move(sampling_sources);
+
+      if (record.dither.discard_calls != 0)
+        g_discard_shader_count.fetch_add(1, std::memory_order_relaxed);
+      if (record.dither.classification ==
+          wuwa_tfr::SpatialDitherClassification::StrictSpatialDither) {
+        g_strict_spatial_dither_count.fetch_add(1, std::memory_order_relaxed);
+      } else if (record.dither.classification ==
+          wuwa_tfr::SpatialDitherClassification::AmbiguousStrictSpatialDither) {
+        g_ambiguous_spatial_dither_count.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+      if (!observation.fade_primitive.instances.empty()) {
+        g_fade_primitive_shader_count.fetch_add(1, std::memory_order_relaxed);
+        g_fade_primitive_instance_count.fetch_add(
+            observation.fade_primitive.instances.size(),
+            std::memory_order_relaxed);
+      }
+      record.dumped = WriteShaderDump(observation.original_shader_hash,
+          observation.original_bytecode_size, original_ir, record.dither,
+          observation.fade_primitive);
+      if (record.dumped)
+        g_dumped_shaders.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    std::lock_guard lock(g_inspection_mutex);
+    g_inspections.emplace(observation.original_shader_hash, std::move(record));
+  }
+
+  void OnPipelineInit(const PipelineInitObservation& observation) override {
+    if (observation.pixel_shader_identified)
+      g_seen_shader_callbacks.fetch_add(1, std::memory_order_relaxed);
+  }
+};
+
+}
 
 std::mutex g_inspection_mutex;
-DxcBridge* g_dxc = nullptr;
 std::unordered_map<std::uint64_t, InspectionRecord> g_inspections;
 
 std::atomic<std::uint64_t> g_seen_shader_callbacks{0};
@@ -126,114 +190,16 @@ std::atomic<std::uint64_t> g_disassembly_successes{0};
 std::atomic<std::uint64_t> g_disassembly_failures{0};
 std::atomic<std::uint64_t> g_dumped_shaders{0};
 
-bool g_diagnostic = false;
 bool g_dump = false;
 
-bool LooksLikeDxil(const reshade::api::shader_desc& descriptor) {
-  if (!descriptor.code || descriptor.code_size < 64) return false;
-  return HasDxilChunk(
-      static_cast<const std::uint8_t*>(descriptor.code),
-      descriptor.code_size);
-}
-
-std::uint64_t Fnv1a64(const void* data, std::size_t size) {
-  const auto* bytes = static_cast<const std::uint8_t*>(data);
-  std::uint64_t hash = 14695981039346656037ull;
-  for (std::size_t i = 0; i < size; ++i) {
-    hash ^= bytes[i];
-    hash *= 1099511628211ull;
-  }
-  return hash;
-}
-
-void InspectPixelShader(const reshade::api::shader_desc& descriptor) {
-  g_seen_shader_callbacks.fetch_add(1, std::memory_order_relaxed);
-  const std::uint64_t hash = Fnv1a64(descriptor.code, descriptor.code_size);
-
-  std::lock_guard lock(g_inspection_mutex);
-  if (g_inspections.contains(hash)) return;
-
-  g_unique_dxil_shaders.fetch_add(1, std::memory_order_relaxed);
-  InspectionRecord record;
-  record.bytecode_size = descriptor.code_size;
-
-  if (!g_dxc) g_dxc = new DxcBridge(g_addon_directory);
-  if (!g_dxc->available()) {
-    record.error = g_dxc->init_error();
-    g_disassembly_failures.fetch_add(1, std::memory_order_relaxed);
-    g_inspections.emplace(hash, std::move(record));
-    return;
-  }
-
-  auto inspection =
-      g_dxc->InspectShader(descriptor.code, descriptor.code_size);
-  record.success = inspection.success;
-  record.error = std::move(inspection.error);
-  if (record.success) {
-    g_disassembly_successes.fetch_add(1, std::memory_order_relaxed);
-    record.dither = AnalyzeSpatialDitherDiagnostic(inspection.original_ir);
-    record.fade_primitive = AnalyzeFadePrimitiveV1(inspection.original_ir);
-    if (record.dither.discard_calls != 0)
-      g_discard_shader_count.fetch_add(1, std::memory_order_relaxed);
-    if (record.dither.classification ==
-        SpatialDitherClassification::StrictSpatialDither) {
-      g_strict_spatial_dither_count.fetch_add(1, std::memory_order_relaxed);
-    } else if (record.dither.classification ==
-        SpatialDitherClassification::AmbiguousStrictSpatialDither) {
-      g_ambiguous_spatial_dither_count.fetch_add(
-          1, std::memory_order_relaxed);
-    }
-    if (!record.fade_primitive.instances.empty()) {
-      g_fade_primitive_shader_count.fetch_add(1, std::memory_order_relaxed);
-      g_fade_primitive_instance_count.fetch_add(
-          record.fade_primitive.instances.size(), std::memory_order_relaxed);
-    }
-    record.dumped = WriteCapture(
-        hash, descriptor.code_size, inspection.original_ir,
-        record.dither, record.fade_primitive);
-    if (record.dumped)
-      g_dumped_shaders.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    g_disassembly_failures.fetch_add(1, std::memory_order_relaxed);
-  }
-  g_inspections.emplace(hash, std::move(record));
-}
-
-bool OnCreatePipeline(
-    device* owner,
-    pipeline_layout,
-    std::uint32_t subobject_count,
-    const pipeline_subobject* subobjects) {
-  if (g_dev_runtime_internal_pipeline_event) return false;
-  // Dev capture observes the original descriptor only; it never mutates it.
-  if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
-      (!g_diagnostic && !g_dump) || !subobjects)
-    return false;
-
-  auto active = g_device_activity.Acquire(DeviceKey(owner));
-  if (!active) return false;
-
-  for (std::uint32_t i = 0; i < subobject_count; ++i) {
-    if (subobjects[i].type != pipeline_subobject_type::pixel_shader ||
-        !subobjects[i].data)
-      continue;
-    const auto& descriptor =
-        *static_cast<const shader_desc*>(subobjects[i].data);
-    if (LooksLikeDxil(descriptor)) InspectPixelShader(descriptor);
-  }
-  return false;
+wuwa_tfr::FadePrimitiveRuntimeObserver* InspectionObserver() {
+  static InspectionObserverImpl instance;
+  return &instance;
 }
 
 void InitializeInspectionConfig() {
-  g_diagnostic = ConfigFlag(L"Diagnostic", EnvFlag(L"WUWA_TFR_DIAGNOSTIC"));
   g_dump = ConfigFlag(L"Dump", EnvFlag(L"WUWA_TFR_DUMP"));
   g_dump_path = ConfigPathValue(L"DumpPath");
 }
 
-void TeardownInspectionOnLastDevice() {
-  std::lock_guard lock(g_inspection_mutex);
-  delete g_dxc;
-  g_dxc = nullptr;
 }
-
-}  // namespace wuwa_tfr::dev

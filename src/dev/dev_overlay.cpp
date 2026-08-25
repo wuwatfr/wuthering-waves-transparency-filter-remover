@@ -14,6 +14,7 @@
 #include "dev/dev_inspection.hpp"
 #include "dev/dev_runtime.hpp"
 #include "dev/diagnostics/dev_diagnostics.hpp"
+#include "pre_fade_fmin_analysis.hpp"
 #include "dev/trace/trace_events.hpp"
 #include "dev/trace/trace_report.hpp"
 #include "dev/trace/trace_state.hpp"
@@ -27,10 +28,6 @@ void DrawFadePrimitiveTargetModes() {
           "Dev transparency-filter target modes", ImGuiTreeNodeFlags_DefaultOpen))
     return;
 
-  // g_dev_antifade_runtime is the sole replacement owner (see
-  // dev/dev_runtime.hpp): a second, independent instance of the same
-  // FadePrimitiveRuntime class Production uses. It has no per-hash selection
-  // concept -- when enabled, it evaluates every observed DXIL pixel shader.
   bool enabled = g_dev_antifade_runtime.enabled();
   if (ImGui::Checkbox("Remove Transparency Filter", &enabled))
     g_dev_antifade_runtime.set_enabled(enabled);
@@ -62,6 +59,13 @@ void DrawFadePrimitiveTargetModes() {
     std::size_t live_application_psos = 0;
     std::uint32_t instances = 0;
     std::string consumers;
+    std::uint32_t patch_evidence = 0;
+    std::string adjacency;
+    std::string fail_reasons;
+    bool patch_succeeded = false;
+    std::string patch_failure;
+    bool prepared_succeeded = false;
+    std::string prepared_failure;
   };
   std::unordered_map<std::uint64_t, std::size_t> live_pso_counts;
   {
@@ -75,7 +79,7 @@ void DrawFadePrimitiveTargetModes() {
     std::lock_guard inspection_lock(g_inspection_mutex);
     rows.reserve(g_inspections.size());
     for (const auto& [shader_hash, inspection] : g_inspections) {
-      if (!inspection.success || inspection.fade_primitive.instances.empty())
+      if (!inspection.inspection_succeeded || inspection.fade_instances.empty())
         continue;
       DisplayRow row;
       row.shader_hash = shader_hash;
@@ -83,8 +87,37 @@ void DrawFadePrimitiveTargetModes() {
           live != live_pso_counts.end())
         row.live_application_psos = live->second;
       row.instances = static_cast<std::uint32_t>(
-          inspection.fade_primitive.instances.size());
-      row.consumers = FadePrimitiveConsumers(inspection.fade_primitive);
+          inspection.fade_instances.size());
+      row.patch_succeeded = inspection.patch_succeeded;
+      row.patch_failure = inspection.patch_failure;
+      row.prepared_succeeded = inspection.prepared_succeeded;
+      row.prepared_failure = inspection.prepared_failure;
+
+      std::vector<wuwa_tfr::FadePrimitiveInstance> instances_only;
+      instances_only.reserve(inspection.fade_instances.size());
+      for (const auto& fade_instance : inspection.fade_instances)
+        instances_only.push_back(fade_instance.instance);
+      row.consumers = FadePrimitiveConsumers(instances_only);
+
+      for (const auto& fade_instance : inspection.fade_instances) {
+        if (!fade_instance.pre_fade) {
+          if (!row.fail_reasons.empty()) row.fail_reasons += "; ";
+          row.fail_reasons += "no patch evidence (not reached before "
+              "fail-closed rejection)";
+          continue;
+        }
+        ++row.patch_evidence;
+        const auto& analysis = *fade_instance.pre_fade;
+        const char* name = "unknown";
+        switch (analysis.adjacency) {
+          case wuwa_tfr::PreFadeAdjacency::SameRow: name = "same-row"; break;
+          case wuwa_tfr::PreFadeAdjacency::CrossRow: name = "cross-row"; break;
+          case wuwa_tfr::PreFadeAdjacency::NonAdjacent: name = "non-adjacent"; break;
+          case wuwa_tfr::PreFadeAdjacency::Unknown: name = "unknown"; break;
+        }
+        if (!row.adjacency.empty()) row.adjacency += ",";
+        row.adjacency += name;
+      }
       rows.push_back(std::move(row));
     }
   }
@@ -96,7 +129,7 @@ void DrawFadePrimitiveTargetModes() {
   ImGui::Text("Fully verified Fade Primitive v1 shaders observed: %zu",
       rows.size());
 
-  if (!ImGui::BeginTable("fade_primitive_diagnostics", 4,
+  if (!ImGui::BeginTable("fade_primitive_diagnostics", 9,
           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
           ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
           ImVec2(0.0f, 420.0f)))
@@ -105,6 +138,11 @@ void DrawFadePrimitiveTargetModes() {
   ImGui::TableSetupColumn("Live application PSOs");
   ImGui::TableSetupColumn("Instances");
   ImGui::TableSetupColumn("Consumers");
+  ImGui::TableSetupColumn("Patch evidence");
+  ImGui::TableSetupColumn("Adjacency (diagnostic only)");
+  ImGui::TableSetupColumn("Patch");
+  ImGui::TableSetupColumn("Prepared");
+  ImGui::TableSetupColumn("Fail-closed reason");
   ImGui::TableHeadersRow();
   for (const auto& row : rows) {
     const std::string hash = Hex64(row.shader_hash);
@@ -118,6 +156,18 @@ void DrawFadePrimitiveTargetModes() {
     ImGui::Text("%u", row.instances);
     ImGui::TableSetColumnIndex(3);
     ImGui::TextUnformatted(row.consumers.c_str());
+    ImGui::TableSetColumnIndex(4);
+    ImGui::Text("%u/%u", row.patch_evidence, row.instances);
+    ImGui::TableSetColumnIndex(5);
+    ImGui::TextUnformatted(row.adjacency.c_str());
+    ImGui::TableSetColumnIndex(6);
+    if (row.patch_succeeded) ImGui::TextUnformatted("ok");
+    else ImGui::TextUnformatted(row.patch_failure.c_str());
+    ImGui::TableSetColumnIndex(7);
+    if (row.prepared_succeeded) ImGui::TextUnformatted("ok");
+    else ImGui::TextUnformatted(row.prepared_failure.c_str());
+    ImGui::TableSetColumnIndex(8);
+    ImGui::TextUnformatted(row.fail_reasons.c_str());
     ImGui::PopID();
   }
   ImGui::EndTable();

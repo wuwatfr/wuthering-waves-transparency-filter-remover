@@ -6,10 +6,11 @@
 #include <algorithm>
 #include <cmath>
 
+#include "dev/capture/fade_control_runtime.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/dev_runtime.hpp"
-#include "dev/diagnostics/dev_diagnostics.hpp"
 #include "dev/trace/trace_report.hpp"
+#include "pixel_shader_identity.hpp"
 
 using namespace reshade::api;
 
@@ -22,19 +23,12 @@ bool IsNormalOnlyRimSkipRow(const ConcreteTraceRow& row) noexcept {
       wuwa_tfr::TraceNormalOnlySubmissionCandidate(row.windows);
 }
 
-// --- Pipeline lifecycle (trace observation only) ---
-
 void OnInitTracePipeline(
     device* owner,
     pipeline_layout layout,
     std::uint32_t subobject_count,
     const pipeline_subobject* subobjects,
     pipeline handle) {
-  // g_dev_antifade_runtime (dev/dev_runtime.hpp) is the sole fade-primitive
-  // replacement owner; its own internal replacement-pipeline create/destroy
-  // re-fires this same event, and dev_runtime.cpp holds this flag for the
-  // duration of that call so this independent trace observer never mistakes
-  // a replacement pipeline for a genuine application one.
   if (g_dev_runtime_internal_pipeline_event) return;
   if (!g_target_process || !owner || owner->get_api() != device_api::d3d12 ||
       handle.handle == 0)
@@ -46,7 +40,7 @@ void OnInitTracePipeline(
   const TracePipelineKey key{DeviceKey(owner), handle.handle};
   const shader_desc* descriptor = nullptr;
   std::uint64_t shader_hash = 0;
-  if (!FindDxilPixelShader(
+  if (!wuwa_tfr::FindDxilPixelShader(
           subobject_count, subobjects, descriptor, shader_hash)) {
     std::lock_guard lock(g_trace_mutex);
     g_trace_pso_incarnations.Destroy(key);
@@ -54,11 +48,7 @@ void OnInitTracePipeline(
     return;
   }
 
-  // All-v1 Dev mode is driven by the frozen structural detector, so every
-  // observed DXIL pixel shader is inspected even when capture dumping is off.
-  InspectPixelShader(*descriptor);
-
-  TracePipelineInfo pipeline_info = DescribeTracePipeline(
+  wuwa_tfr::ExecutionPipelineIdentity pipeline_info = DescribeTracePipeline(
       subobject_count, subobjects, shader_hash);
 
   std::uint64_t creation_fingerprint = kTraceFnvOffset;
@@ -82,7 +72,6 @@ void OnInitTracePipeline(
     pipeline_info.device = key.owner;
     pipeline_info.application_pipeline = key.handle;
     pipeline_info.pso_fingerprint = creation_fingerprint;
-    pipeline_info.live = true;
     g_trace_pipelines[key] = pipeline_info;
     g_trace_shaders.try_emplace(shader_hash);
     const std::size_t pruned =
@@ -110,8 +99,6 @@ void OnDestroyTracePipeline(device* owner, pipeline handle) {
   g_trace_pso_incarnations.Destroy(key);
   g_trace_pipelines.erase(key);
 }
-
-// --- Resources / resource views ---
 
 TraceResourceIdentity ResourceIdentity(
     const resource_desc& desc, resource_usage initial_usage) noexcept {
@@ -148,16 +135,15 @@ void OnInitTraceResource(device* owner, const resource_desc& desc,
   std::lock_guard lock(g_trace_mutex);
   const TracePipelineKey key{DeviceKey(owner), handle.handle};
   const TraceResourceIdentity identity = ResourceIdentity(desc, initial_usage);
-  const auto result = g_trace_resource_incarnations.Activate(
-      key, identity);
+  const auto result = ActivateResourceLifecycle(key, identity);
   if (result.rotated_without_destroy && result.previous_identity) {
     g_trace_resource_lifecycle_ambiguities.Record(key,
         *result.previous_identity, identity,
         g_trace_frame_id.load(std::memory_order_relaxed),
         ++g_trace_lifecycle_event_serial);
   }
-  const std::size_t pruned = g_trace_resource_incarnations.PruneTo(
-      kMaxTrackedResourceIncarnations);
+  const std::size_t pruned =
+      PruneResourceLifecycleTo(kMaxTrackedResourceIncarnations);
   if (pruned != 0) {
     g_trace_incarnation_prunes += pruned;
     g_trace_identity_capacity_exceeded = true;
@@ -167,7 +153,7 @@ void OnInitTraceResource(device* owner, const resource_desc& desc,
 void OnDestroyTraceResource(device* owner, resource handle) {
   if (!g_target_process || !owner || handle.handle == 0) return;
   std::lock_guard lock(g_trace_mutex);
-  g_trace_resource_incarnations.Destroy({DeviceKey(owner), handle.handle});
+  DestroyResourceLifecycle({DeviceKey(owner), handle.handle});
 }
 
 void OnInitTraceResourceView(device* owner, resource resource_handle,
@@ -207,8 +193,6 @@ void OnDestroyTraceResourceView(device* owner, resource_view view) {
   std::lock_guard lock(g_trace_mutex);
   g_trace_view_incarnations.Destroy({DeviceKey(owner), view.handle});
 }
-
-// --- Command lists ---
 
 void OnInitTraceCommandList(command_list* cmd_list) {
   if (!g_target_process || !cmd_list) return;
@@ -415,6 +399,7 @@ void OnPushTraceDescriptors(
   auto* trace = cmd_list->get_private_data<CommandListTrace>();
   if (!trace) return;
 
+  std::lock_guard lock(g_trace_mutex);
   EnsureTraceLayout(*trace, layout.handle);
   TraceHashValue(trace->pushed_cbv_fingerprint, layout.handle);
   TraceHashValue(trace->pushed_cbv_fingerprint, layout_param);
@@ -427,6 +412,17 @@ void OnPushTraceDescriptors(
     TraceHashValue(trace->pushed_cbv_fingerprint, ranges[i].buffer.handle);
     TraceHashValue(trace->pushed_cbv_fingerprint, ranges[i].offset);
     TraceHashValue(trace->pushed_cbv_fingerprint, ranges[i].size);
+    const RootCbvKey binding_key{
+        layout.handle, layout_param, update.binding + i};
+    if (ranges[i].buffer.handle == 0) {
+      trace->root_cbv_bindings.erase(binding_key);
+    } else {
+      trace->root_cbv_bindings[binding_key] = RootCbvBinding{
+          ranges[i].buffer.handle,
+          ActiveResourceIncarnationLocked(trace->device, ranges[i].buffer)
+              .incarnation,
+          ranges[i].offset, ranges[i].size};
+    }
   }
   trace->observed_bindings |= 0x2;
 }
@@ -456,6 +452,17 @@ void OnBindTraceDescriptorTables(
         static_cast<std::size_t>(dynamic_offset_count) *
             sizeof(std::uint32_t));
   trace->observed_bindings |= 0x4;
+
+  const bool dynamic_offsets_present = dynamic_offset_count != 0;
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const BoundDescriptorTableKey key{layout.handle, first + i};
+    if (tables[i].handle == 0) {
+      trace->bound_descriptor_tables.erase(key);
+      continue;
+    }
+    trace->bound_descriptor_tables[key] =
+        BoundDescriptorTable{tables[i].handle, dynamic_offsets_present};
+  }
 }
 
 bool RecordOrSuppressTraceDraw(command_list* cmd_list,
@@ -495,6 +502,9 @@ bool RecordOrSuppressTraceDraw(command_list* cmd_list,
     draw->second.pipeline = *trace->bound_pipeline;
   }
   ++draw->second.commands;
+
+  SampleFadeControlValuesOnDraw(*trace, concrete, draw->second);
+
   return false;
 }
 
@@ -588,6 +598,20 @@ void OnExecuteSecondaryTrace(
       primary_draw->second.pipeline = secondary_draw.pipeline;
     }
     primary_draw->second.commands += secondary_draw.commands;
+
+    for (auto pending : secondary_draw.pending_fade_observations) {
+      pending.key.route = draw_key.concrete;
+      primary_draw->second.pending_fade_observations.push_back(
+          std::move(pending));
+    }
+    for (auto pending : secondary_draw.pending_fade_snapshots) {
+      pending.key.route = draw_key.concrete;
+      primary_draw->second.pending_fade_snapshots.push_back(
+          std::move(pending));
+    }
+    MergeFadeControlTrackerCapacity(
+        primary_draw->second.pending_fade_tracker_taint,
+        secondary_draw.pending_fade_tracker_taint);
   }
 }
 
@@ -927,7 +951,7 @@ std::optional<ConcreteTraceRow> MakeConcreteTraceRowLocked(
   row.pipeline = record.pipeline;
   const auto live = g_trace_pipelines.find(
       {row.pipeline.device, row.pipeline.application_pipeline});
-  row.pipeline.live = live != g_trace_pipelines.end() &&
+  row.pipeline_live = live != g_trace_pipelines.end() &&
       live->second.incarnation_id == key.pso_incarnation;
   row.windows = record.windows;
   row.last_submission_serial = record.last_submission_serial;

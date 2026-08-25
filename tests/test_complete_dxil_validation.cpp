@@ -21,10 +21,14 @@ int main(int argc, char** argv) {
 
   const auto analysis = wuwa_tfr::AnalyzeFadePrimitiveV1(fixture);
   CHECK(analysis.instances.size() == 1);
-  const auto patch = wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(fixture);
+  const auto patch =
+      wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(fixture);
   CHECK(patch.success);
   CHECK(patch.patched_instance_count == 1);
-  CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(patch.llvm_ir).instances.empty());
+  // Unlike the retired identity-phi patch, the verified primitive itself is
+  // untouched: only the pre-Fade FMin's operand 1 changes, so the same
+  // instance must still be independently verifiable post-patch.
+  CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(patch.llvm_ir).instances.size() == 1);
 
   wuwa_tfr::DxcBridge dxc(std::filesystem::path(argv[0]).parent_path());
   CHECK(dxc.available());

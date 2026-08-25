@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
-//
-// The Dev variant implementation of addon_variant.hpp. Owns Dev's own
-// startup config, event registration, and overlay content; addon.cpp knows
-// nothing about any of it beyond calling these five functions.
 
 #include "addon_variant.hpp"
 
@@ -13,6 +9,8 @@
 #include <string>
 
 #include "addon_shared.hpp"
+#include "dev/capture/fade_control_runtime.hpp"
+#include "dev/capture/manual_capture.hpp"
 #include "dev/dev_events.hpp"
 #include "dev/dev_inspection.hpp"
 #include "dev/dev_overlay.hpp"
@@ -33,9 +31,9 @@ void InitializeVariant() {
 }
 
 void RegisterVariantEvents() {
-  reshade::register_event<reshade::addon_event::create_pipeline>(
-      dev::OnCreatePipeline);
   dev::RegisterDevEvents();
+  dev::RegisterManualCaptureEvents();
+  dev::RegisterFadeControlRuntimeEvents();
 }
 
 void DrawVariantOverlay() {
@@ -64,20 +62,21 @@ void DrawVariantOverlay() {
   dev::DrawFadePrimitiveTargetModes();
   ImGui::Separator();
   dev::DrawTraceOverlay();
+  ImGui::Separator();
+  dev::DrawManualCaptureOverlay();
 }
 
 void LogVariantStartup() {
   Log(reshade::log::level::info,
       std::string("loaded Dev research build") +
-      (dev::g_diagnostic ? "; diagnostic=on" : "; diagnostic=off") +
+      "; version=" WUWA_TFR_VERSION +
+      "; build=" WUWA_TFR_BUILD_COMMIT +
       (dev::g_dump ? "; dump=all-unique-dxil" : "; dump=off") +
       (dev::g_dump ? "; dump-path=" + dev::g_dump_path.string() : "") +
       "; devtools=compiled" +
       "; config=" + ConfigPath().string());
 }
 
-void OnLastDeviceDestroyed() {
-  dev::TeardownInspectionOnLastDevice();
-}
+void OnLastDeviceDestroyed() {}
 
 }  // namespace wuwa_tfr::variant

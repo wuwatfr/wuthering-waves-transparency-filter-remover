@@ -10,6 +10,28 @@
 
 namespace {
 
+// Inserts a same-row adjacent, direct-scalar pre-Fade FMin defining
+// %coverage, right before its first use -- the canonical shape
+// target_dither_bypass.cpp's Production patch requires. Applied only to the
+// specific fixtures that call PatchAllVerifiedFadePrimitiveInstancesPreFade-
+// Operand() and expect success; every detector-only test in this file (and
+// every test whose fixture PatchAllVerified... is expected to reject for an
+// unrelated reason) is untouched, since inserting this earlier in the
+// shared PrimitiveFunction() template collides with other tests' find/rfind
+// searches for "@dx.op.binary.f32" (the FMax/FMin comment_fmax/comment_fmin
+// coverage-expression rejection tests).
+std::string WithQualifyingPreFadeFMin(std::string ir) {
+  const std::string marker = "%twice = fmul fast float %coverage, 2.000000e+00";
+  const std::size_t at = ir.find(marker);
+  if (at == std::string::npos) return ir;
+  ir.insert(at,
+      "%cv_pf = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+      "%cv_a = extractvalue %dx.types.CBufRet.f32 %cv_pf, 2\n"
+      "%cv_b = extractvalue %dx.types.CBufRet.f32 %cv_pf, 3\n"
+      "%coverage = call float @dx.op.binary.f32(i32 36, float %cv_a, float %cv_b)  ; FMin(a,b)\n");
+  return ir;
+}
+
 std::string PrimitiveFunction(std::string_view name, std::string_view consumer,
     std::string_view prefix = {}, std::string_view suffix = {}) {
   return "define void @" + std::string(name) + "() {\nentry:\n" +
@@ -38,6 +60,51 @@ br label %merge
 merge:
 %dither = phi float [ %computed, %enabled ], [ 1.000000e+00, %entry ]
 )" + std::string(consumer) + std::string(suffix) + "\n}\n";
+}
+
+// Step 6A (gate-predicate evidence): PrimitiveFunction's own gate
+// references %cb as its CBV handle but never defines it via createHandle --
+// deliberately, since no existing test needs it. This adds a real,
+// literally-indexed CBV createHandle for %cb, right at the top of `entry:`,
+// so gate-predicate evidence can fully resolve (including the createHandle-
+// derived range id). Every other line of PrimitiveFunction's output --
+// gate opcode/operand text, threshold/coverage/phi shape -- is untouched.
+std::string WithResolvableGateHandle(std::string ir) {
+  const std::string marker = "entry:\n";
+  const std::size_t at = ir.find(marker);
+  if (at == std::string::npos) return ir;
+  ir.insert(at + marker.size(),
+      "%cb = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 2, i32 3, "
+      "i32 0, i1 false)\n");
+  return ir;
+}
+
+// Step 6A: replaces PrimitiveFunction's single-load gate with two distinct,
+// independently resolvable legacy CBV loads combined by an fadd feeding the
+// same %gate condition. The boolean gate criterion (VerifyCbufferControlled
+// Gate) only ever needed ONE reachable cbuffer load and is unaffected; gate-
+// predicate evidence resolution requires exactly one and must report this
+// as unresolved (ambiguous) instead of guessing between the two.
+std::string WithAmbiguousGatePredicate(std::string ir) {
+  const std::string original =
+      "%gate_load = call %dx.types.CBufRet.f32 "
+      "@dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb, i32 7)\n"
+      "%gate_value = extractvalue %dx.types.CBufRet.f32 %gate_load, 1\n"
+      "%gate = fcmp fast ogt float %gate_value, 0.000000e+00\n";
+  const std::size_t at = ir.find(original);
+  if (at == std::string::npos) return ir;
+  ir.replace(at, original.size(),
+      "%cb = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 2, i32 3, "
+      "i32 0, i1 false)\n"
+      "%gate_load = call %dx.types.CBufRet.f32 "
+      "@dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb, i32 7)\n"
+      "%gate_value = extractvalue %dx.types.CBufRet.f32 %gate_load, 1\n"
+      "%gate_load2 = call %dx.types.CBufRet.f32 "
+      "@dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb, i32 9)\n"
+      "%gate_value2 = extractvalue %dx.types.CBufRet.f32 %gate_load2, 2\n"
+      "%gate_sum = fadd fast float %gate_value, %gate_value2\n"
+      "%gate = fcmp fast ogt float %gate_sum, 0.000000e+00\n");
+  return ir;
 }
 
 std::string Module(std::string_view functions) {
@@ -97,12 +164,12 @@ int main() {
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::SvTargetAlpha);
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::SvTargetRgb);
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::DiscardAndSvTargetAlpha);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         llvm_ir).success);
   };
   const auto expect_no_candidate = [](const std::string& llvm_ir) {
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(llvm_ir).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         llvm_ir).success);
   };
   {
@@ -116,7 +183,7 @@ int main() {
     CHECK(comment_diagnostic.instances.size() == 1);
     CHECK(comment_diagnostic.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::Unknown);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         comment_discard).success);
 
     std::string wrong_opcode = Module(PrimitiveFunction(
@@ -164,7 +231,7 @@ int main() {
     CHECK(output_diagnostic.instances.size() == 1);
     CHECK(output_diagnostic.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::Unknown);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         comment_output).success);
 
     const std::string comment_position =
@@ -239,8 +306,8 @@ int main() {
         "i32 undef), !dbg !42");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(
         with_load_metadata).instances.size() == 1);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        with_load_metadata).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(with_load_metadata)).success);
 
     std::string malformed_load_metadata = positive;
     const std::size_t load_end = malformed_load_metadata.find("i32 undef)");
@@ -282,8 +349,8 @@ int main() {
         branch + ", !dx.controlflow.hints !42, !prof !43  ; hinted gate");
     const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(with_branch_metadata);
     CHECK(result.instances.size() == 1);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        with_branch_metadata).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(with_branch_metadata)).success);
   }
   {
     // Extra operands and malformed metadata remain fail-closed.
@@ -298,7 +365,7 @@ int main() {
       CHECK(branch_offset != std::string::npos);
       malformed.replace(branch_offset, branch.size(), branch + std::string(suffix));
       CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(malformed).instances.empty());
-      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
           malformed).success);
     }
   }
@@ -310,7 +377,7 @@ int main() {
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::SvTargetAlpha);
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::SvTargetRgb);
     CHECK(consumer != wuwa_tfr::FadePrimitiveConsumer::DiscardAndSvTargetAlpha);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         llvm_ir).success);
   };
   {
@@ -319,7 +386,8 @@ int main() {
     const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(alpha);
     CHECK(result.instances.size() == 1);
     CHECK(result.instances.front().consumer == wuwa_tfr::FadePrimitiveConsumer::SvTargetAlpha);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(alpha).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(alpha)).success);
   }
   {
     const std::string both = Module(PrimitiveFunction("both",
@@ -328,7 +396,8 @@ int main() {
     const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(both);
     CHECK(result.instances.size() == 1);
     CHECK(result.instances.front().consumer == wuwa_tfr::FadePrimitiveConsumer::DiscardAndSvTargetAlpha);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(both).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(both)).success);
   }
   {
     // Authorized output/discard evidence never hides an additional reachable
@@ -414,7 +483,7 @@ int main() {
     CHECK(cross_diagnostic.instances.size() == 1);
     CHECK(cross_diagnostic.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::Unknown);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         cross_function).success);
   }
   {
@@ -425,7 +494,8 @@ int main() {
     CHECK(result.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::SvTargetRgb);
     const auto patched =
-        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(rgb);
+        wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+            WithQualifyingPreFadeFMin(rgb));
     CHECK(patched.success);
     CHECK(patched.verified_instance_count == 1);
     CHECK(patched.patched_instance_count == 1);
@@ -441,7 +511,7 @@ int main() {
     CHECK(missing_blue_diagnostic.instances.size() == 1);
     CHECK(missing_blue_diagnostic.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         missing_blue).success);
 
     std::string duplicate_column = rgb;
@@ -558,7 +628,7 @@ entry:
         "%plain = icmp eq i32 0, 0\n"
         "br i1 %plain, label %enabled, label %merge");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(prefix_successor).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         prefix_successor).success);
   }
   {
@@ -579,7 +649,7 @@ entry:
         "%ptr2 = bitcast float* %ptr to float*\n"
         "%threshold = load float, float* %ptr2, align 4, !tbaa !50, !noalias !54");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(pointer_prefix).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         pointer_prefix).success);
   }
   {
@@ -595,7 +665,7 @@ entry:
         "%190 = bitcast float* %19 to float*\n"
         "%threshold = load float, float* %190, align 4, !tbaa !50, !noalias !54");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(numeric_prefix).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         numeric_prefix).success);
   }
   {
@@ -645,7 +715,7 @@ entry:
         "call void @dx.op.discard(i32 82, i1 %kill)\n";
     limited.insert(limited.rfind("\n}\n"), chain);
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(limited).instances.empty());
-    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
         limited).success);
   }
   {
@@ -660,21 +730,21 @@ entry:
     no_align.replace(no_align.find(load_line), load_line.size(),
         "%threshold = load float, float* %ptr, !tbaa !50, !noalias !54");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(no_align).instances.size() == 1);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        no_align).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(no_align)).success);
 
     std::string single_attachment = positive;
     single_attachment.replace(single_attachment.find(load_line), load_line.size(),
         "%threshold = load float, float* %ptr, align 4, !tbaa !50");
     CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(single_attachment).instances.size() == 1);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        single_attachment).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(single_attachment)).success);
 
     const auto expect_load_rejected = [&](std::string_view replacement) {
       std::string ir = positive;
       ir.replace(ir.find(load_line), load_line.size(), std::string(replacement));
       CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(ir).instances.empty());
-      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
           ir).success);
     };
     // Malformed attachment name: missing the leading '!'.
@@ -714,8 +784,8 @@ entry:
     CHECK(fmin_result.instances.size() == 1);
     CHECK(fmin_result.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::Discard);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        discard_via_fmin).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(discard_via_fmin)).success);
 
     const std::string alpha_via_saturate = Module(PrimitiveFunction(
         "alpha_via_saturate",
@@ -729,8 +799,8 @@ entry:
     CHECK(saturate_result.instances.size() == 1);
     CHECK(saturate_result.instances.front().consumer ==
         wuwa_tfr::FadePrimitiveConsumer::SvTargetAlpha);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
-        alpha_via_saturate).success);
+    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
+        WithQualifyingPreFadeFMin(alpha_via_saturate)).success);
 
     const auto expect_pure_call_rejected = [](std::string_view name,
                                                std::string_view call_line) {
@@ -743,7 +813,7 @@ entry:
       CHECK(diagnostic.instances.size() == 1);
       CHECK(diagnostic.instances.front().consumer ==
           wuwa_tfr::FadePrimitiveConsumer::OtherVisibilityOrOutput);
-      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesToIdentity(
+      CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(
           ir).success);
     };
     // Wrong opcode: FMax (35) instead of FMin (36).
@@ -776,5 +846,98 @@ entry:
     expect_pure_call_rejected("unrelated_call",
         "%clamped = call float @sink(float %dither)");
   }
+
+  // ===================== Step 6A: gate-predicate evidence =====================
+
+  // An existing verified case remains verified and carries best-effort
+  // gate-predicate evidence. The gate condition is always identified here
+  // (%gate is the sole, unambiguous branch into %enabled); its resolution
+  // to a direct CBV load stays unresolved because this fixture's %cb
+  // handle -- like every other fixture's in this file -- is never defined
+  // via createHandle. This is exactly the "evidence extraction failure
+  // must not affect the verified verdict" case: the boolean gate criterion
+  // never depended on createHandle existing, only on the opcode shape of
+  // the load itself.
+  {
+    const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(positive);
+    CHECK(result.instances.size() == 1);
+    const auto& instance = result.instances.front();
+    // Stable instance identity, unchanged by this step.
+    CHECK(instance.function_identity == "@positive");
+    CHECK(instance.merge_value == "%dither");
+    CHECK(instance.phi_start < instance.phi_end);
+    const auto& evidence = instance.gate_predicate;
+    CHECK(evidence.condition_identified);
+    CHECK(evidence.condition_value == "%gate");
+    CHECK(!evidence.resolved);
+    CHECK(evidence.handle_value.empty());
+    CHECK(!evidence.range_id_resolved);
+  }
+
+  // Full resolution: with a real createHandle behind the gate's CBV
+  // handle, evidence resolves completely, including the createHandle-
+  // derived range id. (space, register) are deliberately never present on
+  // this struct at all -- that walk is left for a later, separate,
+  // diagnostic-only enrichment step, mirroring
+  // pre_fade_fmin_analysis.hpp's ResolvePreFadeCbvRegisters.
+  {
+    const std::string with_handle = WithResolvableGateHandle(
+        Module(PrimitiveFunction("resolved_gate", DiscardConsumer())));
+    const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(with_handle);
+    CHECK(result.instances.size() == 1);
+    const auto& instance = result.instances.front();
+    CHECK(instance.function_identity == "@resolved_gate");
+    CHECK(instance.merge_value == "%dither");
+    const auto& evidence = instance.gate_predicate;
+    CHECK(evidence.condition_identified);
+    CHECK(evidence.condition_value == "%gate");
+    CHECK(evidence.resolved);
+    CHECK(evidence.handle_value == "%cb");
+    CHECK(evidence.legacy_form);
+    CHECK(evidence.row_resolved);
+    CHECK(evidence.row == 7);
+    CHECK(evidence.component_resolved);
+    CHECK(evidence.component == 1);
+    CHECK(!evidence.byte_offset_resolved);
+    CHECK(evidence.range_id_resolved);
+    CHECK(evidence.range_id == 3);
+  }
+
+  // Evidence-extraction ambiguity does not change the verified verdict when
+  // the old boolean gate criterion still succeeds: two distinct, reachable
+  // CBV loads both feed the gate condition. VerifyCbufferControlledGate
+  // only ever required ONE reachable load and still finds it; evidence
+  // resolution requires exactly one candidate and reports the ambiguity as
+  // unresolved rather than guessing between the two.
+  {
+    const std::string ambiguous = WithAmbiguousGatePredicate(
+        Module(PrimitiveFunction("ambiguous_gate", DiscardConsumer())));
+    const auto result = wuwa_tfr::AnalyzeFadePrimitiveV1(ambiguous);
+    CHECK(result.instances.size() == 1);
+    const auto& evidence = result.instances.front().gate_predicate;
+    CHECK(evidence.condition_identified);
+    CHECK(evidence.condition_value == "%gate");
+    CHECK(!evidence.resolved);
+    CHECK(evidence.handle_value.empty());
+  }
+
+  // Malformed/incomplete gate slices retain the old fail-closed behavior:
+  // a gate condition entirely unrelated to any CBV load (here, a loadInput
+  // value) reaching the correct enabled predecessor is rejected exactly as
+  // before this step -- gate-predicate evidence extraction never rescues
+  // an instance the boolean criterion itself would reject.
+  {
+    std::string not_cbv_controlled = positive;
+    const std::string original =
+        "%gate = fcmp fast ogt float %gate_value, 0.000000e+00";
+    const std::size_t at = not_cbv_controlled.find(original);
+    CHECK(at != std::string::npos);
+    not_cbv_controlled.replace(at, original.size(),
+        "%plain_counter = call float @dx.op.loadInput.f32(i32 4, i32 0, "
+        "i32 0, i8 2, i32 undef)\n"
+        "%gate = fcmp fast ogt float %plain_counter, 0.000000e+00");
+    CHECK(wuwa_tfr::AnalyzeFadePrimitiveV1(not_cbv_controlled).instances.empty());
+  }
+
   return 0;
 }

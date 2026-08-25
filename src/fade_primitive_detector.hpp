@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -19,14 +19,36 @@ enum class FadePrimitiveConsumer : std::uint8_t {
   OtherVisibilityOrOutput,
 };
 
+struct FadePrimitiveGatePredicateEvidence {
+  bool condition_identified = false;
+  std::string condition_value;
+
+  bool resolved = false;
+  std::string handle_value;
+  bool legacy_form = false;
+
+  bool range_id_resolved = false;
+  std::uint32_t range_id = 0;
+
+  bool register_resolved = false;
+  std::uint32_t cbuffer_space = 0;
+  std::uint32_t cbuffer_register = 0;
+
+  bool row_resolved = false;
+  std::uint32_t row = 0;
+  bool component_resolved = false;
+  std::uint32_t component = 0;
+  bool byte_offset_resolved = false;
+  std::uint32_t byte_offset = 0;
+};
+
 struct FadePrimitiveInstance {
   FadePrimitiveConsumer consumer = FadePrimitiveConsumer::Unknown;
-  // An SSA name is local to a defined LLVM function.  The source range is the
-  // exact original phi line verified by the matcher and is the patch target.
   std::string function_identity;
   std::size_t phi_start = 0;
   std::size_t phi_end = 0;
   std::string merge_value;
+  FadePrimitiveGatePredicateEvidence gate_predicate;
 };
 
 struct FadePrimitiveDiagnostic {
@@ -37,4 +59,4 @@ FadePrimitiveDiagnostic AnalyzeFadePrimitiveV1(const std::string& llvm_ir);
 
 const char* FadePrimitiveConsumerName(FadePrimitiveConsumer consumer) noexcept;
 
-} // namespace wuwa_tfr
+}

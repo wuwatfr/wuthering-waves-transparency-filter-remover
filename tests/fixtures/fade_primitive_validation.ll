@@ -5,14 +5,15 @@
 ; The disassembly header comments were trimmed. The threshold load's
 ; !tbaa/!noalias attachment (metadata !50-!56) was added by hand in the same
 ; shape DXC emits for the real captured shaders this detector targets; every
-; other line, including the FMin/Saturate consumer chain, is unmodified real
-; dxc output for the saturate()/min() calls in the HLSL source.
+; other line, including the pre-Fade FMin(coverageA, coverageB) and the
+; FMin/Saturate consumer chain, is unmodified real dxc output for the
+; min()/saturate() calls in the HLSL source.
 target datalayout = "e-m:e-p:32:32-i1:32-i8:32-i16:32-i32:32-i64:64-f16:32-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-ms-dx"
 
 %dx.types.Handle = type { i8* }
 %dx.types.CBufRet.f32 = type { float, float, float, float }
-%FadeConstants = type { float, float }
+%FadeConstants = type { float, float, float }
 
 @thresholds = internal unnamed_addr constant [9 x float] [float 0.000000e+00, float 5.000000e-01, float 1.250000e-01, float 6.250000e-01, float 2.500000e-01, float 7.500000e-01, float 8.750000e-01, float 3.750000e-01, float 1.000000e+00], align 4
 @dx.nothing.a = internal constant [1 x i32] zeroinitializer
@@ -27,7 +28,7 @@ define void @main() {
   %7 = fcmp fast ogt float %6, 0.000000e+00
   %8 = icmp ne i1 %7, false
   %9 = icmp ne i1 %8, false
-  br i1 %9, label %10, label %30, !dx.controlflow.hints !18
+  br i1 %9, label %10, label %34, !dx.controlflow.hints !18
 
 ; <label>:10
   %11 = fptosi float %2 to i32
@@ -42,28 +43,32 @@ define void @main() {
   %20 = load float, float* %19, align 4, !tbaa !50, !noalias !54
   %21 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
   %22 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %1, i32 0)
-  %23 = extractvalue %dx.types.CBufRet.f32 %22, 1
-  %24 = fmul fast float %23, 2.000000e+00
-  %25 = fsub fast float %24, %20
-  %26 = call float @dx.op.binary.f32(i32 35, float %25, float 0.000000e+00)  ; FMax(a,b)
-  %27 = call float @dx.op.binary.f32(i32 36, float %26, float 1.000000e+00)  ; FMin(a,b)
-  %28 = fadd fast float %27, 0x3FD54FDF40000000
-  %29 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
-  br label %30
+  %23 = extractvalue %dx.types.CBufRet.f32 %22, 2
+  %24 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %1, i32 0)
+  %25 = extractvalue %dx.types.CBufRet.f32 %24, 1
+  %26 = call float @dx.op.binary.f32(i32 36, float %25, float %23)  ; FMin(a,b)
+  %27 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
+  %28 = fmul fast float %26, 2.000000e+00
+  %29 = fsub fast float %28, %20
+  %30 = call float @dx.op.binary.f32(i32 35, float %29, float 0.000000e+00)  ; FMax(a,b)
+  %31 = call float @dx.op.binary.f32(i32 36, float %30, float 1.000000e+00)  ; FMin(a,b)
+  %32 = fadd fast float %31, 0x3FD54FDF40000000
+  %33 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
+  br label %34
 
-; <label>:30
-  %31 = phi float [ %28, %10 ], [ 1.000000e+00, %0 ]
-  %32 = call float @dx.op.unary.f32(i32 7, float %31)  ; Saturate(value)
-  %33 = call float @dx.op.binary.f32(i32 36, float %32, float 1.000000e+00)  ; FMin(a,b)
-  %34 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
-  %35 = fsub fast float %33, 5.000000e-01
-  %36 = fcmp fast olt float %35, 0.000000e+00
-  call void @dx.op.discard(i32 82, i1 %36)
-  %37 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
+; <label>:34
+  %35 = phi float [ %32, %10 ], [ 1.000000e+00, %0 ]
+  %36 = call float @dx.op.unary.f32(i32 7, float %35)  ; Saturate(value)
+  %37 = call float @dx.op.binary.f32(i32 36, float %36, float 1.000000e+00)  ; FMin(a,b)
+  %38 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
+  %39 = fsub fast float %37, 5.000000e-01
+  %40 = fcmp fast olt float %39, 0.000000e+00
+  call void @dx.op.discard(i32 82, i1 %40)
+  %41 = load i32, i32* getelementptr inbounds ([1 x i32], [1 x i32]* @dx.nothing.a, i32 0, i32 0)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 0, float 1.000000e+00)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 1, float 1.000000e+00)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 2, float 1.000000e+00)
-  call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %33)
+  call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %37)
   ret void
 }
 
@@ -92,7 +97,7 @@ attributes #2 = { nounwind readonly }
 !3 = !{!"ps", i32 6, i32 0}
 !4 = !{null, null, !5, null}
 !5 = !{!6}
-!6 = !{i32 0, %FadeConstants* undef, !"", i32 0, i32 0, i32 1, i32 8, null}
+!6 = !{i32 0, %FadeConstants* undef, !"", i32 0, i32 0, i32 1, i32 12, null}
 !7 = !{[6 x i32] [i32 4, i32 4, i32 8, i32 8, i32 0, i32 0]}
 !8 = !{void ()* @main, !"main", !9, !4, !17}
 !9 = !{!10, !14, null}

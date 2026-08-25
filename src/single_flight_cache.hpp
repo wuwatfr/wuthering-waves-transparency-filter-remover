@@ -19,11 +19,6 @@ struct NoRetainedPayloadBytes {
   std::size_t operator()(const Value&) const noexcept { return 0; }
 };
 
-// A synchronous per-key single-flight cache. The caller that installs a new
-// in-flight entry runs Work on its own thread; callers for that key wait and
-// receive the exact cached completion value. Work must return a default
-// constructible, copyable Value. Abort is used if Work throws so waiters are
-// always released and the failure becomes the cached completion.
 template <typename Key, typename Value, typename Hash = std::hash<Key>,
     typename RetainedPayloadBytes = NoRetainedPayloadBytes<Value>>
 class SingleFlightCache {
@@ -59,8 +54,6 @@ class SingleFlightCache {
     try {
       value = std::forward<Work>(work)();
     } catch (...) {
-      // Abort is intentionally called outside the cache lock. It must return
-      // a fail-closed value; either path reaches Publish below.
       try {
         value = std::forward<Abort>(abort)();
       } catch (...) {
@@ -70,16 +63,10 @@ class SingleFlightCache {
 
     {
       std::lock_guard lock(mutex_);
-      // This owner is the only publisher for key until it removes in_flight_.
-      // Publish to waiters before attempting a cache allocation, so even an
-      // allocation failure cannot leave the entry permanently in progress.
       flight->value = std::move(value);
       in_flight_.erase(key);
       flight->ready = true;
       try {
-        // Store failures too, preserving cache semantics for all normal
-        // completions. An allocation failure has already been published as a
-        // fail-closed non-stuck result and may be retried later.
         const auto [completed, inserted] = completed_.emplace(key, flight->value);
         if (inserted)
           retained_payload_bytes_ += payload_bytes_(completed->second);
@@ -101,9 +88,6 @@ class SingleFlightCache {
     return completed_.size();
   }
 
-  // Obtains all telemetry-relevant cache state under this one short lock.
-  // Retained bytes are maintained during publication and Clear(), so this
-  // never scans the completed cache during a telemetry sample.
   Snapshot GetSnapshot() const {
     std::lock_guard lock(mutex_);
     return {completed_.size(), in_flight_.size(), retained_payload_bytes_};

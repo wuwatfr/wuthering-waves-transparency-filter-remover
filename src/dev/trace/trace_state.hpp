@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
-//
-// Dev-only runtime differential trace: data structures and process-wide
-// state for the three-window (normal / partial-fade / full-fade) PSO,
-// resource, and draw-submission capture used for manual investigation. See
-// dev/trace/trace_events.* for the ReShade event handlers that populate this
-// state and dev/trace/trace_report.* for the TSV exporters that read it.
 
 #pragma once
 
@@ -22,6 +16,8 @@
 #include <reshade.hpp>
 
 #include "addon_shared.hpp"
+#include "dev/capture/fade_control_snapshot.hpp"
+#include "dev/resource_lifecycle_state.hpp"
 #include "trace_submission_identity.hpp"
 
 namespace wuwa_tfr::dev {
@@ -58,44 +54,19 @@ struct TracePsoIdentity {
       default;
 };
 
-struct TraceResourceIdentity {
-  std::uint64_t fingerprint = 0;
-  bool dynamic_contents = false;
-
-  friend bool operator==(
-      const TraceResourceIdentity&,
-      const TraceResourceIdentity&) = default;
-};
-
-struct TracePipelineInfo {
-  std::uint64_t incarnation_id = 0;
-  DeviceIdentity device = 0;
-  std::uint64_t application_pipeline = 0;
-  std::uint64_t pso_fingerprint = 0;
-  std::uint64_t shader_hash = 0;
-  std::uint64_t context_hash = 0;
-  std::uint32_t primitive_topology = 0;
-  bool live = true;
-  bool rt0_blend = false;
-  bool alpha_to_coverage = false;
-  bool depth_test = false;
-  bool depth_write = false;
-  std::uint32_t render_target_count = 0;
-  std::uint32_t sample_count = 1;
-};
-
 using ConcreteWindowMetrics = wuwa_tfr::TraceSubmissionWindowMetrics;
 using ConcreteSubmissionRecord =
     wuwa_tfr::TraceSubmissionRecord<kTraceWindowCount>;
 
 struct ConcreteTraceRecord : ConcreteSubmissionRecord {
-  TracePipelineInfo pipeline;
+  wuwa_tfr::ExecutionPipelineIdentity pipeline;
   std::uint64_t last_submission_serial = 0;
 };
 
 struct ConcreteTraceRow {
   wuwa_tfr::TraceConcreteDrawKey key;
-  TracePipelineInfo pipeline;
+  wuwa_tfr::ExecutionPipelineIdentity pipeline;
+  bool pipeline_live = false;
   std::array<ConcreteWindowMetrics, kTraceWindowCount> windows;
   std::uint64_t last_submission_serial = 0;
   std::uint64_t geometry_fingerprint = 0;
@@ -214,6 +185,52 @@ struct RootConstantKeyHash {
   }
 };
 
+struct RootCbvKey {
+  std::uint64_t layout = 0;
+  std::uint32_t parameter = 0;
+  std::uint32_t binding = 0;
+
+  friend bool operator==(const RootCbvKey&, const RootCbvKey&) = default;
+};
+
+struct RootCbvKeyHash {
+  std::size_t operator()(const RootCbvKey& key) const noexcept {
+    std::size_t hash = std::hash<std::uint64_t>{}(key.layout);
+    wuwa_tfr::TraceHashCombine(hash, key.parameter);
+    wuwa_tfr::TraceHashCombine(hash, key.binding);
+    return hash;
+  }
+};
+
+struct RootCbvBinding {
+  std::uint64_t resource_handle = 0;
+  std::uint64_t resource_incarnation = 0;
+  std::uint64_t offset = 0;
+  std::uint64_t size = 0;
+};
+
+struct BoundDescriptorTableKey {
+  std::uint64_t layout = 0;
+  std::uint32_t parameter = 0;
+
+  friend bool operator==(
+      const BoundDescriptorTableKey&, const BoundDescriptorTableKey&) =
+      default;
+};
+
+struct BoundDescriptorTableKeyHash {
+  std::size_t operator()(const BoundDescriptorTableKey& key) const noexcept {
+    std::size_t hash = std::hash<std::uint64_t>{}(key.layout);
+    wuwa_tfr::TraceHashCombine(hash, key.parameter);
+    return hash;
+  }
+};
+
+struct BoundDescriptorTable {
+  std::uint64_t table_handle = 0;
+  bool dynamic_offsets_present = false;
+};
+
 struct RecordedTraceDrawKey {
   wuwa_tfr::TraceConcreteDrawKey concrete;
   std::uint64_t root_constants = 0;
@@ -238,14 +255,17 @@ struct RecordedTraceDrawKeyHash {
 
 struct RecordedTraceDraw {
   std::uint64_t commands = 0;
-  TracePipelineInfo pipeline;
+  wuwa_tfr::ExecutionPipelineIdentity pipeline;
+  std::vector<PendingFadeControlObservation> pending_fade_observations;
+  std::vector<PendingFadeControlSnapshot> pending_fade_snapshots;
+  FadeControlTrackerCapacityDiagnostics pending_fade_tracker_taint;
 };
 
 struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
     CommandListTrace {
   DeviceIdentity device = 0;
   std::uint64_t bound_pso_incarnation = 0;
-  std::optional<TracePipelineInfo> bound_pipeline;
+  std::optional<wuwa_tfr::ExecutionPipelineIdentity> bound_pipeline;
   std::uint64_t bound_layout = 0;
   std::uint32_t primitive_topology = 0;
   bool topology_observed = false;
@@ -262,9 +282,14 @@ struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
   std::uint8_t observed_bindings = 0;
   std::unordered_map<RootConstantKey, std::uint32_t, RootConstantKeyHash>
       root_constants;
+  std::unordered_map<RootCbvKey, RootCbvBinding, RootCbvKeyHash>
+      root_cbv_bindings;
+  std::unordered_map<BoundDescriptorTableKey, BoundDescriptorTable,
+      BoundDescriptorTableKeyHash> bound_descriptor_tables;
   std::unordered_map<RecordedTraceDrawKey, RecordedTraceDraw,
       RecordedTraceDrawKeyHash> recorded_draws;
   bool recorded_draw_capacity_exceeded = false;
+  std::uint64_t fade_admitted_manual_session = 0;
 
   void Reset() {
     bound_pso_incarnation = 0;
@@ -283,8 +308,11 @@ struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
     descriptor_table_fingerprint = kTraceFnvOffset;
     observed_bindings = 0;
     root_constants.clear();
+    root_cbv_bindings.clear();
+    bound_descriptor_tables.clear();
     recorded_draws.clear();
     recorded_draw_capacity_exceeded = false;
+    fade_admitted_manual_session = 0;
   }
 };
 
@@ -296,14 +324,12 @@ using TraceResourceAmbiguityDiagnostics =
 extern std::mutex g_trace_mutex;
 extern wuwa_tfr::TraceIncarnationIndex<TracePsoIdentity>
     g_trace_pso_incarnations;
-extern wuwa_tfr::TraceIncarnationIndex<TraceResourceIdentity>
-    g_trace_resource_incarnations;
 extern wuwa_tfr::TraceIncarnationIndex<std::uint64_t>
     g_trace_view_incarnations;
 extern TracePsoAmbiguityDiagnostics g_trace_pso_lifecycle_ambiguities;
 extern TraceResourceAmbiguityDiagnostics g_trace_resource_lifecycle_ambiguities;
 extern std::uint64_t g_trace_lifecycle_event_serial;
-extern std::unordered_map<TracePipelineKey, TracePipelineInfo,
+extern std::unordered_map<TracePipelineKey, wuwa_tfr::ExecutionPipelineIdentity,
     TracePipelineKeyHash> g_trace_pipelines;
 extern std::unordered_map<std::uint64_t, ShaderTraceRecord> g_trace_shaders;
 extern std::unordered_map<wuwa_tfr::TraceConcreteDrawKey, ConcreteTraceRecord,
@@ -335,10 +361,6 @@ extern std::uintptr_t g_trace_swapchain;
 extern std::array<bool, kTraceWindowCount> g_trace_capture_complete;
 extern int g_trace_window_length;
 extern std::string g_trace_ui_status;
-
-// --- Small shared helpers used by both trace_events.cpp and trace_report.cpp
-// (and, for the hash helpers, by the recipe/experiments modules' fingerprint
-// computations) ---
 
 void TraceHashAppend(
     std::uint64_t& hash, const void* data, std::size_t size) noexcept;
@@ -377,7 +399,7 @@ std::string RouteUncertainty(const ConcreteTraceRow& row);
 std::string TraceIdentityText(const TracePsoIdentity& identity);
 std::string TraceIdentityText(const TraceResourceIdentity& identity);
 void ResetLifecycleAmbiguityDiagnosticsLocked();
-TracePipelineInfo DescribeTracePipeline(
+wuwa_tfr::ExecutionPipelineIdentity DescribeTracePipeline(
     std::uint32_t subobject_count,
     const reshade::api::pipeline_subobject* subobjects,
     std::uint64_t shader_hash);

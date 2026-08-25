@@ -4,6 +4,7 @@
 #include "dev/dev_runtime.hpp"
 
 #include "addon_shared.hpp"
+#include "dev/dev_inspection.hpp"
 
 using namespace reshade::api;
 
@@ -30,6 +31,7 @@ thread_local bool g_dev_runtime_internal_pipeline_event = false;
 
 void InitializeDevRuntime() {
   g_dev_antifade_runtime.set_dxc_runtime_directory(g_addon_directory);
+  g_dev_antifade_runtime.set_observer(InspectionObserver());
 }
 
 void OnInitDevRuntimeDevice(device* owner) {
@@ -38,9 +40,6 @@ void OnInitDevRuntimeDevice(device* owner) {
 
 void OnDestroyDevRuntimeDevice(device* owner) {
   if (!g_target_process) return;
-  // OnDestroyDevice drains this device's replacement pipelines and may call
-  // device::destroy_pipeline() internally, which re-fires destroy_pipeline;
-  // guard it exactly like the pipeline-lifecycle forwarders below.
   ScopedInternalPipelineEvent guard;
   g_dev_antifade_runtime.OnDestroyDevice(owner);
 }

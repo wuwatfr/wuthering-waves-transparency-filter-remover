@@ -22,8 +22,6 @@ struct SpatialDitherDiagnostic {
       SpatialDitherClassification::NoDiscard;
 };
 
-// Diagnoses a narrow spatial-dither-to-discard data-flow shape in DXC LLVM text.
-// This is observation-only: it neither changes the text nor selects a patch.
 SpatialDitherDiagnostic AnalyzeSpatialDitherDiagnostic(
     const std::string& llvm_ir);
 

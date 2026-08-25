@@ -16,15 +16,6 @@
 
 namespace wuwa_tfr {
 
-// D3D12 pipeline-state objects are immutable for their lifetime. Therefore a
-// live (owner, application pipeline handle) pair is the canonical identity of
-// the complete application PSO, not merely of its pixel shader. ReShade's
-// destroy_pipeline event ends that lifetime and permits handle reuse.
-//
-// `observed_shader_identity` is deliberately only a corroborating value. A
-// difference for a still-live handle is impossible for a coherent D3D12 PSO
-// and causes selection to fail closed; it does not authorize replacing or
-// destroying an already-published replacement.
 template <typename Owner, typename Pipeline>
 class PipelineGenerationState {
  private:
@@ -39,9 +30,6 @@ class PipelineGenerationState {
     std::uint64_t generation = 0;
   };
 
-  // A lease keeps an external bind callback concurrent with state teardown.
-  // It is intentionally not a GPU-lifetime mechanism: published replacements
-  // remain retained until application-pipeline destruction or owner drain.
   class BindLease {
    public:
     BindLease() = default;
@@ -84,8 +72,6 @@ class PipelineGenerationState {
     std::optional<Pipeline> pipeline_;
   };
 
-  // Build and destroy are always invoked after the state mutex is released.
-  // A stale candidate was never published and may be destroyed immediately.
   template <typename Build, typename Destroy>
   ReconcileResult Reconcile(Owner owner, std::uint64_t application_pipeline,
       std::uint64_t observed_shader_identity, Build&& build, Destroy&& destroy) {
@@ -109,9 +95,6 @@ class PipelineGenerationState {
     return ReconcileResult::Rejected;
   }
 
-  // Application-pipeline destruction is the first point at which a
-  // published replacement is allowed to be destroyed. It first stops future
-  // selection, then waits only for active CPU bind callbacks.
   std::vector<Pipeline> DestroyPipeline(
       Owner owner, std::uint64_t application_pipeline) {
     std::unique_lock lock(mutex_);
@@ -123,7 +106,6 @@ class PipelineGenerationState {
     return TakePipelines(*entry);
   }
 
-  // Owner drain has the same retention rule as application destruction.
   std::vector<Pipeline> DrainOwner(Owner owner) {
     std::unique_lock lock(mutex_);
     std::vector<std::shared_ptr<Entry>> entries;
@@ -173,9 +155,6 @@ class PipelineGenerationState {
     return count;
   }
 
-  // Size() reports selectable mappings. RetainedSize() includes replacements
-  // intentionally retired after contradictory evidence but still owned until
-  // the application pipeline is destroyed or its owner is drained.
   std::size_t RetainedSize() const {
     std::lock_guard lock(mutex_);
     std::size_t count = 0;
@@ -246,16 +225,13 @@ class PipelineGenerationState {
       return {BeginKind::AlreadyPublished,
           {owner, application_pipeline, entry->generation}};
 
-    // A live D3D12 handle with contradictory callback identity is not a new
-    // generation. Stop substitution and retain any published object for safe
-    // destruction at the real lifetime boundary.
     entry->selection_disabled = true;
     entry->state = EntryState::Rejected;
     if (entry->selected) {
       entry->retired.push_back(std::move(*entry->selected));
       entry->selected.reset();
     }
-    entry->generation = IssueGeneration(); // Invalidates a preparation ticket.
+    entry->generation = IssueGeneration();
     return {BeginKind::Rejected, {owner, application_pipeline, entry->generation}};
   }
 
@@ -319,4 +295,4 @@ class PipelineGenerationState {
   bool generation_exhausted_ = false;
 };
 
-} // namespace wuwa_tfr
+}

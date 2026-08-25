@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
-//
-// TSV exporters for the Dev-only runtime differential trace: the aggregate
-// per-shader report, the raw concrete-submission report, the lifecycle-
-// ambiguity report, and the on-demand "current investigation range" export.
 
 #pragma once
 

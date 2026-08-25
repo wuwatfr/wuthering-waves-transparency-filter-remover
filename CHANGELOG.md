@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+## v1.1.0 - 2026-08-25
+
+### Changed
+
+- Improve pre-Fade patching to preserve unrelated Fade input while removing
+  the validated camera-proximity Fade component.
+- Tighten pre-Fade matching so unsupported or ambiguous shader layouts fail
+  closed instead of being patched speculatively.
+- Improve Dev Manual Capture and Fade-control evidence correlation across
+  command recording and submission.
+- Make Dev Trace and Manual Capture exports collision-safe and keep related
+  export files grouped together.
+- `fade_primitive_audit` accepts an explicit `--concrete-trace` input.
+
+### Fixed
+
+- Avoid duplicate full analysis of the original shader before pre-Fade
+  patching.
+- Prevent repeated command-list submissions from duplicating captured Fade
+  evidence.
+- Enforce finite descriptor-table CBV bounds for scalar Fade-control reads.
+- Device-scope Fade-control mapped-resource and descriptor-table state.
+- Unify Trace/Fade resource incarnation tracking on one canonical lifecycle
+  owner.
+- Surface Fade-control tracker capacity loss instead of silently degrading
+  evidence.
+- Classify Fade-control push constants by exact shader register instead of
+  reading a root-constant DWORD count as a register span.
+- Stop counting non-target pixel shaders as failed replacements in
+  `replacements_failed_total`.
+
+### Internal
+
+- Consolidate shared DXIL lexical parsing.
+- Unify execution pipeline identity used by Trace, Manual Capture, and
+  Fade-control.
+- Remove per-Draw deep copies of full Fade diagnostic evidence and reduce
+  Fade-control locking.
+- Remove dead Dev `Diagnostic` configuration.
+
 ## v1.0.0 - 2026-08-23
 
 ### Changed

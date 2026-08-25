@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 WuwaTFR contributors
-//
-// The Production variant implementation of addon_variant.hpp. Owns
-// g_public_antifade_runtime (the sole Production fade-primitive replacement
-// owner) and memory telemetry; addon.cpp knows nothing about either beyond
-// calling these five functions.
 
 #include "addon_variant.hpp"
 
@@ -131,9 +126,6 @@ void EmitPublicMemoryTelemetryPresent() {
   g_memory_telemetry.EmitIfCurrent(*ticket, [&] {
     if (!start_line.empty())
       LogMemoryTelemetry(reshade::log::level::info, start_line);
-    // At most one warning every ten minutes (and at session start) if a
-    // Windows process query is unavailable. The sample still reports all
-    // available WuwaTFR retention and activity counters.
     if (process_query_failed &&
         (ticket->sample == 0 || ticket->sample %
             wuwa_tfr::kMemoryTelemetryWarningIntervalSamples == 0)) {
@@ -149,7 +141,6 @@ void EmitPublicMemoryTelemetryPresent() {
 void OnPublicMemoryTelemetryPresent(
     command_queue*, swapchain*, const rect*, const rect*, std::uint32_t,
     const rect*) noexcept {
-  // Keep the disabled production present path to this atomic check only.
   if (!g_memory_telemetry.enabled()) return;
   (void)wuwa_tfr::InvokeMemoryTelemetryNoThrow(
       [] { EmitPublicMemoryTelemetryPresent(); });
@@ -194,6 +185,8 @@ void DrawVariantOverlay() {
 void LogVariantStartup() {
   Log(reshade::log::level::info,
       std::string("loaded automatic transparency-removal runtime") +
+      "; version=" WUWA_TFR_VERSION +
+      "; build=" WUWA_TFR_BUILD_COMMIT +
       "; devtools=not-compiled" +
       "; config=" + ConfigPath().string());
 }
