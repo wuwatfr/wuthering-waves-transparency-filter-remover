@@ -119,7 +119,7 @@ ManualCaptureSummary ManualCaptureAccumulator::Summary() const noexcept {
   };
 }
 
-std::string AllocateExportFilename(const std::string& stem,
+std::optional<std::string> AllocateExportFilename(const std::string& stem,
     const std::string& extension,
     const std::function<bool(const std::string&)>& exists) {
   std::string candidate = stem + extension;
@@ -128,10 +128,10 @@ std::string AllocateExportFilename(const std::string& stem,
     candidate = stem + "-" + std::to_string(suffix) + extension;
     if (!exists(candidate)) return candidate;
   }
-  return candidate;
+  return std::nullopt;
 }
 
-std::vector<std::string> AllocateExportFilenameGroup(
+std::optional<std::vector<std::string>> AllocateExportFilenameGroup(
     const std::vector<std::string>& stems, const std::string& extension,
     const std::function<bool(const std::string&)>& exists) {
   const auto group_is_free = [&](const std::string& suffix) {
@@ -140,17 +140,19 @@ std::vector<std::string> AllocateExportFilenameGroup(
     }
     return true;
   };
-  std::string suffix;
-  if (!group_is_free(suffix)) {
-    for (int attempt = 1; attempt <= kMaxExportFilenameAttempts; ++attempt) {
-      suffix = "-" + std::to_string(attempt);
-      if (group_is_free(suffix)) break;
-    }
+  const auto build = [&](const std::string& suffix) {
+    std::vector<std::string> filenames;
+    filenames.reserve(stems.size());
+    for (const auto& stem : stems)
+      filenames.push_back(stem + suffix + extension);
+    return filenames;
+  };
+  if (group_is_free({})) return build({});
+  for (int attempt = 1; attempt <= kMaxExportFilenameAttempts; ++attempt) {
+    const std::string suffix = "-" + std::to_string(attempt);
+    if (group_is_free(suffix)) return build(suffix);
   }
-  std::vector<std::string> filenames;
-  filenames.reserve(stems.size());
-  for (const auto& stem : stems) filenames.push_back(stem + suffix + extension);
-  return filenames;
+  return std::nullopt;
 }
 
 }

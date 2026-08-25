@@ -635,12 +635,13 @@ bool WriteFadeControlExport(
 
   const auto directory = DumpDir();
   if (directory.empty()) return false;
-  const std::string filename = AllocateExportFilename(
+  const auto filename = AllocateExportFilename(
       SampleFilenameStem(timestamp), ".tsv",
       [&directory](const std::string& candidate) {
         return std::filesystem::exists(directory / candidate);
       });
-  out_path = directory / filename;
+  if (!filename) return false;
+  out_path = directory / *filename;
 
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
@@ -820,12 +821,13 @@ bool WriteFadeControlSnapshotExport(
 
   const auto directory = DumpDir();
   if (directory.empty()) return false;
-  const std::string filename = AllocateExportFilename(
+  const auto filename = AllocateExportFilename(
       SnapshotFilenameStem(timestamp), ".tsv",
       [&directory](const std::string& candidate) {
         return std::filesystem::exists(directory / candidate);
       });
-  out_path = directory / filename;
+  if (!filename) return false;
+  out_path = directory / *filename;
 
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;

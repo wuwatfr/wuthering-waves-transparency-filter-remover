@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -140,15 +141,20 @@ class ManualCaptureAccumulator {
 
 constexpr int kMaxExportFilenameAttempts = 1000;
 
-std::string AllocateExportFilename(const std::string& stem,
+// Allocates a filename no existing export occupies: the bare stem first,
+// then "-1", "-2", ... Returns nullopt when every candidate is taken, since
+// callers open the result with std::ios::trunc -- handing back an occupied
+// name would destroy the export it collided with.
+std::optional<std::string> AllocateExportFilename(const std::string& stem,
     const std::string& extension,
     const std::function<bool(const std::string&)>& exists);
 
 // Multi-file counterpart of AllocateExportFilename: allocates one shared
 // suffix (none, then "-1", "-2", ...) applied to every stem so a group of
 // files from the same export stays correlated by that suffix, instead of
-// each file independently drifting to a different collision suffix.
-std::vector<std::string> AllocateExportFilenameGroup(
+// each file independently drifting to a different collision suffix. Returns
+// nullopt when no suffix leaves every member of the group free.
+std::optional<std::vector<std::string>> AllocateExportFilenameGroup(
     const std::vector<std::string>& stems, const std::string& extension,
     const std::function<bool(const std::string&)>& exists);
 

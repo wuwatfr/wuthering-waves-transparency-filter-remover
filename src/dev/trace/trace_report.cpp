@@ -60,12 +60,14 @@ bool WriteTraceReport() {
   const auto rows = TraceSnapshot();
 
   const std::string timestamp = LocalExportTimestamp();
-  const auto filenames = AllocateExportFilenameGroup(
+  const auto allocated = AllocateExportFilenameGroup(
       {"runtime-trace-" + timestamp, "concrete-submission-trace-" + timestamp,
           "lifecycle-ambiguities-" + timestamp},
       ".tsv", [&directory](const std::string& candidate) {
         return std::filesystem::exists(directory / candidate);
       });
+  if (!allocated) return false;
+  const auto& filenames = *allocated;
 
   std::ofstream report(
       directory / filenames[0],
@@ -316,9 +318,14 @@ bool WriteCurrentInvestigationRange(
   if (directory.empty()) return false;
 
   const std::string timestamp = LocalExportTimestamp();
-  std::ofstream report(directory / ("investigation-range-" + timestamp +
-                                        ".tsv"),
-      std::ios::binary | std::ios::trunc);
+  const auto filename = AllocateExportFilename(
+      "investigation-range-" + timestamp, ".tsv",
+      [&directory](const std::string& candidate) {
+        return std::filesystem::exists(directory / candidate);
+      });
+  if (!filename) return false;
+  std::ofstream report(
+      directory / *filename, std::ios::binary | std::ios::trunc);
   if (!report) return false;
 
   report << "format\twuwa_tfr_investigation_range_v1\n";

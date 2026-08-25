@@ -362,8 +362,10 @@ int main() {
               exists) == "manual-capture-20260823-220500-2.tsv");
   }
 
-  // Exhausting every numbered suffix returns the last candidate instead of
-  // looping forever.
+  // Exhausting every numbered suffix reports failure. It must never hand back
+  // an occupied name: callers open the result with std::ios::trunc, so the
+  // old "return the last candidate" behaviour destroyed the export it had
+  // just collided with.
   {
     std::unordered_set<std::string> existing = {"stem.tsv"};
     for (int suffix = 1; suffix <= kMaxExportFilenameAttempts; ++suffix)
@@ -371,8 +373,69 @@ int main() {
     const auto exists = [&existing](const std::string& candidate) {
       return existing.contains(candidate);
     };
-    CHECK(AllocateExportFilename("stem", ".tsv", exists) ==
-        "stem-" + std::to_string(kMaxExportFilenameAttempts) + ".tsv");
+    CHECK(!AllocateExportFilename("stem", ".tsv", exists).has_value());
+  }
+
+  // Freeing any one of the exhausted candidates makes allocation succeed
+  // again, and the name it returns is the free one -- never an occupied one.
+  {
+    std::unordered_set<std::string> existing = {"stem.tsv"};
+    for (int suffix = 1; suffix <= kMaxExportFilenameAttempts; ++suffix)
+      existing.insert("stem-" + std::to_string(suffix) + ".tsv");
+    existing.erase("stem-500.tsv");
+    const auto exists = [&existing](const std::string& candidate) {
+      return existing.contains(candidate);
+    };
+    const auto allocated = AllocateExportFilename("stem", ".tsv", exists);
+    CHECK(allocated.has_value());
+    CHECK(*allocated == "stem-500.tsv");
+    CHECK(!existing.contains(*allocated));
+  }
+
+  // Investigation-range exports share this allocator rather than deriving a
+  // filename straight from the timestamp: two exports in the same second get
+  // distinct files, and an existing one is never selected for overwrite.
+  {
+    std::unordered_set<std::string> existing;
+    const auto exists = [&existing](const std::string& candidate) {
+      return existing.contains(candidate);
+    };
+    const std::string stem = "investigation-range-20260825-174500";
+
+    const auto first = AllocateExportFilename(stem, ".tsv", exists);
+    CHECK(first.has_value());
+    CHECK(*first == stem + ".tsv");
+    existing.insert(*first);
+
+    const auto second = AllocateExportFilename(stem, ".tsv", exists);
+    CHECK(second.has_value());
+    CHECK(*second == stem + "-1.tsv");
+    CHECK(*second != *first);
+    existing.insert(*second);
+
+    const auto third = AllocateExportFilename(stem, ".tsv", exists);
+    CHECK(third.has_value());
+    CHECK(*third == stem + "-2.tsv");
+    existing.insert(*third);
+
+    // Every allocation picked a name that did not already exist.
+    CHECK(existing.size() == 3);
+  }
+
+  // The group allocator reports failure the same way, so the correlated
+  // three-file trace export cannot silently overwrite a previous group.
+  {
+    const std::vector<std::string> stems{"a", "b", "c"};
+    std::unordered_set<std::string> existing;
+    for (const auto& stem : stems) {
+      existing.insert(stem + ".tsv");
+      for (int attempt = 1; attempt <= kMaxExportFilenameAttempts; ++attempt)
+        existing.insert(stem + "-" + std::to_string(attempt) + ".tsv");
+    }
+    const auto exists = [&existing](const std::string& candidate) {
+      return existing.contains(candidate);
+    };
+    CHECK(!AllocateExportFilenameGroup(stems, ".tsv", exists).has_value());
   }
 
   // AllocateExportFilenameGroup: first export of a group gets the bare
@@ -382,11 +445,13 @@ int main() {
     const auto exists = [&existing](const std::string& candidate) {
       return existing.contains(candidate);
     };
-    const auto filenames = AllocateExportFilenameGroup(
+    const auto allocated = AllocateExportFilenameGroup(
         {"runtime-trace-20260825-071000",
             "concrete-submission-trace-20260825-071000",
             "lifecycle-ambiguities-20260825-071000"},
         ".tsv", exists);
+    CHECK(allocated.has_value());
+    const auto& filenames = *allocated;
     CHECK(filenames.size() == 3);
     CHECK(filenames[0] == "runtime-trace-20260825-071000.tsv");
     CHECK(filenames[1] == "concrete-submission-trace-20260825-071000.tsv");
@@ -401,11 +466,13 @@ int main() {
     const auto exists = [&existing](const std::string& candidate) {
       return existing.contains(candidate);
     };
-    const auto filenames = AllocateExportFilenameGroup(
+    const auto allocated = AllocateExportFilenameGroup(
         {"runtime-trace-20260825-071000",
             "concrete-submission-trace-20260825-071000",
             "lifecycle-ambiguities-20260825-071000"},
         ".tsv", exists);
+    CHECK(allocated.has_value());
+    const auto& filenames = *allocated;
     CHECK(filenames[0] == "runtime-trace-20260825-071000-1.tsv");
     CHECK(filenames[1] == "concrete-submission-trace-20260825-071000-1.tsv");
     CHECK(filenames[2] == "lifecycle-ambiguities-20260825-071000-1.tsv");
@@ -426,11 +493,13 @@ int main() {
     const auto exists = [&existing](const std::string& candidate) {
       return existing.contains(candidate);
     };
-    const auto filenames = AllocateExportFilenameGroup(
+    const auto allocated = AllocateExportFilenameGroup(
         {"runtime-trace-20260825-071000",
             "concrete-submission-trace-20260825-071000",
             "lifecycle-ambiguities-20260825-071000"},
         ".tsv", exists);
+    CHECK(allocated.has_value());
+    const auto& filenames = *allocated;
     CHECK(filenames[0] == "runtime-trace-20260825-071000-2.tsv");
     CHECK(filenames[1] == "concrete-submission-trace-20260825-071000-2.tsv");
     CHECK(filenames[2] == "lifecycle-ambiguities-20260825-071000-2.tsv");
