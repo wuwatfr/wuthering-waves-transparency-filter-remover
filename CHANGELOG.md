@@ -6,8 +6,11 @@
 
 ### Changed
 
-- Pre-Fade patch now removes only the camera-fade operand while preserving the
-  other Fade input.
+- Pre-Fade patch now rewrites one operand of the verified pre-Fade FMin and
+  leaves the other byte-identical, instead of collapsing the identity phi.
+- A pre-Fade FMin is accepted only when its two operands are structurally
+  proven to be adjacent scalars of one constant buffer; unresolved or
+  non-adjacent operands fail closed.
 - Dev Manual Capture and Fade-control now use the same submission-time
   boundary for capture membership, while values remain sampled at Draw
   recording time.
