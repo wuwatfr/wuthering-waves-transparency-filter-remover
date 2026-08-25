@@ -204,9 +204,15 @@ void OnMapFadeControlBuffer(device* owner, resource resource_handle,
       access != map_access::write_only)
     return;
 
+  const std::uint64_t resource_size =
+      owner->get_resource_desc(resource_handle).buffer.size;
+  if (offset > resource_size) return;
+
   std::uint64_t resolved_size = size;
   if (resolved_size == 0 || resolved_size == UINT64_MAX) {
-    resolved_size = owner->get_resource_desc(resource_handle).buffer.size;
+    resolved_size = resource_size - offset;
+  } else if (resolved_size > resource_size - offset) {
+    return;
   }
   if (resolved_size == 0) return;
 
@@ -480,9 +486,6 @@ bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
   return true;
 }
 
-// Assumes g_fade_control_mutex is already held by the caller -- called once
-// per prepared source for a Draw, all under one acquisition rather than
-// one per role.
 void SampleOneRole(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route, RecordedTraceDraw& draw,
     const FadeControlSamplingSource& source) {
