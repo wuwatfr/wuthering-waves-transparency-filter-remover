@@ -6,22 +6,22 @@
 
 ### Changed
 
-- Pre-Fade patch now rewrites one operand of the verified pre-Fade FMin and
-  leaves the other byte-identical, instead of collapsing the identity phi.
-- A pre-Fade FMin is accepted only when its two operands are structurally
-  proven to be adjacent scalars of one constant buffer; unresolved or
-  non-adjacent operands fail closed.
-- Dev Manual Capture and Fade-control now use the same submission-time
-  boundary for capture membership, while values remain sampled at Draw
-  recording time.
-- Trace exports use collision-safe, timestamped, correlated file groups
-  instead of fixed names that overwrite on re-export.
+- Improve pre-Fade patching to preserve unrelated Fade input while removing
+  the validated camera-proximity Fade component.
+- Tighten pre-Fade matching so unsupported or ambiguous shader layouts fail
+  closed instead of being patched speculatively.
+- Improve Dev Manual Capture and Fade-control evidence correlation across
+  command recording and submission.
+- Make Dev Trace and Manual Capture exports collision-safe and keep related
+  export files grouped together.
 - `fade_primitive_audit` accepts an explicit `--concrete-trace` input.
 
 ### Fixed
 
 - Avoid duplicate full analysis of the original shader before pre-Fade
   patching.
+- Prevent repeated command-list submissions from duplicating captured Fade
+  evidence.
 - Enforce finite descriptor-table CBV bounds for scalar Fade-control reads.
 - Device-scope Fade-control mapped-resource and descriptor-table state.
 - Unify Trace/Fade resource incarnation tracking on one canonical lifecycle
