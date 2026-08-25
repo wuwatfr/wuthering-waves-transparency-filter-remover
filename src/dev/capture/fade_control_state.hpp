@@ -166,21 +166,11 @@ struct FadeControlSnapshot {
   std::vector<std::pair<FadeControlRecordKey, FadeControlRecord>> records;
 };
 
-// Whether Fade-control's own fixed-capacity runtime trackers dropped or
-// truncated state. The same shape serves two distinct roles: a monotonic
-// runtime taint that accumulates for the process lifetime, and the
-// provenance snapshot carried with one recorded Draw from Draw-record time
-// to submission.
 struct FadeControlTrackerCapacityDiagnostics {
   bool descriptor_slot_loss = false;
   bool mapped_buffer_loss = false;
   bool layout_map_loss = false;
   bool descriptor_range_truncated = false;
-  // Not one of Fade-control's own trackers: the canonical resource-lifecycle
-  // owner shared with Trace dropped incarnation records to stay inside its
-  // capacity. Carried on the same provenance path because it taints the same
-  // evidence -- a resolved descriptor slot's staleness check consults that
-  // owner.
   bool resource_lifecycle_loss = false;
 
   friend bool operator==(const FadeControlTrackerCapacityDiagnostics&,
@@ -204,11 +194,6 @@ constexpr bool FadeControlTrackerCapacityHasLoss(
       diagnostics.resource_lifecycle_loss;
 }
 
-// Capture-scoped view of tracker loss. Start clears only what a capture
-// reports, never the runtime taint, so evidence recorded before the capture
-// began still carries its own provenance. Admit ORs in the provenance of one
-// Draw the session admitted. Stop freezes the result, so a tracker failure
-// after Stop cannot change an exported capture.
 class FadeControlTrackerCapacityAccumulator {
  public:
   void Start();

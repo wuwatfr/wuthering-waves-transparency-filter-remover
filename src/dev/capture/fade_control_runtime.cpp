@@ -33,15 +33,7 @@ bool g_fade_control_session_enabled = false;
 
 bool g_fade_control_pending_enabled = true;
 
-// Monotonic taint: whether any of Fade-control's own fixed-capacity runtime
-// trackers (as opposed to the accumulators' own record capacity) has silently
-// dropped or truncated state at any point in this process. Never cleared by a
-// capture starting -- a Draw recorded before Start still sampled through
-// whatever state these trackers were in.
 FadeControlTrackerCapacityDiagnostics g_fade_control_runtime_taint;
-
-// What the current/most recent capture reports: only the provenance of Draws
-// that capture actually admitted.
 FadeControlTrackerCapacityAccumulator g_fade_control_capture_diagnostics;
 
 struct LayoutCbvRangeInfo {
@@ -318,10 +310,6 @@ void OnDestroyFadeControlDevice(device* owner) {
   std::lock_guard lock(g_fade_control_mutex);
   EraseDeviceOwnedLiveHandleEntries(g_mapped_buffers, device_key);
   EraseDeviceOwnedDescriptorTableSlots(g_descriptor_table_slots, device_key);
-  // The three layout maps are device-scoped through their key, so a stale
-  // entry never collides with a later device -- but it keeps consuming the
-  // global kMaxTrackedFadeControlLayouts budget, which would eventually make
-  // a later device report layout_map_loss it did not cause.
   EraseDeviceOwnedLiveHandleEntries(g_layout_push_cbv_ranges, device_key);
   EraseDeviceOwnedLiveHandleEntries(g_layout_descriptor_cbv_ranges, device_key);
   EraseDeviceOwnedLiveHandleEntries(g_layout_push_constant_ranges, device_key);
@@ -956,10 +944,6 @@ void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
 
   std::lock_guard lock(g_fade_control_mutex);
   for (const auto& source : *sources) SampleOneRole(trace, route, draw, source);
-  // Both taint sources are read here, at Draw-record time, and staged with
-  // the evidence they describe. The lifecycle owner is self-locking and never
-  // calls back, so this nests exactly as the sampling above already does when
-  // it consults FindActiveResourceLifecycle; g_trace_mutex is not involved.
   FadeControlTrackerCapacityDiagnostics taint = g_fade_control_runtime_taint;
   taint.resource_lifecycle_loss |=
       ResourceLifecycleCapacityTaintSnapshot().evidence_dropped;

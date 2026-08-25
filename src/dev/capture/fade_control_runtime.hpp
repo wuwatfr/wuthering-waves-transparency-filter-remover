@@ -42,10 +42,6 @@ struct FadeControlDiagnosticCounters {
   bool mapped_buffer_capacity_loss = false;
   bool layout_map_capacity_loss = false;
   bool descriptor_range_truncated = false;
-  // The canonical resource-lifecycle owner shared with Trace pruned records
-  // to stay inside its capacity, so a stale-descriptor or unresolved-resource
-  // outcome in this capture may reflect dropped lifecycle evidence rather
-  // than a real binding condition.
   bool resource_lifecycle_capacity_loss = false;
 };
 FadeControlDiagnosticCounters GetFadeControlDiagnosticCounters();

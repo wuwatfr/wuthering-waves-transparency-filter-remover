@@ -27,10 +27,6 @@ if(GIT_FOUND)
   endif()
 endif()
 
-# Derive the reported version from the nearest v* tag, so the tag that
-# publishes a build stays its single source of truth. A build taken off a tag
-# keeps the distance and commit git describe reports instead of claiming to be
-# that release.
 set(WUWA_TFR_VERSION "0.0.0-unknown")
 if(GIT_FOUND)
   execute_process(
@@ -124,8 +120,6 @@ target_include_directories(fade_control_state_tests PRIVATE src)
 add_executable(descriptor_table_state_tests
   tests/test_descriptor_table_state.cpp
   src/dev/capture/descriptor_table_state.cpp
-  # Device-teardown erasure must be provably store-only: the tests hold a
-  # real FadeControlTrackerCapacityDiagnostics across it.
   src/dev/capture/fade_control_state.cpp)
 target_include_directories(descriptor_table_state_tests PRIVATE src)
 

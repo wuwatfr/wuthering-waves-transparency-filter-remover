@@ -36,10 +36,6 @@ std::optional<DescriptorCbvSlot> ResolveDescriptorTableCbvSlot(
     const std::vector<DescriptorCbvRangeInfo>& ranges,
     std::uint32_t register_space, std::uint32_t register_index);
 
-// A D3D12 root-constants range. Deliberately not a DescriptorCbvRangeInfo:
-// constant_count is the number of 32-bit constants inside the range, never a
-// span of consecutive shader registers, so the range binds exactly
-// register_space/register_index and nothing beyond it.
 struct PushConstantRangeInfo {
   std::uint32_t param_index = 0;
   std::uint32_t register_space = 0;
@@ -50,8 +46,6 @@ struct PushConstantRangeInfo {
       const PushConstantRangeInfo&, const PushConstantRangeInfo&) = default;
 };
 
-// Returns the layout parameter backing exactly this shader register, or
-// nullopt when no range declares it or more than one does.
 std::optional<std::uint32_t> ResolvePushConstantBackedParam(
     const std::vector<PushConstantRangeInfo>& ranges,
     std::uint32_t register_space, std::uint32_t register_index);
@@ -100,12 +94,6 @@ bool CopyDescriptorTableSlot(DescriptorSlotTable& table,
 void InvalidateDescriptorTableSlotsForResource(DescriptorSlotTable& table,
     std::uintptr_t device, std::uint64_t resource_handle);
 
-// Device-teardown erasure for any store keyed directly by
-// TraceLiveHandleKey -- Fade-control's mapped-buffer map and its three
-// per-layout CBV range maps. Entries owned by other devices are untouched,
-// and nothing outside the store is read or written: capacity taint is
-// monotonic evidence and teardown must not reset it. Returns the number of
-// entries erased.
 template <typename Store>
 std::size_t EraseDeviceOwnedLiveHandleEntries(
     Store& store, std::uintptr_t device) {
@@ -114,8 +102,6 @@ std::size_t EraseDeviceOwnedLiveHandleEntries(
   });
 }
 
-// The same teardown erasure for the descriptor-slot table, whose key nests
-// the live-handle key one level down.
 std::size_t EraseDeviceOwnedDescriptorTableSlots(
     DescriptorSlotTable& table, std::uintptr_t device);
 

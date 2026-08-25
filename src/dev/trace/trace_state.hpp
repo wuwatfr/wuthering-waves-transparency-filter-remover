@@ -258,9 +258,6 @@ struct RecordedTraceDraw {
   wuwa_tfr::ExecutionPipelineIdentity pipeline;
   std::vector<PendingFadeControlObservation> pending_fade_observations;
   std::vector<PendingFadeControlSnapshot> pending_fade_snapshots;
-  // Tracker-loss state as it stood when this Draw's evidence was staged, so
-  // submission can attribute it to the capture that admits the evidence
-  // rather than to whichever capture happens to be running later.
   FadeControlTrackerCapacityDiagnostics pending_fade_tracker_taint;
 };
 

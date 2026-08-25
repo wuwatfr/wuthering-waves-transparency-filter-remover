@@ -41,13 +41,6 @@ ActiveResourceLifecycle FindActiveResourceLifecycle(
     wuwa_tfr::TraceLiveHandleKey key);
 std::size_t PruneResourceLifecycleTo(std::size_t maximum_records);
 
-// Monotonic evidence-loss taint for the canonical index. Once PruneTo has
-// dropped records, incarnation evidence for some (device, handle) pairs is
-// simply gone, so a later observer cannot distinguish a genuine binding
-// condition from a dropped record. Never cleared, and owned here rather than
-// by either consumer: Trace drives its own capacity diagnostics from PruneTo's
-// return value, and Fade-control must not read Trace's globals to learn the
-// same fact.
 struct ResourceLifecycleCapacityTaint {
   bool evidence_dropped = false;
   std::uint64_t prune_generation = 0;

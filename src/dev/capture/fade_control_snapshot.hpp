@@ -81,11 +81,6 @@ struct PendingFadeControlSnapshot {
   FadeControlSnapshotRecord record;
 };
 
-// Admits one recorded Draw's staged Fade evidence into the live capture. The
-// caller has already made the authoritative session-liveness decision; a Draw
-// that reaches here contributes both its evidence and the tracker-loss
-// provenance it carried from Draw-record time, and one that does not reach
-// here contributes neither.
 void CommitPendingFadeControlObservations(FadeControlAccumulator& accumulator,
     FadeControlSnapshotAccumulator& snapshot_accumulator,
     FadeControlTrackerCapacityAccumulator& tracker_capacity,

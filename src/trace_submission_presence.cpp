@@ -24,10 +24,6 @@ std::vector<std::string> Split(std::string_view text, char delimiter) {
   }
 }
 
-// Digits only, whole field, no sign and no overflow. std::stoull cannot be
-// used here: it accepts a numeric prefix and discards the rest, and it wraps
-// a negative literal to a huge positive value, both of which would turn
-// malformed evidence into a confident non-zero presence bit.
 bool ParseWholeFieldU64(std::string_view text, std::uint64_t& value) noexcept {
   if (text.empty()) return false;
   constexpr std::uint64_t limit = std::numeric_limits<std::uint64_t>::max();
@@ -72,10 +68,6 @@ SubmissionPresenceReadResult ReadSubmissionPresenceTsv(
     if (!line.empty() && line.back() == '\r') line.pop_back();
     if (line.empty()) continue;
     const auto fields = Split(line, '\t');
-    // Every non-empty data row must supply all four required fields, fully
-    // parsed, before anything is written. A row that cannot is malformed
-    // explicit evidence, and the whole file loses its claim to be trusted --
-    // rows already accumulated are discarded with it.
     if (fields.size() <= max_column) return {};
     const std::string& shader_hash = fields[shader->second];
     std::uint64_t normal_count = 0;
