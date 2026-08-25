@@ -420,6 +420,7 @@ const char* PreFadeFMinStatusName(PreFadeFMinStatus status) noexcept {
     case PreFadeFMinStatus::NoQualifyingCandidate: return "no_qualifying_candidate";
     case PreFadeFMinStatus::AmbiguousCandidates: return "ambiguous_candidates";
     case PreFadeFMinStatus::OperandsNotAdjacent: return "operands_not_adjacent";
+    case PreFadeFMinStatus::OperandsReversed: return "operands_reversed";
     case PreFadeFMinStatus::InvalidInstanceIdentity: return "invalid_instance_identity";
     case PreFadeFMinStatus::FunctionNotUniquelyLocated:
       return "function_not_uniquely_located";
@@ -436,7 +437,8 @@ bool PreFadeFMinAnalysisIsStructurallyComplete(
       (analysis.status == PreFadeFMinStatus::Matched ||
           analysis.status == PreFadeFMinStatus::NoQualifyingCandidate ||
           analysis.status == PreFadeFMinStatus::AmbiguousCandidates ||
-          analysis.status == PreFadeFMinStatus::OperandsNotAdjacent);
+          analysis.status == PreFadeFMinStatus::OperandsNotAdjacent ||
+          analysis.status == PreFadeFMinStatus::OperandsReversed);
 }
 
 bool PreFadeFMinProvesNoQualifyingCandidate(
@@ -632,6 +634,8 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
       result.operand_two.component_resolved;
   const bool byte_coordinates_available =
       result.operand_one.byte_offset_resolved && result.operand_two.byte_offset_resolved;
+  std::int64_t operand_delta = 0;
+  bool operand_delta_resolved = false;
   if (result.operand_one.legacy_form && result.operand_two.legacy_form &&
       legacy_coordinates_available) {
     const std::int64_t byte_one =
@@ -640,8 +644,9 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
     const std::int64_t byte_two =
         static_cast<std::int64_t>(result.operand_two.row) * 16 +
         static_cast<std::int64_t>(result.operand_two.component) * 4;
-    const std::int64_t diff = byte_two - byte_one;
-    if (diff != 4 && diff != -4) {
+    operand_delta = byte_two - byte_one;
+    operand_delta_resolved = true;
+    if (operand_delta != 4 && operand_delta != -4) {
       result.adjacency = PreFadeAdjacency::NonAdjacent;
     } else {
       result.adjacency = result.operand_one.row == result.operand_two.row
@@ -650,9 +655,10 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
     }
   } else if (!result.operand_one.legacy_form && !result.operand_two.legacy_form &&
       byte_coordinates_available) {
-    const std::int64_t diff = static_cast<std::int64_t>(result.operand_two.byte_offset) -
+    operand_delta = static_cast<std::int64_t>(result.operand_two.byte_offset) -
         static_cast<std::int64_t>(result.operand_one.byte_offset);
-    result.adjacency = (diff == 4 || diff == -4)
+    operand_delta_resolved = true;
+    result.adjacency = (operand_delta == 4 || operand_delta == -4)
         ? PreFadeAdjacency::CrossRow
         : PreFadeAdjacency::NonAdjacent;
   } else {
@@ -665,6 +671,14 @@ PreFadeFMinAnalysis AnalyzePreFadeFMinForInstance(
         ? "qualifying pre-Fade FMin operands are not adjacent scalars of one "
           "constant buffer"
         : "qualifying pre-Fade FMin operand adjacency could not be resolved";
+    return result;
+  }
+
+  if (!operand_delta_resolved ||
+      operand_delta != kPreFadeOperandOrientationDeltaBytes) {
+    result.status = PreFadeFMinStatus::OperandsReversed;
+    result.error = "qualifying pre-Fade FMin operands are adjacent but "
+        "reversed: operand 2 precedes operand 1";
     return result;
   }
 

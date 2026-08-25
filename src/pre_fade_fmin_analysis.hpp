@@ -27,6 +27,13 @@ constexpr bool PreFadeAdjacencyIsProvenAdjacent(
       adjacency == PreFadeAdjacency::CrossRow;
 }
 
+// The one operand orientation observed across every validated instance:
+// operand 2 sits exactly this many bytes after operand 1. Authorization
+// requires it; the adjacency classification above stays sign-agnostic and
+// remains purely diagnostic. This says nothing about which operand is the
+// camera side -- it only refuses shapes that were never validated.
+inline constexpr std::int64_t kPreFadeOperandOrientationDeltaBytes = 4;
+
 enum class PreFadeFMinStatus : std::uint8_t {
   Matched,
   NoQualifyingCandidate,
@@ -36,6 +43,11 @@ enum class PreFadeFMinStatus : std::uint8_t {
   // and far apart, or with coordinates that could not be resolved at all.
   // Distinct from NoQualifyingCandidate: a candidate did exist.
   OperandsNotAdjacent,
+  // The two operands are adjacent, but ordered the other way round: operand 2
+  // sits 4 bytes *before* operand 1. Every validated instance has operand 2
+  // exactly 4 bytes after operand 1, so the reversed pair is an unvalidated
+  // shape and fails closed rather than being silently reinterpreted.
+  OperandsReversed,
   InvalidInstanceIdentity,
   FunctionNotUniquelyLocated,
   FunctionNotParsable,

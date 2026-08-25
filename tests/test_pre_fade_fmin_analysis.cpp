@@ -8,19 +8,25 @@
 //
 // Operand adjacency used to be a purely diagnostic coordinate that could
 // degrade to Unknown without affecting the verdict. It is now an
-// authorization condition: proving the pair is two neighbouring scalars is
-// what distinguishes a Fade pair from two unrelated values that happen to
-// share a handle. Coordinates that cannot be resolved therefore fail closed,
-// which is the opposite of what this file asserted before. Both SameRow and
-// CrossRow qualify, and the sign of the difference is never consulted -- no
-// claim is made about which operand is the camera side.
+// authorization condition, in two parts:
+//
+//   * the pair must be proven adjacent -- SameRow and CrossRow both qualify,
+//     and this classification stays sign-agnostic and diagnostic;
+//   * the pair must carry the one validated orientation, operand 2 exactly
+//     +4 bytes after operand 1.
+//
+// A reversed pair therefore fails closed rather than having the lower-address
+// operand selected automatically. None of this identifies a camera side: the
+// rewrite still targets syntactic operand 1, and the orientation rule only
+// refuses shapes that were never validated.
 //
 // The invariant that does still hold throughout: no analysis failure of any
 // kind may ever be read as proof that a qualifying FMin is absent.
 //
-// Corpus at the time of the change (2026-08-25, 3250 shaders): 260/260
-// qualifying instances resolved adjacent -- SameRow 203, CrossRow 57,
-// NonAdjacent 0, Unknown 0 -- so the gate rejects nothing observed.
+// Corpus at the time of the change (2026-08-25, 3269 shaders): 262/262
+// qualifying instances resolved adjacent with operand2 - operand1 == +4 --
+// SameRow 204, CrossRow 58, NonAdjacent 0, Unknown 0, -4 zero -- so neither
+// half of the gate rejects anything observed.
 
 #include "pre_fade_fmin_analysis.hpp"
 
@@ -158,8 +164,10 @@ int main() {
   }
 
   // Legacy cross-row, -4: the same pair with the two loads swapped, so
-  // operand one is now the HIGHER offset. The gate must not care about the
-  // sign -- it makes no claim about which side is the camera operand.
+  // operand one is now the HIGHER offset. Adjacency still classifies it as
+  // CrossRow -- that classification stays sign-agnostic and diagnostic -- but
+  // authorization requires the validated +4 orientation, so this fails closed
+  // instead of quietly rewriting the other side of the pair.
   {
     const std::string ir = BuildIr(
         "%pf1 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 41)\n"
@@ -168,10 +176,28 @@ int main() {
         "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
         "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)");
     const auto analysis = AnalyzeOnly(ir);
-    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::OperandsReversed);
+    CHECK(!analysis.success);
     CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::CrossRow);
-    CHECK(wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir)
-              .success);
+    CHECK(analysis.error.find("reversed") != std::string::npos);
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir)
+               .success);
+  }
+
+  // Legacy same-row, -4: components 3 then 2 of one row. Same verdict, and
+  // reported as a reversed pair rather than as a non-adjacent one.
+  {
+    const std::string ir = BuildIr(
+        "%pf0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %cb2, i32 40)\n"
+        "%opA0 = extractvalue %dx.types.CBufRet.f32 %pf0, 3\n"
+        "%opB0 = extractvalue %dx.types.CBufRet.f32 %pf0, 2\n"
+        "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)");
+    const auto analysis = AnalyzeOnly(ir);
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::OperandsReversed);
+    CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::SameRow);
+    CHECK(analysis.qualifying_fmin_count == 1);
+    CHECK(!wuwa_tfr::PatchAllVerifiedFadePrimitiveInstancesPreFadeOperand(ir)
+               .success);
   }
 
   // Resolved but genuinely far apart: same row, components 0 and 3, 12 bytes
@@ -252,14 +278,16 @@ int main() {
     CHECK(analysis.qualifying_fmin_count == 1);
   }
 
-  // Byte-offset form, -4: operand one at the higher offset. Adjacent either
-  // way round.
+  // Byte-offset form, -4: operand one at the higher offset. Adjacent, but not
+  // the validated orientation, so it is rejected on the same footing as the
+  // legacy form -- the orientation rule is not legacy-only.
   {
     const auto analysis = AnalyzeOnly(BuildIr(
         "%opA0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 652, i32 4)\n"
         "%opB0 = call float @dx.op.cbufferLoad.f32(i32 58, %dx.types.Handle %cb2, i32 648, i32 4)\n"
         "%coverage0 = call float @dx.op.binary.f32(i32 36, float %opA0, float %opB0)"));
-    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::Matched);
+    CHECK(analysis.status == wuwa_tfr::PreFadeFMinStatus::OperandsReversed);
+    CHECK(!analysis.success);
     CHECK(analysis.adjacency == wuwa_tfr::PreFadeAdjacency::CrossRow);
   }
 
