@@ -89,6 +89,13 @@ outcomes, while `shader_cache_bytecode_bytes` includes only retained patched
 bytecode vectors. The activity totals are cumulative counts since the
 Production runtime started and are not changed by telemetry.
 
+`replacements_failed_total` counts only genuine failures: a matched shader
+that could not be patched, assembled or validated; a preparation that could
+not reach a verdict at all; a pixel-shader substitution that did not apply;
+and a replacement pipeline state that could not be created. A pixel shader
+that simply carries no transparency filter is the expected outcome for nearly
+every shader in the game and is not counted.
+
 Therefore, process private commit growing while WuwaTFR's explicitly tracked
 retention values remain flat is evidence against those caches and replacement
 pipelines being responsible. It does not prove that the add-on contributes no

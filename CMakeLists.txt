@@ -54,6 +54,10 @@ target_link_libraries(pipeline_generation_state_tests PRIVATE Threads::Threads)
 add_executable(dxc_validation_policy_tests tests/test_dxc_validation_policy.cpp)
 target_include_directories(dxc_validation_policy_tests PRIVATE src)
 
+add_executable(shader_preparation_outcome_tests
+  tests/test_shader_preparation_outcome.cpp)
+target_include_directories(shader_preparation_outcome_tests PRIVATE src)
+
 add_executable(device_activity_state_tests tests/test_device_activity_state.cpp)
 target_include_directories(device_activity_state_tests PRIVATE src)
 target_link_libraries(device_activity_state_tests PRIVATE Threads::Threads)
@@ -163,6 +167,8 @@ target_link_libraries(memory_telemetry_tests PRIVATE Threads::Threads)
 enable_testing()
 add_test(NAME pipeline_generation_state_tests COMMAND pipeline_generation_state_tests)
 add_test(NAME dxc_validation_policy_tests COMMAND dxc_validation_policy_tests)
+add_test(NAME shader_preparation_outcome_tests
+  COMMAND shader_preparation_outcome_tests)
 add_test(NAME device_activity_state_tests COMMAND device_activity_state_tests)
 add_test(NAME dxil_dither_diagnostic_tests COMMAND dxil_dither_diagnostic_tests)
 add_test(NAME fade_primitive_detector_tests COMMAND fade_primitive_detector_tests)

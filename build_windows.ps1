@@ -163,6 +163,7 @@ if ($LASTEXITCODE -ne 0) {
 $testTargets = @(
     'pipeline_generation_state_tests',
     'dxc_validation_policy_tests',
+    'shader_preparation_outcome_tests',
     'device_activity_state_tests',
     'dxil_dither_diagnostic_tests',
     'fade_primitive_detector_tests',

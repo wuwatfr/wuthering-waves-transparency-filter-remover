@@ -11,6 +11,7 @@
 #include "pipeline_replacement_coordinator.hpp"
 #include "pixel_shader_identity.hpp"
 #include "preparation_context_pool.hpp"
+#include "shader_preparation_outcome.hpp"
 #include "single_flight_cache.hpp"
 #include "target_dither_bypass.hpp"
 
@@ -89,6 +90,7 @@ struct FadePrimitiveRuntime::Impl {
     std::optional<DxilInspectionOutput> inspected;
     FadePrimitiveDiagnostic diagnostic;
     std::optional<TargetDitherBypassResult> patched;
+    bool analysis_reached_verdict = false;
     try {
       auto dxc = dxc_pool.Acquire();
       if (!dxc) {
@@ -101,6 +103,7 @@ struct FadePrimitiveRuntime::Impl {
           state.failure = inspected->error;
         } else {
           diagnostic = AnalyzeFadePrimitiveV1(inspected->original_ir);
+          analysis_reached_verdict = true;
           state.matches = !diagnostic.instances.empty();
           if (!state.matches) {
             state.failure = "no fully verified transparency-filter primitive";
@@ -132,7 +135,9 @@ struct FadePrimitiveRuntime::Impl {
     } catch (...) {
       state.failure = "preparation exception";
     }
-    if (!state.bytecode)
+    if (ShaderPreparationIsFailure(ClassifyShaderPreparation(
+            analysis_reached_verdict, state.matches,
+            state.bytecode != nullptr)))
       replacements_failed.fetch_add(1, std::memory_order_relaxed);
 
     if (observer) {
