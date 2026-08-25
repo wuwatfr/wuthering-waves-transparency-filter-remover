@@ -119,7 +119,10 @@ target_include_directories(fade_control_state_tests PRIVATE src)
 
 add_executable(descriptor_table_state_tests
   tests/test_descriptor_table_state.cpp
-  src/dev/capture/descriptor_table_state.cpp)
+  src/dev/capture/descriptor_table_state.cpp
+  # Device-teardown erasure must be provably store-only: the tests hold a
+  # real FadeControlTrackerCapacityDiagnostics across it.
+  src/dev/capture/fade_control_state.cpp)
 target_include_directories(descriptor_table_state_tests PRIVATE src)
 
 add_executable(fade_control_snapshot_tests

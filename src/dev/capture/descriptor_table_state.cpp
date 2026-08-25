@@ -65,6 +65,13 @@ void InvalidateDescriptorTableSlotsForResource(DescriptorSlotTable& table,
   });
 }
 
+std::size_t EraseDeviceOwnedDescriptorTableSlots(
+    DescriptorSlotTable& table, std::uintptr_t device) {
+  return std::erase_if(table, [device](const auto& entry) {
+    return entry.first.table.owner == device;
+  });
+}
+
 std::optional<DescriptorSlotContent> FindDescriptorTableSlot(
     const DescriptorSlotTable& table, const DescriptorSlotKey& key) {
   const auto it = table.find(key);

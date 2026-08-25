@@ -316,12 +316,15 @@ void OnDestroyFadeControlDevice(device* owner) {
   if (!owner) return;
   const wuwa_tfr::DeviceIdentity device_key = DeviceKey(owner);
   std::lock_guard lock(g_fade_control_mutex);
-  std::erase_if(g_mapped_buffers, [device_key](const auto& entry) {
-    return entry.first.owner == device_key;
-  });
-  std::erase_if(g_descriptor_table_slots, [device_key](const auto& entry) {
-    return entry.first.table.owner == device_key;
-  });
+  EraseDeviceOwnedLiveHandleEntries(g_mapped_buffers, device_key);
+  EraseDeviceOwnedDescriptorTableSlots(g_descriptor_table_slots, device_key);
+  // The three layout maps are device-scoped through their key, so a stale
+  // entry never collides with a later device -- but it keeps consuming the
+  // global kMaxTrackedFadeControlLayouts budget, which would eventually make
+  // a later device report layout_map_loss it did not cause.
+  EraseDeviceOwnedLiveHandleEntries(g_layout_push_cbv_ranges, device_key);
+  EraseDeviceOwnedLiveHandleEntries(g_layout_descriptor_cbv_ranges, device_key);
+  EraseDeviceOwnedLiveHandleEntries(g_layout_push_constant_ranges, device_key);
 }
 
 FadeControlValueSample Unavailable(std::uint16_t reason) noexcept {

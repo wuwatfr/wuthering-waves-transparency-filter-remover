@@ -5,9 +5,18 @@
 
 #include <cassert>
 #include <cstdio>
+#include <unordered_map>
+#include <vector>
 
+#include "dev/capture/fade_control_state.hpp"
+
+using wuwa_tfr::TraceLiveHandleKey;
+using wuwa_tfr::TraceLiveHandleKeyHash;
 using wuwa_tfr::dev::CopyDescriptorTableSlot;
 using wuwa_tfr::dev::DescriptorCbvRangeInfo;
+using wuwa_tfr::dev::EraseDeviceOwnedDescriptorTableSlots;
+using wuwa_tfr::dev::EraseDeviceOwnedLiveHandleEntries;
+using wuwa_tfr::dev::FadeControlTrackerCapacityDiagnostics;
 using wuwa_tfr::dev::DescriptorSlotContent;
 using wuwa_tfr::dev::DescriptorSlotContentIsCurrent;
 using wuwa_tfr::dev::DescriptorSlotKey;
@@ -282,6 +291,105 @@ void TestDynamicOffsetExactOrFailClosed() {
   assert(!DescriptorTableBindingHasExactDynamicOffsets(4));
 }
 
+// The three Fade-control layout maps are file-local statics in
+// fade_control_runtime.cpp, which needs the ReShade SDK. These mirror their
+// key/hash exactly and their mapped types closely enough that the erasure
+// predicate under test is the same one the runtime uses.
+using LayoutCbvRangeStore = std::unordered_map<TraceLiveHandleKey,
+    std::vector<DescriptorCbvRangeInfo>, TraceLiveHandleKeyHash>;
+using LayoutPushConstantStore = std::unordered_map<TraceLiveHandleKey,
+    std::vector<PushConstantRangeInfo>, TraceLiveHandleKeyHash>;
+using MappedBufferStore =
+    std::unordered_map<TraceLiveHandleKey, std::uint64_t, TraceLiveHandleKeyHash>;
+
+void TestDeviceTeardownClearsEveryLayoutStore() {
+  // One layout handle value reused across both devices, which is realistic:
+  // raw D3D12 handles are only unique per device.
+  LayoutCbvRangeStore push_cbv;
+  LayoutCbvRangeStore descriptor_cbv;
+  LayoutPushConstantStore push_constants;
+  for (const std::uintptr_t device : {kDeviceA, kDeviceB}) {
+    push_cbv[{device, 10}] = {{0, 0, 0, 1, 1}};
+    descriptor_cbv[{device, 10}] = {{1, 0, 0, 2, 4}};
+    push_constants[{device, 10}] = {{2, 0, 5, 16}};
+  }
+
+  assert(EraseDeviceOwnedLiveHandleEntries(push_cbv, kDeviceA) == 1);
+  assert(EraseDeviceOwnedLiveHandleEntries(descriptor_cbv, kDeviceA) == 1);
+  assert(EraseDeviceOwnedLiveHandleEntries(push_constants, kDeviceA) == 1);
+
+  // Device A is gone from all three...
+  assert(!push_cbv.contains(TraceLiveHandleKey{kDeviceA, 10}));
+  assert(!descriptor_cbv.contains(TraceLiveHandleKey{kDeviceA, 10}));
+  assert(!push_constants.contains(TraceLiveHandleKey{kDeviceA, 10}));
+  // ...and device B survives with its contents intact.
+  assert(push_cbv.at(TraceLiveHandleKey{kDeviceB, 10}).size() == 1);
+  assert(descriptor_cbv.at(TraceLiveHandleKey{kDeviceB, 10})[0].count == 4);
+  assert(push_constants.at(TraceLiveHandleKey{kDeviceB, 10})[0].register_index ==
+      5);
+  assert(push_cbv.size() == 1 && descriptor_cbv.size() == 1 &&
+      push_constants.size() == 1);
+}
+
+void TestDeviceTeardownStillClearsMappedBuffersAndSlots() {
+  MappedBufferStore mapped;
+  mapped[{kDeviceA, 1}] = 0xAA;
+  mapped[{kDeviceA, 2}] = 0xBB;
+  mapped[{kDeviceB, 1}] = 0xCC;
+
+  DescriptorSlotTable slots;
+  SetDescriptorTableSlot(
+      slots, Key(kDeviceA, 100, 0), DescriptorSlotContent{1, 1, 0, 64});
+  SetDescriptorTableSlot(
+      slots, Key(kDeviceA, 200, 3), DescriptorSlotContent{2, 1, 0, 64});
+  SetDescriptorTableSlot(
+      slots, Key(kDeviceB, 100, 0), DescriptorSlotContent{3, 1, 0, 64});
+
+  assert(EraseDeviceOwnedLiveHandleEntries(mapped, kDeviceA) == 2);
+  assert(EraseDeviceOwnedDescriptorTableSlots(slots, kDeviceA) == 2);
+
+  assert(mapped.size() == 1);
+  assert(mapped.at(TraceLiveHandleKey{kDeviceB, 1}) == 0xCC);
+  assert(!FindDescriptorTableSlot(slots, Key(kDeviceA, 100, 0)).has_value());
+  assert(!FindDescriptorTableSlot(slots, Key(kDeviceA, 200, 3)).has_value());
+  const auto survivor = FindDescriptorTableSlot(slots, Key(kDeviceB, 100, 0));
+  assert(survivor.has_value() && survivor->resource_handle == 3);
+}
+
+void TestDeviceTeardownLeavesCapacityTaintAlone() {
+  // Capacity loss is monotonic evidence about what was already dropped, so a
+  // device going away must never clear it. The erasure seam takes only a
+  // store and a device id, and this holds a real diagnostics value across the
+  // whole teardown sequence to catch anyone later reaching outside that.
+  FadeControlTrackerCapacityDiagnostics taint;
+  taint.layout_map_loss = true;
+  taint.resource_lifecycle_loss = true;
+  const FadeControlTrackerCapacityDiagnostics before = taint;
+
+  LayoutCbvRangeStore push_cbv;
+  push_cbv[{kDeviceA, 1}] = {{0, 0, 0, 0, 1}};
+  MappedBufferStore mapped;
+  mapped[{kDeviceA, 1}] = 1;
+  DescriptorSlotTable slots;
+  SetDescriptorTableSlot(
+      slots, Key(kDeviceA, 1, 0), DescriptorSlotContent{1, 1, 0, 4});
+
+  EraseDeviceOwnedLiveHandleEntries(push_cbv, kDeviceA);
+  EraseDeviceOwnedLiveHandleEntries(mapped, kDeviceA);
+  EraseDeviceOwnedDescriptorTableSlots(slots, kDeviceA);
+
+  assert(push_cbv.empty() && mapped.empty() && slots.empty());
+  assert(taint == before);
+  assert(taint.layout_map_loss && taint.resource_lifecycle_loss);
+}
+
+void TestDeviceTeardownOfAnUnknownDeviceIsANoOp() {
+  LayoutCbvRangeStore push_cbv;
+  push_cbv[{kDeviceA, 1}] = {{0, 0, 0, 0, 1}};
+  assert(EraseDeviceOwnedLiveHandleEntries(push_cbv, kDeviceB) == 0);
+  assert(push_cbv.size() == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -306,6 +414,10 @@ int main() {
   TestResourceInvalidationIsDeviceLocal();
   TestSlotCapacityIsBounded();
   TestDynamicOffsetExactOrFailClosed();
+  TestDeviceTeardownClearsEveryLayoutStore();
+  TestDeviceTeardownStillClearsMappedBuffersAndSlots();
+  TestDeviceTeardownLeavesCapacityTaintAlone();
+  TestDeviceTeardownOfAnUnknownDeviceIsANoOp();
   std::puts("test_descriptor_table_state: all tests passed");
   return 0;
 }

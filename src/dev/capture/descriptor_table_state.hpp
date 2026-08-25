@@ -100,6 +100,25 @@ bool CopyDescriptorTableSlot(DescriptorSlotTable& table,
 void InvalidateDescriptorTableSlotsForResource(DescriptorSlotTable& table,
     std::uintptr_t device, std::uint64_t resource_handle);
 
+// Device-teardown erasure for any store keyed directly by
+// TraceLiveHandleKey -- Fade-control's mapped-buffer map and its three
+// per-layout CBV range maps. Entries owned by other devices are untouched,
+// and nothing outside the store is read or written: capacity taint is
+// monotonic evidence and teardown must not reset it. Returns the number of
+// entries erased.
+template <typename Store>
+std::size_t EraseDeviceOwnedLiveHandleEntries(
+    Store& store, std::uintptr_t device) {
+  return std::erase_if(store, [device](const auto& entry) {
+    return entry.first.owner == device;
+  });
+}
+
+// The same teardown erasure for the descriptor-slot table, whose key nests
+// the live-handle key one level down.
+std::size_t EraseDeviceOwnedDescriptorTableSlots(
+    DescriptorSlotTable& table, std::uintptr_t device);
+
 std::optional<DescriptorSlotContent> FindDescriptorTableSlot(
     const DescriptorSlotTable& table, const DescriptorSlotKey& key);
 
