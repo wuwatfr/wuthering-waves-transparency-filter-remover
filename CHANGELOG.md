@@ -25,6 +25,8 @@
   owner.
 - Surface Fade-control tracker capacity loss instead of silently degrading
   evidence.
+- Classify Fade-control push constants by exact shader register instead of
+  reading a root-constant DWORD count as a register span.
 
 ### Internal
 
