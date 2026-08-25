@@ -4,7 +4,9 @@
 #include "trace_submission_presence.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
+#include <limits>
 #include <string_view>
 #include <vector>
 
@@ -20,6 +22,24 @@ std::vector<std::string> Split(std::string_view text, char delimiter) {
     if (end == std::string_view::npos) return fields;
     start = end + 1;
   }
+}
+
+// Digits only, whole field, no sign and no overflow. std::stoull cannot be
+// used here: it accepts a numeric prefix and discards the rest, and it wraps
+// a negative literal to a huge positive value, both of which would turn
+// malformed evidence into a confident non-zero presence bit.
+bool ParseWholeFieldU64(std::string_view text, std::uint64_t& value) noexcept {
+  if (text.empty()) return false;
+  constexpr std::uint64_t limit = std::numeric_limits<std::uint64_t>::max();
+  std::uint64_t parsed = 0;
+  for (const char character : text) {
+    if (character < '0' || character > '9') return false;
+    const auto digit = static_cast<std::uint64_t>(character - '0');
+    if (parsed > (limit - digit) / 10) return false;
+    parsed = parsed * 10 + digit;
+  }
+  value = parsed;
+  return true;
 }
 
 }  // namespace
@@ -46,19 +66,31 @@ SubmissionPresenceReadResult ReadSubmissionPresenceTsv(
       partial == columns.end() || full == columns.end())
     return result;
   result.ok = true;
+  const std::size_t max_column = std::max({shader->second, normal->second,
+      partial->second, full->second});
   while (std::getline(input, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty()) continue;
     const auto fields = Split(line, '\t');
-    const std::size_t max_column = std::max({shader->second, normal->second,
-        partial->second, full->second});
-    if (fields.size() <= max_column) continue;
-    try {
-      auto& presence = result.presence[fields[shader->second]];
-      presence.known = true;
-      presence.normal |= std::stoull(fields[normal->second]) != 0;
-      presence.partial |= std::stoull(fields[partial->second]) != 0;
-      presence.full |= std::stoull(fields[full->second]) != 0;
-    } catch (const std::exception&) {
-    }
+    // Every non-empty data row must supply all four required fields, fully
+    // parsed, before anything is written. A row that cannot is malformed
+    // explicit evidence, and the whole file loses its claim to be trusted --
+    // rows already accumulated are discarded with it.
+    if (fields.size() <= max_column) return {};
+    const std::string& shader_hash = fields[shader->second];
+    std::uint64_t normal_count = 0;
+    std::uint64_t partial_count = 0;
+    std::uint64_t full_count = 0;
+    if (shader_hash.empty() ||
+        !ParseWholeFieldU64(fields[normal->second], normal_count) ||
+        !ParseWholeFieldU64(fields[partial->second], partial_count) ||
+        !ParseWholeFieldU64(fields[full->second], full_count))
+      return {};
+    auto& presence = result.presence[shader_hash];
+    presence.known = true;
+    presence.normal |= normal_count != 0;
+    presence.partial |= partial_count != 0;
+    presence.full |= full_count != 0;
   }
   return result;
 }

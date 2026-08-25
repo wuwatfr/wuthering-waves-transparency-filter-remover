@@ -85,6 +85,111 @@ int main() {
     CHECK(result.presence.empty());
   }
 
+  // A malformed value in any required numeric field invalidates the whole
+  // file. std::stoull would have thrown only after `known` and the earlier
+  // bits were already written, leaving partially trusted evidence behind.
+  {
+    const std::string header =
+        "format\tsomething\n"
+        "device\tshader_hash\tnormal_submissions\tpartial_submissions"
+        "\tfull_submissions\n";
+    const char* malformed_rows[] = {
+        "1\taaa\tzzz\t0\t0\n",   // not a number at all
+        "1\taaa\t0\tzzz\t0\n",   // malformed in the second numeric field
+        "1\taaa\t0\t0\tzzz\n",   // malformed in the last numeric field
+        "1\taaa\t\t0\t0\n",      // empty required field
+        "1\taaa\t-1\t0\t0\n",    // stoull would wrap this to a huge non-zero
+        "1\taaa\t 1\t0\t0\n",    // leading space
+        "1\t\t1\t0\t0\n",        // empty shader_hash
+    };
+    for (const char* row : malformed_rows) {
+      const auto path = dir / "malformed-row.tsv";
+      WriteFile(path, header + row);
+      const auto result = ReadSubmissionPresenceTsv(path);
+      CHECK(!result.ok);
+      CHECK(result.presence.empty());
+    }
+  }
+
+  // A numeric prefix with trailing junk must be rejected, not silently
+  // truncated to the prefix the way std::stoull does.
+  {
+    const auto path = dir / "trailing-junk.tsv";
+    WriteFile(path,
+        "device\tshader_hash\tnormal_submissions\tpartial_submissions"
+        "\tfull_submissions\n"
+        "1\taaa\t5junk\t0\t0\n");
+    const auto result = ReadSubmissionPresenceTsv(path);
+    CHECK(!result.ok);
+    CHECK(result.presence.empty());
+  }
+
+  // Overflowing an unsigned 64-bit count is malformed, not a saturated or
+  // wrapped value.
+  {
+    const auto path = dir / "overflow.tsv";
+    WriteFile(path,
+        "device\tshader_hash\tnormal_submissions\tpartial_submissions"
+        "\tfull_submissions\n"
+        "1\taaa\t18446744073709551616\t0\t0\n");  // UINT64_MAX + 1
+    const auto result = ReadSubmissionPresenceTsv(path);
+    CHECK(!result.ok);
+    CHECK(result.presence.empty());
+
+    // ...while exactly UINT64_MAX still parses and counts as present.
+    WriteFile(path,
+        "device\tshader_hash\tnormal_submissions\tpartial_submissions"
+        "\tfull_submissions\n"
+        "1\taaa\t18446744073709551615\t0\t0\n");
+    const auto at_limit = ReadSubmissionPresenceTsv(path);
+    CHECK(at_limit.ok);
+    CHECK(at_limit.presence.at("aaa").normal);
+  }
+
+  // Too few columns to supply the required fields: a non-empty data row that
+  // cannot be parsed is malformed evidence, not a row to skip past.
+  {
+    const auto path = dir / "short-row.tsv";
+    WriteFile(path,
+        "device\tshader_hash\tnormal_submissions\tpartial_submissions"
+        "\tfull_submissions\n"
+        "1\taaa\t0\t0\n");  // full_submissions column absent
+    const auto result = ReadSubmissionPresenceTsv(path);
+    CHECK(!result.ok);
+    CHECK(result.presence.empty());
+  }
+
+  // An earlier fully valid row followed by a malformed one yields no usable
+  // evidence at all: the good row must not survive as partial truth.
+  {
+    const auto path = dir / "good-then-malformed.tsv";
+    WriteFile(path,
+        "device\tshader_hash\tnormal_submissions\tpartial_submissions"
+        "\tfull_submissions\n"
+        "1\taaa\t1\t1\t1\n"
+        "1\tbbb\t1\tzzz\t0\n");
+    const auto result = ReadSubmissionPresenceTsv(path);
+    CHECK(!result.ok);
+    CHECK(result.presence.empty());
+    CHECK(result.presence.find("aaa") == result.presence.end());
+  }
+
+  // Blank lines between data rows are not data rows and stay harmless.
+  {
+    const auto path = dir / "blank-lines.tsv";
+    WriteFile(path,
+        "device\tshader_hash\tnormal_submissions\tpartial_submissions"
+        "\tfull_submissions\n"
+        "1\taaa\t1\t0\t0\n"
+        "\n"
+        "1\taaa\t0\t0\t1\n");
+    const auto result = ReadSubmissionPresenceTsv(path);
+    CHECK(result.ok);
+    CHECK(result.presence.size() == 1);
+    const auto aaa = result.presence.at("aaa");
+    CHECK(aaa.known && aaa.normal && !aaa.partial && aaa.full);
+  }
+
   // ChoosePresenceSource: an explicit path always wins, even over an
   // existing legacy file, and even if the explicit path itself does not
   // exist -- the caller is expected to fail loudly on that, not silently

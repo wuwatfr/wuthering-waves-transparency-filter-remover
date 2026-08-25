@@ -20,9 +20,11 @@ struct SubmissionPresence {
 
 struct SubmissionPresenceReadResult {
   std::unordered_map<std::string, SubmissionPresence> presence;
-  // False if the file could not be opened, or was opened but no header row
-  // with all four required columns was ever found -- as opposed to a valid
-  // header followed by zero data rows, which is `true` with an empty map.
+  // False if the file could not be opened, no header row with all four
+  // required columns was ever found, or any non-empty data row after that
+  // header was malformed -- as opposed to a valid header followed by zero
+  // data rows, which is `true` with an empty map. A malformed row invalidates
+  // the whole file: `presence` is then empty, never a partially parsed map.
   bool ok = false;
 };
 
