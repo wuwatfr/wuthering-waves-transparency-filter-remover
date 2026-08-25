@@ -69,6 +69,8 @@ void DrawVariantOverlay() {
 void LogVariantStartup() {
   Log(reshade::log::level::info,
       std::string("loaded Dev research build") +
+      "; version=" WUWA_TFR_VERSION +
+      "; build=" WUWA_TFR_BUILD_COMMIT +
       (dev::g_dump ? "; dump=all-unique-dxil" : "; dump=off") +
       (dev::g_dump ? "; dump-path=" + dev::g_dump_path.string() : "") +
       "; devtools=compiled" +

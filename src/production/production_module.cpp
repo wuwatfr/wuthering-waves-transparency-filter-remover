@@ -185,6 +185,8 @@ void DrawVariantOverlay() {
 void LogVariantStartup() {
   Log(reshade::log::level::info,
       std::string("loaded automatic transparency-removal runtime") +
+      "; version=" WUWA_TFR_VERSION +
+      "; build=" WUWA_TFR_BUILD_COMMIT +
       "; devtools=not-compiled" +
       "; config=" + ConfigPath().string());
 }

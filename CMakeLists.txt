@@ -27,6 +27,26 @@ if(GIT_FOUND)
   endif()
 endif()
 
+# Derive the reported version from the nearest v* tag, so the tag that
+# publishes a build stays its single source of truth. A build taken off a tag
+# keeps the distance and commit git describe reports instead of claiming to be
+# that release.
+set(WUWA_TFR_VERSION "0.0.0-unknown")
+if(GIT_FOUND)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" describe --tags --match "v[0-9]*" --dirty
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RESULT_VARIABLE WUWA_TFR_VERSION_RESULT
+    OUTPUT_VARIABLE WUWA_TFR_VERSION_CANDIDATE
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(WUWA_TFR_VERSION_RESULT EQUAL 0 AND
+      WUWA_TFR_VERSION_CANDIDATE MATCHES "^v[0-9]+\\.[0-9]+\\.[0-9]+")
+    string(REGEX REPLACE "^v" ""
+      WUWA_TFR_VERSION "${WUWA_TFR_VERSION_CANDIDATE}")
+  endif()
+endif()
+
 add_executable(pipeline_generation_state_tests tests/test_pipeline_generation_state.cpp)
 target_include_directories(pipeline_generation_state_tests PRIVATE src)
 target_link_libraries(pipeline_generation_state_tests PRIVATE Threads::Threads)
@@ -210,6 +230,7 @@ if(WIN32)
       target_compile_definitions(${TARGET_NAME} PRIVATE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
+        WUWA_TFR_VERSION=\"${WUWA_TFR_VERSION}\"
         WUWA_TFR_BUILD_COMMIT=\"${WUWA_TFR_BUILD_COMMIT}\"
       )
       if(MSVC)

@@ -48,7 +48,7 @@ bool IsWuwaProcess() {
 }
 
 void DrawOverlay(effect_runtime*) {
-  ImGui::TextUnformatted("WuwaTFR");
+  ImGui::TextUnformatted("WuwaTFR " WUWA_TFR_VERSION);
   ImGui::TextDisabled("Build: %s", WUWA_TFR_BUILD_COMMIT);
   wuwa_tfr::variant::DrawVariantOverlay();
 }
