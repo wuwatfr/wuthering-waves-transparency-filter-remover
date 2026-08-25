@@ -675,7 +675,10 @@ bool WriteFadeControlExport(
       "synchronization\n";
   report << "sampling_boundary\t"
       "sampled_once_per_recorded_draw_at_command_recording_time_not_at_"
-      "queue_submission_time\n";
+      "queue_submission_time_a_command_list_recording_contributes_its_staged_"
+      "samples_at_most_once_per_capture_session_so_resubmitting_the_same_"
+      "un_reset_command_list_does_not_duplicate_them_while_manual_capture_"
+      "commands_and_submissions_still_count_every_submission\n";
   report << "record_identity\t"
       "stable_draw_route_plus_pixel_shader_plus_primitive_index_plus_"
       "control_role_plus_proven_static_source_plus_resolved_runtime_cbv_"

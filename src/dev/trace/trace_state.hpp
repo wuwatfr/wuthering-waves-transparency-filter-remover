@@ -289,6 +289,7 @@ struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
   std::unordered_map<RecordedTraceDrawKey, RecordedTraceDraw,
       RecordedTraceDrawKeyHash> recorded_draws;
   bool recorded_draw_capacity_exceeded = false;
+  std::uint64_t fade_admitted_manual_session = 0;
 
   void Reset() {
     bound_pso_incarnation = 0;
@@ -311,6 +312,7 @@ struct __declspec(uuid("7928A6C2-22D4-4A56-879A-48E5DA2F8B91"))
     bound_descriptor_tables.clear();
     recorded_draws.clear();
     recorded_draw_capacity_exceeded = false;
+    fade_admitted_manual_session = 0;
   }
 };
 

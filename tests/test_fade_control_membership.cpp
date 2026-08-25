@@ -108,24 +108,59 @@ FadeControlTrackerCapacityDiagnostics ComposeRecordTimeTaint(
   return taint;
 }
 
+// One command list's recording, mirroring the parts of CommandListTrace this
+// test exercises: the staged Draws plus the last Manual Capture session that
+// admitted their Fade evidence. Reset() starts a new recording.
+struct CommandListRecordingSim {
+  std::vector<RecordedDrawSim> draws;
+  std::uint64_t fade_admitted_manual_session = 0;
+
+  void Reset() {
+    draws.clear();
+    fade_admitted_manual_session = 0;
+  }
+};
+
+CommandListRecordingSim Recording(std::vector<RecordedDrawSim> draws) {
+  CommandListRecordingSim recording;
+  recording.draws = std::move(draws);
+  return recording;
+}
+
 // Mirrors OnManualCaptureExecute's control flow: determine the live manual
-// capture session once, then commit both the Manual Capture draw and that
-// draw's pending Fade observations to that same session -- or commit
-// neither if the session isn't live at submission time.
+// capture session once, accumulate Manual Capture commands/submissions on
+// every submission, and admit this recording's staged Fade evidence at most
+// once per session -- or neither if the session isn't live at submission time.
 void SimulateExecuteCommandList(const ManualCaptureSessionToken& token,
     ManualCaptureAccumulator& manual, FadeControlAccumulator& fade,
     FadeControlSnapshotAccumulator& fade_snapshots,
     FadeControlTrackerCapacityAccumulator& fade_diagnostics,
-    const std::vector<RecordedDrawSim>& draws) {
+    CommandListRecordingSim& recording) {
   const std::uint64_t session_id = token.value();
   if (session_id == 0 || !manual.IsLiveSession(session_id)) return;
-  for (const auto& draw : draws) {
+  const bool admit_fade =
+      recording.fade_admitted_manual_session != session_id;
+  if (admit_fade) recording.fade_admitted_manual_session = session_id;
+  for (const auto& draw : recording.draws) {
     manual.Accumulate(
         draw.manual_key, draw.pipeline, 1, 1, ManualCaptureBindingObservation{});
-    CommitPendingFadeControlObservations(fade, fade_snapshots, fade_diagnostics,
-        draw.pipeline, draw.pending_observations, {},
-        draw.pending_tracker_taint);
+    if (admit_fade)
+      CommitPendingFadeControlObservations(fade, fade_snapshots,
+          fade_diagnostics, draw.pipeline, draw.pending_observations, {},
+          draw.pending_tracker_taint);
   }
+}
+
+// Submits a distinct, freshly recorded command list. Tests that resubmit one
+// recording pass a named CommandListRecordingSim instead.
+void SimulateExecuteCommandList(const ManualCaptureSessionToken& token,
+    ManualCaptureAccumulator& manual, FadeControlAccumulator& fade,
+    FadeControlSnapshotAccumulator& fade_snapshots,
+    FadeControlTrackerCapacityAccumulator& fade_diagnostics,
+    std::vector<RecordedDrawSim> draws) {
+  CommandListRecordingSim recording = Recording(std::move(draws));
+  SimulateExecuteCommandList(
+      token, manual, fade, fade_snapshots, fade_diagnostics, recording);
 }
 
 }  // namespace
@@ -248,19 +283,22 @@ int main() {
     draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
     draw.pipeline = MakePipeline();
     draw.pending_observations = {{MakeFadeKey(1), Available(1.0f)}};
+    auto recording = Recording({draw});
 
     SimulateExecuteCommandList(
-        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
     SimulateExecuteCommandList(
-        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
 
     const auto manual_result = manual.Stop(1);
     const auto fade_result = fade.Stop();
     CHECK(manual_result.records.size() == 1);
+    // Manual Capture counts every submission...
     CHECK(manual_result.records[0].second.submissions == 2);
+    // ...while the one recording-time Fade sample is admitted once.
     CHECK(fade_result.records.size() == 1);
-    CHECK(fade_result.records[0].second.stats.draw_observations == 2);
-    CHECK(fade_result.records[0].second.stats.available_observations == 2);
+    CHECK(fade_result.records[0].second.stats.draw_observations == 1);
+    CHECK(fade_result.records[0].second.stats.available_observations == 1);
   }
 
   // 5. CommandListTrace::Reset() clears pending Fade observations: pending
@@ -650,6 +688,174 @@ int main() {
     SimulateExecuteCommandList(
         token, manual, fade, fade_snapshots, fade_diagnostics, {fresh});
     CHECK(fade_diagnostics.Stop().resource_lifecycle_loss);
+  }
+
+  // 14. One recording, two capture sessions: admitted once in each. The
+  // admission mark is per session, not a one-shot latch, and the pending
+  // evidence is never cleared, so an un-reset command list still contributes
+  // to a later session.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    RecordedDrawSim draw;
+    draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    draw.pipeline = MakePipeline();
+    draw.pending_observations = {{MakeFadeKey(1), Available(1.0f)}};
+    auto recording = Recording({draw});
+
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    token.Stop();
+    manual.Stop(1);
+    const auto first_session = fade.Stop();
+    fade_snapshots.Stop();
+    fade_diagnostics.Stop();
+    CHECK(first_session.records[0].second.stats.draw_observations == 1);
+
+    token.Start(2);
+    manual.Start(2, 0, kAllShaders);
+    fade.Start(2);
+    fade_snapshots.Start(2);
+    fade_diagnostics.Start();
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    const auto second_session = fade.Stop();
+    CHECK(second_session.records.size() == 1);
+    CHECK(second_session.records[0].second.stats.draw_observations == 1);
+  }
+
+  // 15. A submission while no session is live must not consume the admission
+  // a later live session is entitled to.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    RecordedDrawSim draw;
+    draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    draw.pipeline = MakePipeline();
+    draw.pending_observations = {{MakeFadeKey(1), Available(1.0f)}};
+    auto recording = Recording({draw});
+
+    // Submitted with no session at all, then with a stopped one.
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    token.Start(1);
+    token.Stop();
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    CHECK(recording.fade_admitted_manual_session == 0);
+
+    token.Start(2);
+    manual.Start(2, 0, kAllShaders);
+    fade.Start(2);
+    fade_snapshots.Start(2);
+    fade_diagnostics.Start();
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    const auto result = fade.Stop();
+    CHECK(result.records.size() == 1);
+    CHECK(result.records[0].second.stats.draw_observations == 1);
+  }
+
+  // 16. Reset() starts a new recording: the freshly staged evidence is
+  // admissible again inside the very same session.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+
+    RecordedDrawSim draw;
+    draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    draw.pipeline = MakePipeline();
+    draw.pending_observations = {{MakeFadeKey(1), Available(1.0f)}};
+    auto recording = Recording({draw});
+
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+
+    recording.Reset();
+    CHECK(recording.fade_admitted_manual_session == 0);
+    recording.draws.push_back(draw);
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+
+    const auto result = fade.Stop();
+    CHECK(result.records.size() == 1);
+    CHECK(result.records[0].second.stats.draw_observations == 2);
+  }
+
+  // 17. Tracker provenance rides the same once-per-session boundary: a
+  // resubmission neither re-admits the sample nor re-applies its taint, and a
+  // later session picks both up again.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    FadeControlTrackerCapacityDiagnostics runtime_taint;
+    runtime_taint.mapped_buffer_loss = true;
+
+    RecordedDrawSim draw;
+    draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    draw.pipeline = MakePipeline();
+    SimulateRecordDraw(draw, ComposeRecordTimeTaint(runtime_taint, false),
+        {MakeFadeKey(1), Available(1.0f)});
+    auto recording = Recording({draw});
+
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    const auto first_fade = fade.Stop();
+    const auto first_taint = fade_diagnostics.Stop();
+    CHECK(first_fade.records[0].second.stats.draw_observations == 1);
+    CHECK(first_taint.mapped_buffer_loss);
+    token.Stop();
+    manual.Stop(1);
+    fade_snapshots.Stop();
+
+    token.Start(2);
+    manual.Start(2, 0, kAllShaders);
+    fade.Start(2);
+    fade_snapshots.Start(2);
+    fade_diagnostics.Start();
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, recording);
+    CHECK(fade.Stop().records[0].second.stats.draw_observations == 1);
+    CHECK(fade_diagnostics.Stop().mapped_buffer_loss);
   }
 
   return 0;

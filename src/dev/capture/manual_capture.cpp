@@ -204,7 +204,7 @@ bool IsVerifiedFadePrimitiveShaderLocked(std::uint64_t shader_hash) {
 void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
   const std::uint64_t session_id = g_manual_capture_session_token.value();
   if (session_id == 0 || !cmd_list) return;
-  const auto* trace = cmd_list->get_private_data<CommandListTrace>();
+  auto* trace = cmd_list->get_private_data<CommandListTrace>();
   if (!trace ||
       (trace->recorded_draws.empty() &&
           !trace->recorded_draw_capacity_exceeded))
@@ -237,9 +237,11 @@ void OnManualCaptureExecute(command_queue*, command_list* cmd_list) {
   if (!g_manual_capture.IsLiveSession(session_id)) return;
   if (trace->recorded_draw_capacity_exceeded)
     g_manual_capture.MarkCapacityExceeded();
+  const bool admit_fade = trace->fade_admitted_manual_session != session_id;
+  if (admit_fade) trace->fade_admitted_manual_session = session_id;
   const std::uint64_t frame = g_manual_capture_frame_counter;
   for (const auto& [draw_key, draw] : trace->recorded_draws) {
-    CommitPendingFadeControlObservations(draw);
+    if (admit_fade) CommitPendingFadeControlObservations(draw);
     if (filter_active &&
         !eligible_shader_hashes.contains(draw.pipeline.shader_hash))
       continue;
