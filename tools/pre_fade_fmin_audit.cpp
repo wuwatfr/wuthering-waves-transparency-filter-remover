@@ -5,6 +5,7 @@
 #include "pre_fade_fmin_analysis.hpp"
 #include "target_dither_bypass.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -20,6 +21,89 @@ namespace {
 std::string ReadFile(const std::filesystem::path& path) {
   std::ifstream input(path, std::ios::binary);
   return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+struct NormalizedCoordinate {
+  bool resolved = false;
+  std::int64_t byte_offset = 0;
+  bool legacy_form = false;
+};
+
+NormalizedCoordinate NormalizeOperand(
+    const wuwa_tfr::PreFadeOperandSource& source) {
+  NormalizedCoordinate result;
+  result.legacy_form = source.legacy_form;
+  if (!source.resolved) return result;
+  if (source.legacy_form) {
+    if (source.row_resolved && source.component_resolved) {
+      result.resolved = true;
+      result.byte_offset = static_cast<std::int64_t>(source.row) * 16 +
+          static_cast<std::int64_t>(source.component) * 4;
+    }
+    return result;
+  }
+  if (source.byte_offset_resolved) {
+    result.resolved = true;
+    result.byte_offset = static_cast<std::int64_t>(source.byte_offset);
+  }
+  return result;
+}
+
+NormalizedCoordinate NormalizeGate(
+    const wuwa_tfr::FadePrimitiveGatePredicateEvidence& gate) {
+  NormalizedCoordinate result;
+  result.legacy_form = gate.legacy_form;
+  if (!gate.resolved) return result;
+  if (gate.legacy_form) {
+    if (gate.row_resolved && gate.component_resolved) {
+      result.resolved = true;
+      result.byte_offset = static_cast<std::int64_t>(gate.row) * 16 +
+          static_cast<std::int64_t>(gate.component) * 4;
+    }
+    return result;
+  }
+  if (gate.byte_offset_resolved) {
+    result.resolved = true;
+    result.byte_offset = static_cast<std::int64_t>(gate.byte_offset);
+  }
+  return result;
+}
+
+const char* FormName(const NormalizedCoordinate& coordinate) {
+  return coordinate.legacy_form ? "legacy_row" : "byte_offset";
+}
+
+std::string CoordinateText(const NormalizedCoordinate& coordinate) {
+  return coordinate.resolved ? std::to_string(coordinate.byte_offset) : "-";
+}
+
+std::string RegisterText(bool resolved, std::uint32_t space,
+    std::uint32_t register_index) {
+  if (!resolved) return "-";
+  return "space" + std::to_string(space) + ":b" + std::to_string(register_index);
+}
+
+const char* RelateBinding(
+    const wuwa_tfr::FadePrimitiveGatePredicateEvidence& gate,
+    const wuwa_tfr::PreFadeOperandSource& operand) {
+  if (!gate.resolved) return "gate_unresolved";
+  if (!gate.handle_value.empty() && gate.handle_value == operand.handle_value)
+    return "same_handle";
+  if (gate.register_resolved && operand.register_resolved &&
+      gate.cbuffer_space == operand.cbuffer_space &&
+      gate.cbuffer_register == operand.cbuffer_register)
+    return "same_register";
+  return "non_comparable";
+}
+
+bool BindingIsComparable(std::string_view relation) {
+  return relation == "same_handle" || relation == "same_register";
+}
+
+std::string DeltaText(const NormalizedCoordinate& from,
+    const NormalizedCoordinate& to, bool comparable) {
+  if (!comparable || !from.resolved || !to.resolved) return "-";
+  return std::to_string(to.byte_offset - from.byte_offset);
 }
 
 const char* AdjacencyName(wuwa_tfr::PreFadeAdjacency adjacency) {
@@ -64,6 +148,11 @@ int main(int argc, char** argv) {
   std::size_t shaders_with_shared_rewrite_range = 0;
   std::size_t shaders_patched = 0;
   std::map<std::string, std::size_t> adjacency_distribution;
+  std::map<std::string, std::size_t> operand_delta_distribution;
+  std::map<std::string, std::size_t> gate_to_operand1_distribution;
+  std::map<std::string, std::size_t> gate_to_operand2_distribution;
+  std::map<std::string, std::size_t> binding_relation_distribution;
+  std::map<std::string, std::size_t> operand_form_distribution;
   std::map<std::string, std::size_t> status_distribution;
   std::map<std::string, std::size_t> fail_reason_distribution;
   std::map<std::string, std::size_t> patch_failure_distribution;
@@ -102,6 +191,22 @@ int main(int argc, char** argv) {
       if (!reused_patch_analysis)
         analysis = wuwa_tfr::AnalyzePreFadeFMinForInstance(ir, instance);
       wuwa_tfr::ResolvePreFadeCbvRegisters(ir, instance, analysis);
+      wuwa_tfr::FadePrimitiveGatePredicateEvidence gate = instance.gate_predicate;
+      wuwa_tfr::ResolveGatePredicateCbvRegister(ir, gate);
+      const NormalizedCoordinate operand_one =
+          NormalizeOperand(analysis.operand_one);
+      const NormalizedCoordinate operand_two =
+          NormalizeOperand(analysis.operand_two);
+      const NormalizedCoordinate gate_coordinate = NormalizeGate(gate);
+      const char* const binding_relation =
+          RelateBinding(gate, analysis.operand_one);
+      const bool comparable = BindingIsComparable(binding_relation);
+      const std::string operand_delta =
+          DeltaText(operand_one, operand_two, true);
+      const std::string gate_to_operand1 =
+          DeltaText(gate_coordinate, operand_one, comparable);
+      const std::string gate_to_operand2 =
+          DeltaText(gate_coordinate, operand_two, comparable);
       ++status_distribution[wuwa_tfr::PreFadeFMinStatusName(analysis.status)];
       if (wuwa_tfr::PreFadeFMinAnalysisIsStructurallyComplete(analysis)) {
         largest_candidate_count =
@@ -112,6 +217,12 @@ int main(int argc, char** argv) {
         ++qualifying_instances;
         ++adjacency_distribution[AdjacencyName(analysis.adjacency)];
         ++rewrite_ranges[{analysis.operand_one.source_start, analysis.operand_one.source_end}];
+        ++operand_delta_distribution[operand_delta];
+        ++gate_to_operand1_distribution[gate_to_operand1];
+        ++gate_to_operand2_distribution[gate_to_operand2];
+        ++binding_relation_distribution[binding_relation];
+        ++operand_form_distribution[std::string(FormName(operand_one)) + "/" +
+            FormName(operand_two)];
       } else {
         ++fail_reason_distribution[analysis.error];
       }
@@ -122,12 +233,22 @@ int main(int argc, char** argv) {
             << wuwa_tfr::PreFadeFMinStatusName(analysis.status) << "\t"
             << analysis.qualifying_fmin_count << "\t"
             << AdjacencyName(analysis.adjacency) << "\t"
-            << (analysis.operand_one.row_resolved ? "yes" : "no") << "\t"
-            << (analysis.operand_one.component_resolved ? "yes" : "no") << "\t"
-            << (analysis.operand_one.byte_offset_resolved ? "yes" : "no") << "\t"
-            << (analysis.operand_one.register_resolved ? "yes" : "no") << "\t"
-            << analysis.operand_one.cbuffer_space << "\t"
-            << analysis.operand_one.cbuffer_register << "\t"
+            << FormName(operand_one) << "\t" << FormName(operand_two) << "\t"
+            << CoordinateText(operand_one) << "\t"
+            << CoordinateText(operand_two) << "\t" << operand_delta << "\t"
+            << RegisterText(analysis.operand_one.register_resolved,
+                   analysis.operand_one.cbuffer_space,
+                   analysis.operand_one.cbuffer_register)
+            << "\t"
+            << RegisterText(analysis.operand_two.register_resolved,
+                   analysis.operand_two.cbuffer_space,
+                   analysis.operand_two.cbuffer_register)
+            << "\t" << FormName(gate_coordinate) << "\t"
+            << CoordinateText(gate_coordinate) << "\t"
+            << RegisterText(gate.register_resolved, gate.cbuffer_space,
+                   gate.cbuffer_register)
+            << "\t" << gate_to_operand1 << "\t" << gate_to_operand2 << "\t"
+            << binding_relation << "\t"
             << TsvEscape(analysis.error) << "\n";
       }
     }
@@ -164,6 +285,21 @@ int main(int argc, char** argv) {
   std::cout << "adjacency_distribution\n";
   for (const auto& [name, count] : adjacency_distribution)
     std::cout << name << "\t" << count << "\n";
+  std::cout << "operand_form_distribution\n";
+  for (const auto& [name, count] : operand_form_distribution)
+    std::cout << name << "\t" << count << "\n";
+  std::cout << "operand2_minus_operand1_distribution\n";
+  for (const auto& [name, count] : operand_delta_distribution)
+    std::cout << name << "\t" << count << "\n";
+  std::cout << "gate_to_operand1_distribution\n";
+  for (const auto& [name, count] : gate_to_operand1_distribution)
+    std::cout << name << "\t" << count << "\n";
+  std::cout << "gate_to_operand2_distribution\n";
+  for (const auto& [name, count] : gate_to_operand2_distribution)
+    std::cout << name << "\t" << count << "\n";
+  std::cout << "gate_binding_relation_distribution\n";
+  for (const auto& [name, count] : binding_relation_distribution)
+    std::cout << name << "\t" << count << "\n";
   std::cout << "fail_closed_reason_distribution\n";
   for (const auto& [reason, count] : fail_reason_distribution)
     std::cout << reason << "\t" << count << "\n";
@@ -182,9 +318,11 @@ int main(int argc, char** argv) {
   if (list_instances) {
     std::cout << "instances\n";
     std::cout << "hash\tfunction\tconsumer\tqualified\tstatus\tqualifying_fmin_count"
-        "\tadjacency\toperand1_row_resolved\toperand1_component_resolved"
-        "\toperand1_byte_offset_resolved\toperand1_register_resolved"
-        "\toperand1_cbuffer_space\toperand1_cbuffer_register\terror\n";
+        "\tadjacency\toperand1_form\toperand2_form"
+        "\toperand1_coord\toperand2_coord\toperand2_minus_operand1"
+        "\toperand1_binding\toperand2_binding"
+        "\tgate_form\tgate_coord\tgate_binding"
+        "\tgate_to_operand1\tgate_to_operand2\tgate_binding_relation\terror\n";
     std::cout << instance_rows.str();
   }
   return 0;
