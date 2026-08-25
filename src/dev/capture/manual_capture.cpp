@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include <imgui.h>
 
@@ -65,18 +66,12 @@ std::string SerializeIndexBinding(
   return stream.str();
 }
 
-bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
-    const std::string& timestamp, std::filesystem::path& out_path) {
-  const auto directory = DumpDir();
-  if (directory.empty()) return false;
-  const auto filename = AllocateExportFilename(
-      "manual-capture-" + timestamp, ".tsv",
-      [&directory](const std::string& candidate) {
-        return std::filesystem::exists(directory / candidate);
-      });
-  if (!filename) return false;
-  out_path = directory / *filename;
+std::string ManualCaptureExportStem(const std::string& timestamp) {
+  return "manual-capture-" + timestamp;
+}
 
+bool WriteManualCaptureExport(const ManualCaptureSnapshot& snapshot,
+    const std::string& timestamp, const std::filesystem::path& out_path) {
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
 
@@ -308,18 +303,35 @@ bool StopAndExportManualCapture() {
   const bool fade_control_was_enabled = StopFadeControlCapture();
 
   const std::string timestamp = LocalExportTimestamp();
-  std::filesystem::path export_path;
+  const auto directory = DumpDir();
+  if (directory.empty()) {
+    g_manual_capture_status = "export failed: check DumpPath";
+    return false;
+  }
+  std::vector<std::string> stems{ManualCaptureExportStem(timestamp)};
+  if (fade_control_was_enabled) {
+    stems.push_back(FadeControlExportStem(timestamp));
+    stems.push_back(FadeControlSnapshotExportStem(timestamp));
+  }
+  const auto filenames = AllocateExportFilenameGroup(
+      stems, ".tsv", [&directory](const std::string& candidate) {
+        return std::filesystem::exists(directory / candidate);
+      });
+  if (!filenames) {
+    g_manual_capture_status = "export failed: check DumpPath";
+    return false;
+  }
+
+  const std::filesystem::path export_path = directory / (*filenames)[0];
   const bool exported =
       WriteManualCaptureExport(snapshot, timestamp, export_path);
   bool fade_control_exported = false;
   bool fade_snapshot_exported = false;
   if (fade_control_was_enabled) {
-    std::filesystem::path fade_control_path;
     fade_control_exported =
-        WriteFadeControlExport(timestamp, fade_control_path);
-    std::filesystem::path fade_snapshot_path;
+        WriteFadeControlExport(timestamp, directory / (*filenames)[1]);
     fade_snapshot_exported =
-        WriteFadeControlSnapshotExport(timestamp, fade_snapshot_path);
+        WriteFadeControlSnapshotExport(timestamp, directory / (*filenames)[2]);
   }
   g_manual_capture_status = exported
       ? (fade_control_was_enabled

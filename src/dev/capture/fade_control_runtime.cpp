@@ -509,14 +509,6 @@ void SampleOneRole(const CommandListTrace& trace,
       {key, Unavailable(kFadeControlReasonUnsupportedBindingRoute)});
 }
 
-std::string SampleFilenameStem(const std::string& timestamp) {
-  return "manual-fade-controls-" + timestamp;
-}
-
-std::string SnapshotFilenameStem(const std::string& timestamp) {
-  return "manual-fade-snapshots-" + timestamp;
-}
-
 std::string BytesToHex(const std::byte* bytes, std::uint64_t size) {
   static constexpr char kDigits[] = "0123456789abcdef";
   std::string text;
@@ -610,8 +602,16 @@ FadeControlDiagnosticCounters GetFadeControlDiagnosticCounters() {
   return counters;
 }
 
+std::string FadeControlExportStem(const std::string& timestamp) {
+  return "manual-fade-controls-" + timestamp;
+}
+
+std::string FadeControlSnapshotExportStem(const std::string& timestamp) {
+  return "manual-fade-snapshots-" + timestamp;
+}
+
 bool WriteFadeControlExport(
-    const std::string& timestamp, std::filesystem::path& out_path) {
+    const std::string& timestamp, const std::filesystem::path& out_path) {
   FadeControlSnapshot snapshot;
   FadeControlTrackerCapacityDiagnostics tracker_capacity;
   {
@@ -620,16 +620,6 @@ bool WriteFadeControlExport(
     snapshot = g_fade_control_accumulator.last_result();
     tracker_capacity = g_fade_control_capture_diagnostics.last_result();
   }
-
-  const auto directory = DumpDir();
-  if (directory.empty()) return false;
-  const auto filename = AllocateExportFilename(
-      SampleFilenameStem(timestamp), ".tsv",
-      [&directory](const std::string& candidate) {
-        return std::filesystem::exists(directory / candidate);
-      });
-  if (!filename) return false;
-  out_path = directory / *filename;
 
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;
@@ -800,7 +790,7 @@ bool WriteFadeControlExport(
 }
 
 bool WriteFadeControlSnapshotExport(
-    const std::string& timestamp, std::filesystem::path& out_path) {
+    const std::string& timestamp, const std::filesystem::path& out_path) {
   FadeControlSnapshotSet snapshot_set;
   FadeControlTrackerCapacityDiagnostics tracker_capacity;
   {
@@ -809,16 +799,6 @@ bool WriteFadeControlSnapshotExport(
     snapshot_set = g_fade_control_snapshot_accumulator.last_result();
     tracker_capacity = g_fade_control_capture_diagnostics.last_result();
   }
-
-  const auto directory = DumpDir();
-  if (directory.empty()) return false;
-  const auto filename = AllocateExportFilename(
-      SnapshotFilenameStem(timestamp), ".tsv",
-      [&directory](const std::string& candidate) {
-        return std::filesystem::exists(directory / candidate);
-      });
-  if (!filename) return false;
-  out_path = directory / *filename;
 
   std::ofstream report(out_path, std::ios::binary | std::ios::trunc);
   if (!report) return false;

@@ -422,6 +422,106 @@ int main() {
     CHECK(existing.size() == 3);
   }
 
+  // The Manual Capture export set: with Fade-control enabled one Stop+export
+  // writes three files, and they must stay correlated by one shared suffix.
+  // Allocating them independently let a collision in only one stem give that
+  // file a "-1" while the others kept the bare timestamp.
+  {
+    const std::string stamp = "20260825-204500";
+    const std::vector<std::string> stems{"manual-capture-" + stamp,
+        "manual-fade-controls-" + stamp, "manual-fade-snapshots-" + stamp};
+
+    // No collision: all three bare.
+    {
+      std::unordered_set<std::string> existing;
+      const auto exists = [&existing](const std::string& candidate) {
+        return existing.contains(candidate);
+      };
+      const auto allocated = AllocateExportFilenameGroup(stems, ".tsv", exists);
+      CHECK(allocated.has_value());
+      CHECK((*allocated)[0] == "manual-capture-" + stamp + ".tsv");
+      CHECK((*allocated)[1] == "manual-fade-controls-" + stamp + ".tsv");
+      CHECK((*allocated)[2] == "manual-fade-snapshots-" + stamp + ".tsv");
+    }
+
+    // A collision in ONLY the manual-capture base advances all three.
+    {
+      std::unordered_set<std::string> existing = {
+          "manual-capture-" + stamp + ".tsv"};
+      const auto exists = [&existing](const std::string& candidate) {
+        return existing.contains(candidate);
+      };
+      const auto allocated = AllocateExportFilenameGroup(stems, ".tsv", exists);
+      CHECK(allocated.has_value());
+      CHECK((*allocated)[0] == "manual-capture-" + stamp + "-1.tsv");
+      CHECK((*allocated)[1] == "manual-fade-controls-" + stamp + "-1.tsv");
+      CHECK((*allocated)[2] == "manual-fade-snapshots-" + stamp + "-1.tsv");
+    }
+
+    // A collision in ONLY the fade-controls base advances all three too --
+    // the member that collided does not matter.
+    {
+      std::unordered_set<std::string> existing = {
+          "manual-fade-controls-" + stamp + ".tsv"};
+      const auto exists = [&existing](const std::string& candidate) {
+        return existing.contains(candidate);
+      };
+      const auto allocated = AllocateExportFilenameGroup(stems, ".tsv", exists);
+      CHECK(allocated.has_value());
+      CHECK((*allocated)[0] == "manual-capture-" + stamp + "-1.tsv");
+      CHECK((*allocated)[1] == "manual-fade-controls-" + stamp + "-1.tsv");
+      CHECK((*allocated)[2] == "manual-fade-snapshots-" + stamp + "-1.tsv");
+    }
+
+    // Collisions spread across different members and different suffixes: the
+    // set advances to the first suffix free for every member.
+    {
+      std::unordered_set<std::string> existing = {
+          "manual-fade-snapshots-" + stamp + ".tsv",
+          "manual-capture-" + stamp + "-1.tsv"};
+      const auto exists = [&existing](const std::string& candidate) {
+        return existing.contains(candidate);
+      };
+      const auto allocated = AllocateExportFilenameGroup(stems, ".tsv", exists);
+      CHECK(allocated.has_value());
+      CHECK((*allocated)[0] == "manual-capture-" + stamp + "-2.tsv");
+      CHECK((*allocated)[1] == "manual-fade-controls-" + stamp + "-2.tsv");
+      CHECK((*allocated)[2] == "manual-fade-snapshots-" + stamp + "-2.tsv");
+      // Nothing already on disk was selected.
+      for (const auto& name : *allocated) CHECK(!existing.contains(name));
+    }
+
+    // Exhaustion fails outright rather than returning an occupied name, so
+    // no file in the set is opened with truncation.
+    {
+      std::unordered_set<std::string> existing;
+      for (const auto& stem : stems) {
+        existing.insert(stem + ".tsv");
+        for (int attempt = 1; attempt <= kMaxExportFilenameAttempts; ++attempt)
+          existing.insert(stem + "-" + std::to_string(attempt) + ".tsv");
+      }
+      const auto exists = [&existing](const std::string& candidate) {
+        return existing.contains(candidate);
+      };
+      CHECK(!AllocateExportFilenameGroup(stems, ".tsv", exists).has_value());
+    }
+
+    // Fade-control disabled: the set is just the one manual-capture file, and
+    // the same allocator handles it.
+    {
+      std::unordered_set<std::string> existing = {
+          "manual-capture-" + stamp + ".tsv"};
+      const auto exists = [&existing](const std::string& candidate) {
+        return existing.contains(candidate);
+      };
+      const std::vector<std::string> alone{"manual-capture-" + stamp};
+      const auto allocated = AllocateExportFilenameGroup(alone, ".tsv", exists);
+      CHECK(allocated.has_value());
+      CHECK(allocated->size() == 1);
+      CHECK((*allocated)[0] == "manual-capture-" + stamp + "-1.tsv");
+    }
+  }
+
   // The group allocator reports failure the same way, so the correlated
   // three-file trace export cannot silently overwrite a previous group.
   {

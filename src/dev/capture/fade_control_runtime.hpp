@@ -46,11 +46,14 @@ struct FadeControlDiagnosticCounters {
 };
 FadeControlDiagnosticCounters GetFadeControlDiagnosticCounters();
 
+std::string FadeControlExportStem(const std::string& timestamp);
+std::string FadeControlSnapshotExportStem(const std::string& timestamp);
+
 bool WriteFadeControlExport(
-    const std::string& timestamp, std::filesystem::path& out_path);
+    const std::string& timestamp, const std::filesystem::path& out_path);
 
 bool WriteFadeControlSnapshotExport(
-    const std::string& timestamp, std::filesystem::path& out_path);
+    const std::string& timestamp, const std::filesystem::path& out_path);
 
 void SampleFadeControlValuesOnDraw(const CommandListTrace& trace,
     const wuwa_tfr::TraceConcreteDrawKey& route, RecordedTraceDraw& draw);
