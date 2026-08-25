@@ -50,8 +50,14 @@ struct LayoutCbvRangeInfo {
   bool ranges_truncated = false;
 };
 
+struct LayoutPushConstantRangeInfo {
+  std::vector<PushConstantRangeInfo> ranges;
+  bool ranges_truncated = false;
+};
+
 constexpr std::size_t kMaxTrackedFadeControlLayouts = 4096;
 constexpr std::size_t kMaxDescriptorRangesPerLayout = 256;
+constexpr std::size_t kMaxPushConstantRangesPerLayout = 256;
 
 std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutCbvRangeInfo,
     wuwa_tfr::TraceLiveHandleKeyHash>
@@ -61,7 +67,7 @@ std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutCbvRangeInfo,
     wuwa_tfr::TraceLiveHandleKeyHash>
     g_layout_descriptor_cbv_ranges;
 
-std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutCbvRangeInfo,
+std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutPushConstantRangeInfo,
     wuwa_tfr::TraceLiveHandleKeyHash>
     g_layout_push_constant_ranges;
 
@@ -97,17 +103,27 @@ void AppendDescriptorCbvRange(std::uint32_t param_index,
       range.dx_register_space, range.dx_register_index, range.count});
 }
 
-void StoreLayoutCbvRanges(
-    std::unordered_map<wuwa_tfr::TraceLiveHandleKey, LayoutCbvRangeInfo,
-        wuwa_tfr::TraceLiveHandleKeyHash>& target,
-    const wuwa_tfr::TraceLiveHandleKey& key,
-    std::vector<DescriptorCbvRangeInfo>&& ranges, bool truncated) {
+void AppendPushConstantRange(std::uint32_t param_index,
+    const constant_range& range, std::vector<PushConstantRangeInfo>& ranges,
+    bool& truncated) {
+  if (range.count == 0) return;
+  if (ranges.size() >= kMaxPushConstantRangesPerLayout) {
+    truncated = true;
+    return;
+  }
+  ranges.push_back(PushConstantRangeInfo{param_index, range.dx_register_space,
+      range.dx_register_index, range.count});
+}
+
+template <typename Map, typename Range>
+void StoreLayoutRanges(Map& target, const wuwa_tfr::TraceLiveHandleKey& key,
+    std::vector<Range>&& ranges, bool truncated) {
   if (ranges.empty() && !truncated) return;
   if (target.size() >= kMaxTrackedFadeControlLayouts && !target.contains(key)) {
     g_fade_control_tracker_capacity.layout_map_loss = true;
     return;
   }
-  target[key] = LayoutCbvRangeInfo{std::move(ranges), truncated};
+  target[key] = typename Map::mapped_type{std::move(ranges), truncated};
 }
 
 void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
@@ -120,7 +136,7 @@ void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
 
   std::vector<DescriptorCbvRangeInfo> push_ranges;
   std::vector<DescriptorCbvRangeInfo> descriptor_ranges;
-  std::vector<DescriptorCbvRangeInfo> push_constant_ranges;
+  std::vector<PushConstantRangeInfo> push_constant_ranges;
   bool push_ranges_truncated = false;
   bool descriptor_ranges_truncated = false;
   bool push_constant_ranges_truncated = false;
@@ -156,14 +172,8 @@ void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
               descriptor_ranges_truncated);
         break;
       case pipeline_layout_param_type::push_constants:
-        if (push_constant_ranges.size() >= kMaxDescriptorRangesPerLayout) {
-          push_constant_ranges_truncated = true;
-          break;
-        }
-        push_constant_ranges.push_back(DescriptorCbvRangeInfo{i, 0,
-            param.push_constants.dx_register_space,
-            param.push_constants.dx_register_index,
-            param.push_constants.count});
+        AppendPushConstantRange(i, param.push_constants, push_constant_ranges,
+            push_constant_ranges_truncated);
         break;
       default:
         break;
@@ -176,11 +186,11 @@ void OnInitFadeControlPipelineLayout(device* owner, std::uint32_t param_count,
       push_constant_ranges_truncated) {
     g_fade_control_tracker_capacity.descriptor_range_truncated = true;
   }
-  StoreLayoutCbvRanges(g_layout_push_cbv_ranges, key, std::move(push_ranges),
+  StoreLayoutRanges(g_layout_push_cbv_ranges, key, std::move(push_ranges),
       push_ranges_truncated);
-  StoreLayoutCbvRanges(g_layout_descriptor_cbv_ranges, key,
+  StoreLayoutRanges(g_layout_descriptor_cbv_ranges, key,
       std::move(descriptor_ranges), descriptor_ranges_truncated);
-  StoreLayoutCbvRanges(g_layout_push_constant_ranges, key,
+  StoreLayoutRanges(g_layout_push_constant_ranges, key,
       std::move(push_constant_ranges), push_constant_ranges_truncated);
 }
 
@@ -471,7 +481,7 @@ bool TryReportPushConstantBackedSource(const CommandListTrace& trace,
   if (layout_it == g_layout_push_constant_ranges.end() ||
       layout_it->second.ranges_truncated)
     return false;
-  if (!ResolveDescriptorTableCbvSlot(
+  if (!ResolvePushConstantBackedParam(
           layout_it->second.ranges, source.cbuffer_space,
           source.cbuffer_register))
     return false;

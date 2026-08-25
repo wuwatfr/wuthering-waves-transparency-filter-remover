@@ -36,6 +36,26 @@ std::optional<DescriptorCbvSlot> ResolveDescriptorTableCbvSlot(
     const std::vector<DescriptorCbvRangeInfo>& ranges,
     std::uint32_t register_space, std::uint32_t register_index);
 
+// A D3D12 root-constants range. Deliberately not a DescriptorCbvRangeInfo:
+// constant_count is the number of 32-bit constants inside the range, never a
+// span of consecutive shader registers, so the range binds exactly
+// register_space/register_index and nothing beyond it.
+struct PushConstantRangeInfo {
+  std::uint32_t param_index = 0;
+  std::uint32_t register_space = 0;
+  std::uint32_t register_index = 0;
+  std::uint32_t constant_count = 0;
+
+  friend bool operator==(
+      const PushConstantRangeInfo&, const PushConstantRangeInfo&) = default;
+};
+
+// Returns the layout parameter backing exactly this shader register, or
+// nullopt when no range declares it or more than one does.
+std::optional<std::uint32_t> ResolvePushConstantBackedParam(
+    const std::vector<PushConstantRangeInfo>& ranges,
+    std::uint32_t register_space, std::uint32_t register_index);
+
 struct DescriptorSlotKey {
   wuwa_tfr::TraceLiveHandleKey table;
   std::uint32_t slot = 0;

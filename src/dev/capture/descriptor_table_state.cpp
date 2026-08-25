@@ -20,6 +20,20 @@ std::optional<DescriptorCbvSlot> ResolveDescriptorTableCbvSlot(
   return match;
 }
 
+std::optional<std::uint32_t> ResolvePushConstantBackedParam(
+    const std::vector<PushConstantRangeInfo>& ranges,
+    std::uint32_t register_space, std::uint32_t register_index) {
+  std::optional<std::uint32_t> match;
+  for (const auto& range : ranges) {
+    if (range.register_space != register_space ||
+        range.register_index != register_index)
+      continue;
+    if (match) return std::nullopt;
+    match = range.param_index;
+  }
+  return match;
+}
+
 bool SetDescriptorTableSlot(DescriptorSlotTable& table,
     const DescriptorSlotKey& key,
     std::optional<DescriptorSlotContent> content) {
