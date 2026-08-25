@@ -88,6 +88,27 @@ void FadeControlValueStats::Observe(const FadeControlValueSample& sample) {
   }
 }
 
+void FadeControlTrackerCapacityAccumulator::Start() {
+  active_diagnostics_ = FadeControlTrackerCapacityDiagnostics{};
+  last_result_ = FadeControlTrackerCapacityDiagnostics{};
+  active_ = true;
+}
+
+void FadeControlTrackerCapacityAccumulator::Admit(
+    const FadeControlTrackerCapacityDiagnostics& provenance) {
+  if (!active_) return;
+  MergeFadeControlTrackerCapacity(active_diagnostics_, provenance);
+}
+
+FadeControlTrackerCapacityDiagnostics
+FadeControlTrackerCapacityAccumulator::Stop() {
+  if (!active_) return {};
+  active_ = false;
+  last_result_ = active_diagnostics_;
+  active_diagnostics_ = FadeControlTrackerCapacityDiagnostics{};
+  return last_result_;
+}
+
 void FadeControlAccumulator::Start(std::uint64_t session_id) {
   active_snapshot_ = FadeControlSnapshot{};
   active_snapshot_.session_id = session_id;

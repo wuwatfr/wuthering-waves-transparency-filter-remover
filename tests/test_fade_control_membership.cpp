@@ -26,7 +26,11 @@ using wuwa_tfr::dev::FadeControlAccumulator;
 using wuwa_tfr::dev::FadeControlRecordKey;
 using wuwa_tfr::dev::FadeControlRole;
 using wuwa_tfr::dev::FadeControlSnapshotAccumulator;
+using wuwa_tfr::dev::FadeControlTrackerCapacityAccumulator;
+using wuwa_tfr::dev::FadeControlTrackerCapacityDiagnostics;
+using wuwa_tfr::dev::FadeControlTrackerCapacityHasLoss;
 using wuwa_tfr::dev::FadeControlValueSample;
+using wuwa_tfr::dev::MergeFadeControlTrackerCapacity;
 using wuwa_tfr::dev::ManualCaptureAccumulator;
 using wuwa_tfr::dev::ManualCaptureBindingObservation;
 using wuwa_tfr::dev::ManualCaptureRecordKey;
@@ -78,7 +82,18 @@ struct RecordedDrawSim {
   ManualCaptureRecordKey manual_key;
   ExecutionPipelineIdentity pipeline;
   std::vector<PendingFadeControlObservation> pending_observations;
+  FadeControlTrackerCapacityDiagnostics pending_tracker_taint;
 };
+
+// Mirrors SampleFadeControlValuesOnDraw: stage the sampled evidence and, with
+// it, a snapshot of the tracker taint as it stands right now. Later tracker
+// failures cannot reach back into a Draw already recorded.
+void SimulateRecordDraw(RecordedDrawSim& draw,
+    const FadeControlTrackerCapacityDiagnostics& runtime_taint,
+    const PendingFadeControlObservation& observation) {
+  draw.pending_observations.push_back(observation);
+  MergeFadeControlTrackerCapacity(draw.pending_tracker_taint, runtime_taint);
+}
 
 // Mirrors OnManualCaptureExecute's control flow: determine the live manual
 // capture session once, then commit both the Manual Capture draw and that
@@ -87,14 +102,16 @@ struct RecordedDrawSim {
 void SimulateExecuteCommandList(const ManualCaptureSessionToken& token,
     ManualCaptureAccumulator& manual, FadeControlAccumulator& fade,
     FadeControlSnapshotAccumulator& fade_snapshots,
+    FadeControlTrackerCapacityAccumulator& fade_diagnostics,
     const std::vector<RecordedDrawSim>& draws) {
   const std::uint64_t session_id = token.value();
   if (session_id == 0 || !manual.IsLiveSession(session_id)) return;
   for (const auto& draw : draws) {
     manual.Accumulate(
         draw.manual_key, draw.pipeline, 1, 1, ManualCaptureBindingObservation{});
-    CommitPendingFadeControlObservations(
-        fade, fade_snapshots, draw.pipeline, draw.pending_observations, {});
+    CommitPendingFadeControlObservations(fade, fade_snapshots, fade_diagnostics,
+        draw.pipeline, draw.pending_observations, {},
+        draw.pending_tracker_taint);
   }
 }
 
@@ -110,6 +127,7 @@ int main() {
     ManualCaptureAccumulator manual;
     FadeControlAccumulator fade;
     FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
 
     RecordedDrawSim draw;
     draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
@@ -121,8 +139,10 @@ int main() {
     manual.Start(1, 0, kAllShaders);
     fade.Start(1);
     fade_snapshots.Start(1);
+    fade_diagnostics.Start();
 
-    SimulateExecuteCommandList(token, manual, fade, fade_snapshots, {draw});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
 
     const auto manual_result = manual.Stop(1);
     const auto fade_result = fade.Stop();
@@ -139,11 +159,13 @@ int main() {
     ManualCaptureAccumulator manual;
     FadeControlAccumulator fade;
     FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
 
     token.Start(1);
     manual.Start(1, 0, kAllShaders);
     fade.Start(1);
     fade_snapshots.Start(1);
+    fade_diagnostics.Start();
 
     RecordedDrawSim draw;
     draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
@@ -156,8 +178,10 @@ int main() {
     manual.Stop(1);
     fade.Stop();
     fade_snapshots.Stop();
+    fade_diagnostics.Stop();
 
-    SimulateExecuteCommandList(token, manual, fade, fade_snapshots, {draw});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
 
     CHECK(manual.last_result().records.empty());
     CHECK(fade.last_result().records.empty());
@@ -169,18 +193,21 @@ int main() {
     ManualCaptureAccumulator manual;
     FadeControlAccumulator fade;
     FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
 
     token.Start(1);
     manual.Start(1, 0, kAllShaders);
     fade.Start(1);
     fade_snapshots.Start(1);
+    fade_diagnostics.Start();
 
     RecordedDrawSim draw;
     draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
     draw.pipeline = MakePipeline();
     draw.pending_observations = {{MakeFadeKey(1), Available(1.0f)}};
 
-    SimulateExecuteCommandList(token, manual, fade, fade_snapshots, {draw});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
 
     const auto manual_result = manual.Stop(1);
     const auto fade_result = fade.Stop();
@@ -196,19 +223,23 @@ int main() {
     ManualCaptureAccumulator manual;
     FadeControlAccumulator fade;
     FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
 
     token.Start(1);
     manual.Start(1, 0, kAllShaders);
     fade.Start(1);
     fade_snapshots.Start(1);
+    fade_diagnostics.Start();
 
     RecordedDrawSim draw;
     draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
     draw.pipeline = MakePipeline();
     draw.pending_observations = {{MakeFadeKey(1), Available(1.0f)}};
 
-    SimulateExecuteCommandList(token, manual, fade, fade_snapshots, {draw});
-    SimulateExecuteCommandList(token, manual, fade, fade_snapshots, {draw});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
 
     const auto manual_result = manual.Stop(1);
     const auto fade_result = fade.Stop();
@@ -263,21 +294,223 @@ int main() {
     ManualCaptureAccumulator manual;
     FadeControlAccumulator fade;
     FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
     token.Start(1);
     manual.Start(1, 0, kAllShaders);
     fade.Start(1);
     fade_snapshots.Start(1);
+    fade_diagnostics.Start();
 
     RecordedDrawSim draw;
     draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 999};
     draw.pipeline = MakePipeline();
     draw.pending_observations = primary_pending;
 
-    SimulateExecuteCommandList(token, manual, fade, fade_snapshots, {draw});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
     const auto fade_result = fade.Stop();
     CHECK(fade_result.records.size() == 1);
     CHECK(fade_result.records[0].first.route == inherited_route);
     CHECK(!(fade_result.records[0].first.route == secondary_route));
+  }
+
+  // 7. Tracker loss happened BEFORE the capture started, and the Draw that
+  // sampled through that damaged tracker state was also recorded before
+  // Start, then submitted live. Start must not erase runtime taint: the
+  // completed capture has to report the loss, because the evidence it admits
+  // was produced under it.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    FadeControlTrackerCapacityDiagnostics runtime_taint;
+    runtime_taint.mapped_buffer_loss = true;
+
+    RecordedDrawSim draw;
+    draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    draw.pipeline = MakePipeline();
+    SimulateRecordDraw(draw, runtime_taint, {MakeFadeKey(1), Available(1.0f)});
+
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
+
+    manual.Stop(1);
+    fade.Stop();
+    const auto diagnostics = fade_diagnostics.Stop();
+    CHECK(diagnostics.mapped_buffer_loss);
+    CHECK(!diagnostics.descriptor_slot_loss);
+  }
+
+  // 8. The Draw was recorded while every tracker was clean; the tracker only
+  // failed afterwards. Submitting that Draw must not blame it for a loss it
+  // never sampled through.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+
+    FadeControlTrackerCapacityDiagnostics runtime_taint;  // clean
+    RecordedDrawSim draw;
+    draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    draw.pipeline = MakePipeline();
+    SimulateRecordDraw(draw, runtime_taint, {MakeFadeKey(1), Available(1.0f)});
+
+    // The tracker fails only now, after this Draw was already recorded.
+    runtime_taint.descriptor_slot_loss = true;
+
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
+
+    const auto fade_result = fade.Stop();
+    const auto diagnostics = fade_diagnostics.Stop();
+    CHECK(fade_result.records.size() == 1);
+    CHECK(!diagnostics.descriptor_slot_loss);
+    CHECK(!FadeControlTrackerCapacityHasLoss(diagnostics));
+  }
+
+  // 9. A stale submission -- the session already stopped -- contributes
+  // neither evidence nor provenance, even though the Draw carries taint.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+
+    FadeControlTrackerCapacityDiagnostics runtime_taint;
+    runtime_taint.layout_map_loss = true;
+    RecordedDrawSim draw;
+    draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    draw.pipeline = MakePipeline();
+    SimulateRecordDraw(draw, runtime_taint, {MakeFadeKey(1), Available(1.0f)});
+
+    token.Stop();
+    manual.Stop(1);
+    fade.Stop();
+    fade_snapshots.Stop();
+    fade_diagnostics.Stop();
+
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
+
+    CHECK(fade.last_result().records.empty());
+    CHECK(!fade_diagnostics.last_result().layout_map_loss);
+  }
+
+  // 10. Tracker failures after Stop must not mutate the frozen result the
+  // export reads.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+
+    FadeControlTrackerCapacityDiagnostics runtime_taint;
+    RecordedDrawSim draw;
+    draw.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    draw.pipeline = MakePipeline();
+    SimulateRecordDraw(draw, runtime_taint, {MakeFadeKey(1), Available(1.0f)});
+
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {draw});
+
+    token.Stop();
+    manual.Stop(1);
+    fade.Stop();
+    const auto frozen = fade_diagnostics.Stop();
+    CHECK(!FadeControlTrackerCapacityHasLoss(frozen));
+
+    // Everything below happens after Stop and before the export reads
+    // last_result(): a tracker failure, and a late submission carrying it.
+    runtime_taint.descriptor_range_truncated = true;
+    RecordedDrawSim late;
+    late.manual_key = ManualCaptureRecordKey{2, Geometry(2), 100};
+    late.pipeline = MakePipeline();
+    SimulateRecordDraw(late, runtime_taint, {MakeFadeKey(2), Available(2.0f)});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {late});
+
+    CHECK(!fade_diagnostics.last_result().descriptor_range_truncated);
+    CHECK(fade_diagnostics.last_result() == frozen);
+  }
+
+  // 11. A new capture starts with empty capture diagnostics, while the
+  // runtime taint that survives Start is still available to evidence recorded
+  // afterwards -- the two are separate pieces of state.
+  {
+    ManualCaptureSessionToken token;
+    ManualCaptureAccumulator manual;
+    FadeControlAccumulator fade;
+    FadeControlSnapshotAccumulator fade_snapshots;
+    FadeControlTrackerCapacityAccumulator fade_diagnostics;
+
+    // A first capture that reported loss.
+    FadeControlTrackerCapacityDiagnostics runtime_taint;
+    runtime_taint.descriptor_slot_loss = true;
+    token.Start(1);
+    manual.Start(1, 0, kAllShaders);
+    fade.Start(1);
+    fade_snapshots.Start(1);
+    fade_diagnostics.Start();
+    RecordedDrawSim first;
+    first.manual_key = ManualCaptureRecordKey{1, Geometry(1), 100};
+    first.pipeline = MakePipeline();
+    SimulateRecordDraw(first, runtime_taint, {MakeFadeKey(1), Available(1.0f)});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {first});
+    token.Stop();
+    manual.Stop(1);
+    fade.Stop();
+    CHECK(fade_diagnostics.Stop().descriptor_slot_loss);
+
+    // The second capture starts clean...
+    token.Start(2);
+    manual.Start(2, 0, kAllShaders);
+    fade.Start(2);
+    fade_snapshots.Start(2);
+    fade_diagnostics.Start();
+    CHECK(!FadeControlTrackerCapacityHasLoss(
+        fade_diagnostics.active_diagnostics()));
+
+    // ...but the runtime taint was never cleared by Start, so evidence
+    // recorded now still carries it and the new capture reports it too.
+    RecordedDrawSim second;
+    second.manual_key = ManualCaptureRecordKey{2, Geometry(2), 100};
+    second.pipeline = MakePipeline();
+    SimulateRecordDraw(second, runtime_taint, {MakeFadeKey(2), Available(2.0f)});
+    SimulateExecuteCommandList(
+        token, manual, fade, fade_snapshots, fade_diagnostics, {second});
+    CHECK(fade_diagnostics.Stop().descriptor_slot_loss);
   }
 
   return 0;

@@ -609,6 +609,9 @@ void OnExecuteSecondaryTrace(
       primary_draw->second.pending_fade_snapshots.push_back(
           std::move(pending));
     }
+    MergeFadeControlTrackerCapacity(
+        primary_draw->second.pending_fade_tracker_taint,
+        secondary_draw.pending_fade_tracker_taint);
   }
 }
 

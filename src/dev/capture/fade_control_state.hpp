@@ -166,6 +166,62 @@ struct FadeControlSnapshot {
   std::vector<std::pair<FadeControlRecordKey, FadeControlRecord>> records;
 };
 
+// Whether Fade-control's own fixed-capacity runtime trackers dropped or
+// truncated state. The same shape serves two distinct roles: a monotonic
+// runtime taint that accumulates for the process lifetime, and the
+// provenance snapshot carried with one recorded Draw from Draw-record time
+// to submission.
+struct FadeControlTrackerCapacityDiagnostics {
+  bool descriptor_slot_loss = false;
+  bool mapped_buffer_loss = false;
+  bool layout_map_loss = false;
+  bool descriptor_range_truncated = false;
+
+  friend bool operator==(const FadeControlTrackerCapacityDiagnostics&,
+      const FadeControlTrackerCapacityDiagnostics&) = default;
+};
+
+constexpr void MergeFadeControlTrackerCapacity(
+    FadeControlTrackerCapacityDiagnostics& target,
+    const FadeControlTrackerCapacityDiagnostics& source) noexcept {
+  target.descriptor_slot_loss |= source.descriptor_slot_loss;
+  target.mapped_buffer_loss |= source.mapped_buffer_loss;
+  target.layout_map_loss |= source.layout_map_loss;
+  target.descriptor_range_truncated |= source.descriptor_range_truncated;
+}
+
+constexpr bool FadeControlTrackerCapacityHasLoss(
+    const FadeControlTrackerCapacityDiagnostics& diagnostics) noexcept {
+  return diagnostics.descriptor_slot_loss || diagnostics.mapped_buffer_loss ||
+      diagnostics.layout_map_loss || diagnostics.descriptor_range_truncated;
+}
+
+// Capture-scoped view of tracker loss. Start clears only what a capture
+// reports, never the runtime taint, so evidence recorded before the capture
+// began still carries its own provenance. Admit ORs in the provenance of one
+// Draw the session admitted. Stop freezes the result, so a tracker failure
+// after Stop cannot change an exported capture.
+class FadeControlTrackerCapacityAccumulator {
+ public:
+  void Start();
+  void Admit(const FadeControlTrackerCapacityDiagnostics& provenance);
+  FadeControlTrackerCapacityDiagnostics Stop();
+
+  bool active() const noexcept { return active_; }
+  const FadeControlTrackerCapacityDiagnostics& active_diagnostics()
+      const noexcept {
+    return active_diagnostics_;
+  }
+  const FadeControlTrackerCapacityDiagnostics& last_result() const noexcept {
+    return last_result_;
+  }
+
+ private:
+  bool active_ = false;
+  FadeControlTrackerCapacityDiagnostics active_diagnostics_;
+  FadeControlTrackerCapacityDiagnostics last_result_;
+};
+
 class FadeControlAccumulator {
  public:
   void Start(std::uint64_t session_id);
