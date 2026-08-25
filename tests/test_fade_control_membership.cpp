@@ -108,9 +108,6 @@ FadeControlTrackerCapacityDiagnostics ComposeRecordTimeTaint(
   return taint;
 }
 
-// One command list's recording, mirroring the parts of CommandListTrace this
-// test exercises: the staged Draws plus the last Manual Capture session that
-// admitted their Fade evidence. Reset() starts a new recording.
 struct CommandListRecordingSim {
   std::vector<RecordedDrawSim> draws;
   std::uint64_t fade_admitted_manual_session = 0;
@@ -127,10 +124,6 @@ CommandListRecordingSim Recording(std::vector<RecordedDrawSim> draws) {
   return recording;
 }
 
-// Mirrors OnManualCaptureExecute's control flow: determine the live manual
-// capture session once, accumulate Manual Capture commands/submissions on
-// every submission, and admit this recording's staged Fade evidence at most
-// once per session -- or neither if the session isn't live at submission time.
 void SimulateExecuteCommandList(const ManualCaptureSessionToken& token,
     ManualCaptureAccumulator& manual, FadeControlAccumulator& fade,
     FadeControlSnapshotAccumulator& fade_snapshots,
@@ -151,8 +144,6 @@ void SimulateExecuteCommandList(const ManualCaptureSessionToken& token,
   }
 }
 
-// Submits a distinct, freshly recorded command list. Tests that resubmit one
-// recording pass a named CommandListRecordingSim instead.
 void SimulateExecuteCommandList(const ManualCaptureSessionToken& token,
     ManualCaptureAccumulator& manual, FadeControlAccumulator& fade,
     FadeControlSnapshotAccumulator& fade_snapshots,
@@ -263,9 +254,6 @@ int main() {
     CHECK(fade_result.records.size() == 1);
   }
 
-  // 4. The same command list submitted twice contributes consistently to
-  // both accumulators -- deferring the commit to submission time must not
-  // silently drop or dedup repeat submissions.
   {
     ManualCaptureSessionToken token;
     ManualCaptureAccumulator manual;
@@ -293,9 +281,7 @@ int main() {
     const auto manual_result = manual.Stop(1);
     const auto fade_result = fade.Stop();
     CHECK(manual_result.records.size() == 1);
-    // Manual Capture counts every submission...
     CHECK(manual_result.records[0].second.submissions == 2);
-    // ...while the one recording-time Fade sample is admitted once.
     CHECK(fade_result.records.size() == 1);
     CHECK(fade_result.records[0].second.stats.draw_observations == 1);
     CHECK(fade_result.records[0].second.stats.available_observations == 1);
@@ -690,10 +676,6 @@ int main() {
     CHECK(fade_diagnostics.Stop().resource_lifecycle_loss);
   }
 
-  // 14. One recording, two capture sessions: admitted once in each. The
-  // admission mark is per session, not a one-shot latch, and the pending
-  // evidence is never cleared, so an un-reset command list still contributes
-  // to a later session.
   {
     ManualCaptureSessionToken token;
     ManualCaptureAccumulator manual;
@@ -737,8 +719,6 @@ int main() {
     CHECK(second_session.records[0].second.stats.draw_observations == 1);
   }
 
-  // 15. A submission while no session is live must not consume the admission
-  // a later live session is entitled to.
   {
     ManualCaptureSessionToken token;
     ManualCaptureAccumulator manual;
@@ -752,7 +732,6 @@ int main() {
     draw.pending_observations = {{MakeFadeKey(1), Available(1.0f)}};
     auto recording = Recording({draw});
 
-    // Submitted with no session at all, then with a stopped one.
     SimulateExecuteCommandList(
         token, manual, fade, fade_snapshots, fade_diagnostics, recording);
     token.Start(1);
@@ -773,8 +752,6 @@ int main() {
     CHECK(result.records[0].second.stats.draw_observations == 1);
   }
 
-  // 16. Reset() starts a new recording: the freshly staged evidence is
-  // admissible again inside the very same session.
   {
     ManualCaptureSessionToken token;
     ManualCaptureAccumulator manual;
@@ -810,9 +787,6 @@ int main() {
     CHECK(result.records[0].second.stats.draw_observations == 2);
   }
 
-  // 17. Tracker provenance rides the same once-per-session boundary: a
-  // resubmission neither re-admits the sample nor re-applies its taint, and a
-  // later session picks both up again.
   {
     ManualCaptureSessionToken token;
     ManualCaptureAccumulator manual;
