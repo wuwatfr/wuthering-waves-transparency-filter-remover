@@ -27,6 +27,8 @@
   evidence.
 - Classify Fade-control push constants by exact shader register instead of
   reading a root-constant DWORD count as a register span.
+- Stop counting non-target pixel shaders as failed replacements in
+  `replacements_failed_total`.
 
 ### Internal
 
