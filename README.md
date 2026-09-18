@@ -2,7 +2,14 @@
 
 WuwaTFR is a ReShade add-on for Wuthering Waves (DirectX 12) that removes the
 Transparency Filter applied to playable characters when the camera gets too
-close.
+close. It needs no XXMI/WWMI, no 3DMigoto, and no per-character mod files.
+
+## Video Demo
+
+[![WuwaTFR: removing the Transparency Filter in Wuthering Waves (v1.1 demo)](https://img.youtube.com/vi/S5iVoR3A9pI/maxresdefault.jpg)](https://www.youtube.com/watch?v=S5iVoR3A9pI)
+
+Watch the demo on YouTube:
+<https://www.youtube.com/watch?v=S5iVoR3A9pI>
 
 ## Important Notice
 
@@ -70,6 +77,51 @@ WuwaTFR section.
 
 The setting can be changed at runtime without restarting the game. Its value
 is stored in `WuwaTFR.ini` as `EnableTFR`.
+
+## FAQ
+
+### Does it work in the DirectX 12 version of the game?
+
+Yes. WuwaTFR only works in DX12 mode, and DLSS and ray tracing are supported
+under DX12. It ignores devices that are not DirectX 12 and does nothing there.
+
+### Do I need XXMI, WWMI, or 3DMigoto?
+
+No. WuwaTFR is a ReShade add-on. It does not use 3DMigoto/WWMI, does not
+need mod `.ini` files, and does not require a model-importer launcher.
+Running it together with XXMI has not been tested.
+
+### Do I need a separate file for each character?
+
+No. Detection is structural: the add-on inspects each pixel shader's compiled
+code for the Transparency Filter pattern instead of matching a list of shader
+hashes or characters. New characters, forms, skills, and animation states whose
+shaders carry the same pattern are handled automatically, including pipeline
+states created after the game has started.
+
+### Does it break on every game update?
+
+Not by design. Because there is no hash or character allowlist, an update that
+leaves the shader structure unchanged needs no new release. If an update
+changes the structure so that a shader no longer matches, WuwaTFR fails
+closed: that shader keeps the game's original rendering, and nothing is
+patched speculatively.
+
+### Does it change anything besides the Transparency Filter?
+
+The patch is narrowly scoped to the validated camera-proximity fade
+component; unrelated fade inputs in the same shader are preserved.
+
+### Can I turn it off without restarting the game?
+
+Yes. The **Remove Transparency Filter** toggle in the ReShade overlay switches
+between the game's original pipeline states and the replacement states
+immediately. See [Usage](#usage).
+
+### Is it safe to use with the game's anti-cheat?
+
+Unknown. WuwaTFR modifies rendering at runtime through ReShade. Read the
+[Important Notice](#important-notice) and use it at your own risk.
 
 ## Optional Memory Telemetry
 
